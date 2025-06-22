@@ -6,27 +6,23 @@ import os
 import json
 from dotenv import load_dotenv
 
-# Carica variabili .env
 load_dotenv()
 
-# API
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Configurazione bot
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "ADAUSDT", "XRPUSDT"]
 RSI_PERIOD = 14
 EMA_PERIOD = 50
 TAKE_PROFIT = 1.07
 STOP_LOSS = 0.97
 TRADE_AMOUNT_USDT = 5
-BASE_URL = "https://api.bybit.com"
 
+BASE_URL = "https://api.bybit.com"
 positions = {}
 
-# Telegram notifier
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     data = {"chat_id": TG_CHAT_ID, "text": message}
@@ -35,12 +31,10 @@ def send_telegram(message):
     except Exception as e:
         print(f"Errore Telegram: {e}")
 
-# Firma richiesta per autenticazione API
 def sign_request(params):
     param_str = "&".join([f"{key}={params[key]}" for key in sorted(params)])
     return hmac.new(API_SECRET.encode("utf-8"), param_str.encode("utf-8"), hashlib.sha256).hexdigest()
 
-# Calcolo RSI
 def calculate_rsi(prices):
     gains, losses = [], []
     for i in range(1, len(prices)):
@@ -54,7 +48,6 @@ def calculate_rsi(prices):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-# Calcolo EMA
 def calculate_ema(prices, period):
     k = 2 / (period + 1)
     ema = prices[0]
@@ -62,7 +55,6 @@ def calculate_ema(prices, period):
         ema = price * k + ema * (1 - k)
     return ema
 
-# Dati di mercato
 def get_klines(symbol):
     endpoint = f"/v5/market/kline"
     url = BASE_URL + endpoint
@@ -78,7 +70,6 @@ def get_klines(symbol):
         return [float(x[4]) for x in data["result"]["list"]], [float(x[5]) for x in data["result"]["list"]]
     return [], []
 
-# Invio ordine a mercato
 def place_order(symbol, side, qty):
     endpoint = "/v5/order/create"
     url = BASE_URL + endpoint
@@ -99,7 +90,9 @@ def place_order(symbol, side, qty):
     response = requests.post(url, data=json.dumps(body), headers=headers)
     return response.json()
 
-# Ciclo principale
+# Avvia il bot
+send_telegram("🤖 Bot avviato con successo su Render.")
+
 while True:
     for symbol in SYMBOLS:
         try:
@@ -116,14 +109,12 @@ while True:
 
             has_position = symbol in positions
 
-            # Condizione acquisto
             if rsi > 50 and rsi < 65 and price > ema and recent_vol > avg_vol * 1.1 and not has_position:
                 qty = round(TRADE_AMOUNT_USDT / price, 5)
                 result = place_order(symbol, "Buy", qty)
                 positions[symbol] = {"entry": price, "qty": qty}
                 send_telegram(f"✅ ACQUISTO {symbol} a {price:.2f} (qty: {qty})")
 
-            # Condizione vendita
             if has_position:
                 entry = positions[symbol]["entry"]
                 qty = positions[symbol]["qty"]
