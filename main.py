@@ -20,7 +20,7 @@ TAKE_PROFIT = 1.07
 STOP_LOSS = 0.97
 TRADE_AMOUNT_USDT = 5
 
-BASE_URL = "https://api.bytick.com"
+BASE_URL = "https://api.bytick.com"  # alternativo a bybit.com
 positions = {}
 
 def send_telegram(message):
@@ -29,7 +29,7 @@ def send_telegram(message):
     try:
         requests.post(url, data=data)
     except Exception as e:
-        print(f"Errore Telegram: {e}")
+        print(f"[Telegram] Errore invio messaggio: {e}")
 
 def sign_request(params):
     param_str = "&".join([f"{key}={params[key]}" for key in sorted(params)])
@@ -64,25 +64,18 @@ def get_klines(symbol):
         "interval": "15",
         "limit": 100
     }
-
     try:
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()  # solleva eccezione per errori HTTP
-
+        response = requests.get(url, params=params)
         data = response.json()
         if "result" in data and "list" in data["result"]:
-            return [float(x[4]) for x in data["result"]["list"]], [float(x[5]) for x in data["result"]["list"]]
+            closes = [float(x[4]) for x in data["result"]["list"]]
+            volumes = [float(x[5]) for x in data["result"]["list"]]
+            return closes, volumes
         else:
-            print(f"[⚠️ {symbol}] Risposta JSON inattesa: {data}")
-            return [], []
-
-    except requests.exceptions.RequestException as e:
-        print(f"[⚠️ {symbol}] Errore HTTP: {e}")
-        return [], []
-
-    except ValueError:
-        print(f"[⚠️ {symbol}] Errore parsing JSON (possibile HTML 403)")
-        return [], []
+            print(f"[{symbol}] Nessun risultato valido nei dati ricevuti.")
+    except Exception as e:
+        print(f"[{symbol}] Errore durante richiesta dati: {e}")
+    return [], []
 
 def place_order(symbol, side, qty):
     endpoint = "/v5/order/create"
@@ -101,9 +94,14 @@ def place_order(symbol, side, qty):
     sign = sign_request(body)
     body["sign"] = sign
     headers = {"Content-Type": "application/json"}
-    response = requests.post(url, data=json.dumps(body), headers=headers)
-    return response.json()
+    try:
+        response = requests.post(url, data=json.dumps(body), headers=headers)
+        return response.json()
+    except Exception as e:
+        print(f"[{symbol}] Errore invio ordine: {e}")
+        return {}
 
+# Ciclo principale del bot
 while True:
     for symbol in SYMBOLS:
         try:
@@ -119,7 +117,7 @@ while True:
 
             has_position = symbol in positions
 
-            if rsi > 50 and rsi < 65 and price > ema and recent_vol > avg_vol * 1.1 and not has_position:
+            if 50 < rsi < 65 and price > ema and recent_vol > avg_vol * 1.1 and not has_position:
                 qty = round(TRADE_AMOUNT_USDT / price, 5)
                 result = place_order(symbol, "Buy", qty)
                 positions[symbol] = {"entry": price, "qty": qty}
@@ -134,6 +132,7 @@ while True:
                     del positions[symbol]
 
         except Exception as e:
+            # NON inviare più su Telegram
             print(f"[⚠️ {symbol}] Errore generale: {e}")
 
     time.sleep(60)
