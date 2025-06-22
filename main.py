@@ -15,18 +15,6 @@ API_SECRET = os.getenv("BYBIT_API_SECRET")
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-send_telegram("🤖 Bot avviato con successo su Render.")
-
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "ADAUSDT", "XRPUSDT"]
-RSI_PERIOD = 14
-EMA_PERIOD = 50
-TAKE_PROFIT = 1.07
-STOP_LOSS = 0.97
-TRADE_AMOUNT_USDT = 5
-
-BASE_URL = "https://api.bybit.com"
-positions = {}
-
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     data = {"chat_id": TG_CHAT_ID, "text": message}
@@ -34,6 +22,9 @@ def send_telegram(message):
         requests.post(url, data=data)
     except Exception as e:
         print(f"Errore Telegram: {e}")
+
+send_telegram("🤖 Bot avviato con successo su Render.")
+
 
 def sign_request(params):
     param_str = "&".join([f"{key}={params[key]}" for key in sorted(params)])
