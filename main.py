@@ -65,9 +65,16 @@ def get_klines(symbol):
         "limit": 100
     }
     response = requests.get(url, params=params)
-    data = response.json()
+    try:
+        data = response.json()
+    except Exception as e:
+        send_telegram(f"❌ Errore parsing JSON per {symbol}: {e}\nRisposta: {response.text}")
+        return [], []
+
     if "result" in data and "list" in data["result"]:
         return [float(x[4]) for x in data["result"]["list"]], [float(x[5]) for x in data["result"]["list"]]
+
+    send_telegram(f"⚠️ Nessun dato valido per {symbol}.\nRisposta: {data}")
     return [], []
 
 def place_order(symbol, side, qty):
@@ -89,9 +96,6 @@ def place_order(symbol, side, qty):
     headers = {"Content-Type": "application/json"}
     response = requests.post(url, data=json.dumps(body), headers=headers)
     return response.json()
-
-# Notifica di avvio (rimossa se non necessaria)
-# send_telegram("🤖 Bot avviato con successo su Render.")
 
 while True:
     for symbol in SYMBOLS:
