@@ -90,13 +90,12 @@ def place_order(symbol, side, qty):
     response = requests.post(url, data=json.dumps(body), headers=headers)
     return response.json()
 
-# Avvia il bot
-send_telegram("🤖 Bot avviato con successo su Render.")
+# Notifica di avvio (rimossa se non necessaria)
+# send_telegram("🤖 Bot avviato con successo su Render.")
 
 while True:
     for symbol in SYMBOLS:
         try:
-            print(f"[{time.strftime('%H:%M:%S')}] Controllo {symbol}")
             closes, volumes = get_klines(symbol)
             if len(closes) < EMA_PERIOD:
                 continue
@@ -124,6 +123,6 @@ while True:
                     del positions[symbol]
 
         except Exception as e:
-            print(f"Errore su {symbol}: {e}")
+            send_telegram(f"⚠️ Errore su {symbol}: {e}")
 
     time.sleep(60)
