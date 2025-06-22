@@ -56,7 +56,7 @@ def calculate_ema(prices, period):
     return ema
 
 def get_klines(symbol):
-    endpoint = f"/v5/market/kline"
+    endpoint = "/v5/market/kline"
     url = BASE_URL + endpoint
     params = {
         "category": "linear",
@@ -64,18 +64,25 @@ def get_klines(symbol):
         "interval": "15",
         "limit": 100
     }
-    response = requests.get(url, params=params)
+
     try:
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()  # solleva eccezione per errori HTTP
+
         data = response.json()
-    except Exception as e:
-        send_telegram(f"❌ Errore parsing JSON per {symbol}: {e}\nRisposta: {response.text}")
+        if "result" in data and "list" in data["result"]:
+            return [float(x[4]) for x in data["result"]["list"]], [float(x[5]) for x in data["result"]["list"]]
+        else:
+            print(f"[⚠️ {symbol}] Risposta JSON inattesa: {data}")
+            return [], []
+
+    except requests.exceptions.RequestException as e:
+        print(f"[⚠️ {symbol}] Errore HTTP: {e}")
         return [], []
 
-    if "result" in data and "list" in data["result"]:
-        return [float(x[4]) for x in data["result"]["list"]], [float(x[5]) for x in data["result"]["list"]]
-
-    send_telegram(f"⚠️ Nessun dato valido per {symbol}.\nRisposta: {data}")
-    return [], []
+    except ValueError:
+        print(f"[⚠️ {symbol}] Errore parsing JSON (possibile HTML 403)")
+        return [], []
 
 def place_order(symbol, side, qty):
     endpoint = "/v5/order/create"
@@ -127,6 +134,6 @@ while True:
                     del positions[symbol]
 
         except Exception as e:
-            send_telegram(f"⚠️ Errore su {symbol}: {e}")
+            print(f"[⚠️ {symbol}] Errore generale: {e}")
 
     time.sleep(60)
