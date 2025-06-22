@@ -8,10 +8,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+print("🤖 Bot avviato correttamente - inizio esecuzione.")
+
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+send_telegram("🤖 Bot avviato con successo su Render.")
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "ADAUSDT", "XRPUSDT"]
 RSI_PERIOD = 14
