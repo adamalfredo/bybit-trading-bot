@@ -20,7 +20,7 @@ TAKE_PROFIT = 1.07
 STOP_LOSS = 0.97
 TRADE_AMOUNT_USDT = 5
 
-BASE_URL = "https://api.bybit.com"
+BASE_URL = "https://api.bytick.com"
 positions = {}
 
 def send_telegram(message):
