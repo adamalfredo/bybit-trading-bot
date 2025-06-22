@@ -128,4 +128,3 @@ while True:
             print(f"Errore su {symbol}: {e}")
 
     time.sleep(60)
-# placeholder: verrà aggiunto dopo
