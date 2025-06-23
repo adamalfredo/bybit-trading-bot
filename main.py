@@ -34,17 +34,13 @@ def notify_telegram(message):
 def get_timestamp():
     return str(int(time.time() * 1000))
 
-
-def sign_json(secret, json_str: str) -> str:
-    return hmac.new(
-        secret.encode("utf-8"),
-        json_str.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-
+def sign_v5(secret, api_key, timestamp, recv_window, json_body):
+    string_to_sign = f"{api_key}{timestamp}{recv_window}{json_body}"
+    return hmac.new(secret.encode(), string_to_sign.encode(), hashlib.sha256).hexdigest()
 
 def place_order(symbol, side, qty):
     timestamp = get_timestamp()
+    recv_window = "5000"
 
     body = {
         "category": "spot",
@@ -56,14 +52,14 @@ def place_order(symbol, side, qty):
         "timestamp": timestamp
     }
 
-    # Questo è ciò che va firmato
     json_body = json.dumps(body, separators=(",", ":"))
-    signature = sign_json(API_SECRET, json_body)
+
+    signature = sign_v5(API_SECRET, API_KEY, timestamp, recv_window, json_body)
 
     headers = {
         "X-BAPI-API-KEY": API_KEY,
         "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-RECV-WINDOW": recv_window,
         "X-BAPI-SIGN": signature,
         "Content-Type": "application/json"
     }
@@ -81,6 +77,7 @@ def place_order(symbol, side, qty):
         log(f"Errore richiesta ordine: {e}")
         notify_telegram(f"Errore ordine: {e}")
         return None
+
 
 
 if __name__ == "__main__":
