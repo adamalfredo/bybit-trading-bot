@@ -54,7 +54,7 @@ def place_order(symbol, side, qty):
 
     log(f"[DEBUG] Stringa per la firma: {API_KEY}{timestamp}{recv_window}{json_body}")
 
-    signature = sign_v5(API_SECRET, API_KEY, timestamp, recv_window, json_body)
+    signature = sign_v5(API_SECRET, API_KEY, timestamp, recv_window, json.dumps(body, separators=(",", ":")))
 
     headers = {
         "X-BAPI-API-KEY": API_KEY,
@@ -68,7 +68,7 @@ def place_order(symbol, side, qty):
     log(f"[DEBUG] Corpo JSON (usato anche per sign): {json_body}")
 
     try:
-        response = requests.post(BASE_URL + ORDER_ENDPOINT, headers=headers, data=json_body, timeout=10)
+        response = requests.post(BASE_URL + ORDER_ENDPOINT, headers=headers, json=body, timeout=10)
         result = response.json()
         log(f"Test ordine risultato: {result}")
         notify_telegram(f"[TEST] Risposta ordine: {result}")
