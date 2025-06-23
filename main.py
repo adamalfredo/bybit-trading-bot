@@ -7,7 +7,7 @@ import json
 from dotenv import load_dotenv
 from datetime import datetime
 
-# Carica variabili da Railway (usa .env solo in locale)
+# Carica variabili ambiente (Railway o locale)
 load_dotenv()
 
 API_KEY = os.getenv("BYBIT_API_KEY")
@@ -21,7 +21,7 @@ EMA_PERIOD = 50
 TAKE_PROFIT = 1.07
 STOP_LOSS = 0.97
 TRADE_AMOUNT_USDT = 5
-BASE_URL = "https://api.bybit.com"
+BASE_URL = "https://api.bytick.com"
 
 positions = {}
 DEBUG = True
@@ -29,6 +29,13 @@ DEBUG = True
 def log(msg):
     if DEBUG:
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+
+def get_public_ip():
+    try:
+        ip = requests.get("https://api.ipify.org").text
+        log(f"[DEBUG] IP pubblico del container: {ip}")
+    except Exception as e:
+        log(f"[ERRORE] Impossibile ottenere l'IP pubblico: {e}")
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
@@ -48,52 +55,10 @@ def sign_request(params):
     ).hexdigest()
     return signature
 
-def calculate_rsi(prices):
-    gains, losses = [], []
-    for i in range(1, len(prices)):
-        delta = prices[i] - prices[i - 1]
-        gains.append(max(0, delta))
-        losses.append(max(0, -delta))
-    avg_gain = sum(gains[-RSI_PERIOD:]) / RSI_PERIOD
-    avg_loss = sum(losses[-RSI_PERIOD:]) / RSI_PERIOD
-    if avg_loss == 0:
-        return 100
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-def calculate_ema(prices, period):
-    k = 2 / (period + 1)
-    ema = prices[0]
-    for price in prices[1:]:
-        ema = price * k + ema * (1 - k)
-    return ema
-
-def get_klines(symbol):
-    url = BASE_URL + "/v5/market/kline"
-    params = {
-        "category": "linear",
-        "symbol": symbol,
-        "interval": "15",
-        "limit": 100
-    }
-    try:
-        response = requests.get(url, params=params)
-        data = response.json()
-        if "result" in data and "list" in data["result"]:
-            closes = [float(x[4]) for x in data["result"]["list"]]
-            volumes = [float(x[5]) for x in data["result"]["list"]]
-            return closes, volumes
-        else:
-            log(f"[{symbol}] Dati non validi: {data}")
-    except Exception as e:
-        log(f"[{symbol}] Errore richiesta dati: {e}")
-    return [], []
-
 def place_order(symbol, side, qty):
     timestamp = str(int(time.time() * 1000))
-    url = BASE_URL + "/v5/order/create"
-    
     body = {
+        "apiKey": API_KEY,
         "category": "spot",
         "symbol": symbol,
         "side": side,
@@ -103,32 +68,21 @@ def place_order(symbol, side, qty):
         "timestamp": timestamp
     }
 
-    # Firma dei parametri
-    sign_body = {
-        **body,
-        "apiKey": API_KEY
-    }
-    sign = sign_request(sign_body)
+    log(f"[DEBUG] Parametri ordine: apiKey={API_KEY}, apiSecret={(API_SECRET[:4] + '***') if API_SECRET else 'None'}")
 
-    payload = {
-        **body,
-        "apiKey": API_KEY,
-        "sign": sign
-    }
+    body["sign"] = sign_request(body)
 
-    log(f"[DEBUG] Parametri inviati: {json.dumps(payload, indent=2)}")
-
-    headers = {"Content-Type": "application/json"}
+    url = BASE_URL + "/v5/order/create"
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
     try:
-        response = requests.post(url, json=payload, headers=headers)
+        encoded = "&".join(f"{k}={v}" for k, v in body.items())
+        response = requests.post(url, data=encoded, headers=headers)
         return response.json()
     except Exception as e:
         log(f"[{symbol}] Errore ordine: {e}")
         return {}
 
-
-# Test ordine una volta all'avvio
 def test_order():
     test_symbol = "BTCUSDT"
     test_price = 102600
@@ -140,41 +94,6 @@ def test_order():
 
 if __name__ == "__main__":
     log(f"API_KEY loaded: {bool(API_KEY)}, API_SECRET loaded: {bool(API_SECRET)}")
-    log("🟢 Avvio bot e test ordine iniziale")
+    get_public_ip()
+    log("\U0001F7E2 Avvio bot e test ordine iniziale")
     test_order()
-
-    while True:
-        for symbol in SYMBOLS:
-            try:
-                closes, volumes = get_klines(symbol)
-                if len(closes) < EMA_PERIOD:
-                    continue
-
-                rsi = calculate_rsi(closes)
-                ema = calculate_ema(closes, EMA_PERIOD)
-                price = closes[-1]
-                avg_vol = sum(volumes[-20:]) / 20
-                recent_vol = sum(volumes[-3:]) / 3
-                has_position = symbol in positions
-
-                if 50 < rsi < 65 and price > ema and recent_vol > avg_vol * 1.1:
-                    if not has_position or positions[symbol]["entry"] != price:
-                        qty = round(TRADE_AMOUNT_USDT / price, 5)
-                        result = place_order(symbol, "Buy", qty)
-                        positions[symbol] = {"entry": price, "qty": qty}
-                        send_telegram(f"✅ ACQUISTO {symbol} a {price:.2f} (qty: {qty})")
-                        log(f"ACQUISTO {symbol}: prezzo={price:.2f} qty={qty}")
-
-                if has_position:
-                    entry = positions[symbol]["entry"]
-                    qty = positions[symbol]["qty"]
-                    if price >= entry * TAKE_PROFIT or price <= entry * STOP_LOSS or price < ema:
-                        result = place_order(symbol, "Sell", qty)
-                        send_telegram(f"❌ VENDITA {symbol} a {price:.2f} (qty: {qty})")
-                        log(f"VENDITA {symbol}: prezzo={price:.2f} qty={qty}")
-                        del positions[symbol]
-
-            except Exception as e:
-                log(f"[⚠️ {symbol}] Errore: {e}")
-
-        time.sleep(60)
