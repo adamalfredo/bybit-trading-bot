@@ -2,12 +2,14 @@ import os
 import time
 import requests
 import yfinance as yf
-import numpy as np
 import pandas as pd
+import numpy as np
 from dotenv import load_dotenv
-import ta
+from ta.volatility import BollingerBands
+from ta.trend import SMAIndicator
+from ta.momentum import RSIIndicator
 
-# Carica le variabili di ambiente
+# Carica variabili da .env
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -37,62 +39,61 @@ def analyze_asset(symbol):
     try:
         df = yf.download(tickers=symbol, period="7d", interval="15m", progress=False)
 
-        if df is None or len(df) < 50:
-            return None
+        if df is None or df.empty or len(df) < 50:
+            raise ValueError("Dati insufficienti")
 
         df.dropna(inplace=True)
 
-        df['sma_20'] = ta.trend.sma_indicator(df['Close'], window=20)
-        df['sma_50'] = ta.trend.sma_indicator(df['Close'], window=50)
-        bb = ta.volatility.BollingerBands(df['Close'], window=20)
-        df['bb_upper'] = bb.bollinger_hband()
-        df['bb_lower'] = bb.bollinger_lband()
-        df['rsi'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
+        df["sma_20"] = SMAIndicator(close=df["Close"], window=20).sma_indicator()
+        df["sma_50"] = SMAIndicator(close=df["Close"], window=50).sma_indicator()
+        bb = BollingerBands(close=df["Close"], window=20, window_dev=2)
+        df["bb_upper"] = bb.bollinger_hband()
+        df["bb_lower"] = bb.bollinger_lband()
+        df["rsi"] = RSIIndicator(close=df["Close"], window=14).rsi()
 
         last = df.iloc[-1]
         prev = df.iloc[-2]
 
-        last_price = last['Close']
-        last_rsi = last['rsi']
+        signals = []
 
-        # Breakout Bollinger con RSI non troppo alto
-        if last_price > last['bb_upper'] and last_rsi < 70:
-            return {
+        # Segnale breakout rialzista
+        if last["Close"] > last["bb_upper"] and last["rsi"] < 70:
+            signals.append({
                 "type": "entry",
                 "symbol": symbol.replace("-USD", "USDT"),
-                "price": round(last_price, 2),
+                "price": round(last["Close"], 2),
                 "strategy": "Breakout Volatilità"
-            }
+            })
 
-        # Golden Cross
-        if prev['sma_20'] < prev['sma_50'] and last['sma_20'] > last['sma_50']:
-            return {
+        # Segnale incrocio golden cross
+        if prev["sma_20"] < prev["sma_50"] and last["sma_20"] > last["sma_50"]:
+            signals.append({
                 "type": "entry",
                 "symbol": symbol.replace("-USD", "USDT"),
-                "price": round(last_price, 2),
+                "price": round(last["Close"], 2),
                 "strategy": "Golden Cross"
-            }
+            })
 
-        # Uscita - take profit su breakdown e RSI in calo
-        if last_price < last['bb_lower'] and last_rsi > 30:
-            return {
+        # Segnale di uscita
+        if last["Close"] < last["bb_lower"] and last["rsi"] > 30:
+            signals.append({
                 "type": "exit",
                 "symbol": symbol.replace("-USD", "USDT"),
-                "price": round(last_price, 2),
-                "strategy": "Breakdown + RSI"
-            }
+                "price": round(last["Close"], 2),
+                "strategy": "Take Profit / Breakdown"
+            })
 
-        return None
+        return signals
 
     except Exception as e:
         log(f"Errore analisi {symbol}: {e}")
-        return None
+        return []
 
 
 def scan_assets():
     for asset in ASSET_LIST:
-        signal = analyze_asset(asset)
-        if signal:
+        signals = analyze_asset(asset)
+        for signal in signals:
             tipo = "📈 Segnale di ENTRATA" if signal["type"] == "entry" else "📉 Segnale di USCITA"
             msg = f"""{tipo}
 Asset: {signal['symbol']}
