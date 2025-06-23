@@ -1,85 +1,108 @@
 import os
 import time
 import requests
-import json
 import yfinance as yf
 import talib
-import pandas as pd
+import numpy as np
+from dotenv import load_dotenv
+
+# Carica variabili da .env
+load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-SYMBOLS = ["BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD"]
-SENT_SIGNALS_FILE = "sent_signals.json"  # per evitare duplicati
+ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "MATIC-USD", "DOGE-USD"]
+INTERVAL_MINUTES = 15
+
 
 def log(msg):
     timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
     print(f"{timestamp} {msg}")
 
-def notify_telegram(message):
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-        try:
-            requests.post(url, data=data, timeout=10)
-        except Exception as e:
-            log(f"Errore invio Telegram: {e}")
 
-def fetch_data(symbol):
-    data = yf.download(tickers=symbol, period="7d", interval="1h")
-    return data
-
-def generate_signal(df):
-    df["MA_Short"] = talib.SMA(df["Close"], timeperiod=9)
-    df["MA_Long"] = talib.SMA(df["Close"], timeperiod=21)
-    df["Signal"] = 0
-    df.loc[df["MA_Short"] > df["MA_Long"], "Signal"] = 1
-    df.loc[df["MA_Short"] < df["MA_Long"], "Signal"] = -1
-    return df
-
-def get_new_signal(df):
-    if df["Signal"].iloc[-1] == 1 and df["Signal"].iloc[-2] <= 0:
-        return "BUY"
-    elif df["Signal"].iloc[-1] == -1 and df["Signal"].iloc[-2] >= 0:
-        return "SELL"
-    return None
-
-def load_sent_signals():
+def notify_telegram(message: str):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
     try:
-        with open(SENT_SIGNALS_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {}
+        requests.post(url, data=data, timeout=10)
+    except Exception as e:
+        log(f"Errore Telegram: {e}")
 
-def save_sent_signals(signals):
-    with open(SENT_SIGNALS_FILE, "w") as f:
-        json.dump(signals, f)
 
-def main():
-    sent = load_sent_signals()
+def analyze_asset(symbol):
+    try:
+        data = yf.download(tickers=symbol, period="7d", interval="15m", progress=False)
 
-    for symbol in SYMBOLS:
-        df = fetch_data(symbol)
-        if df is None or df.empty:
-            continue
+        if len(data) < 50:
+            return None
 
-        df = generate_signal(df)
-        signal = get_new_signal(df)
-        if not signal:
-            continue
+        close = data["Close"].values
+        high = data["High"].values
+        low = data["Low"].values
 
-        price = round(df["Close"].iloc[-1], 2)
-        msg_id = f"{symbol}_{df.index[-1].isoformat()}_{signal}"
+        sma_20 = talib.SMA(close, timeperiod=20)
+        sma_50 = talib.SMA(close, timeperiod=50)
+        upper, middle, lower = talib.BBANDS(close, timeperiod=20)
+        rsi = talib.RSI(close, timeperiod=14)
 
-        if msg_id not in sent:
-            emoji = "📈" if signal == "BUY" else "📉"
-            message = f"{emoji} Segnale di {'ENTRATA' if signal == 'BUY' else 'USCITA'}\nAsset: {symbol}\nPrezzo: {price}\nStrategia: Cross MA"
-            notify_telegram(message)
-            sent[msg_id] = True
-            log(f"Segnale inviato: {message}")
+        last_price = close[-1]
+        last_rsi = rsi[-1] if not np.isnan(rsi[-1]) else 50
 
-    save_sent_signals(sent)
+        # Segnale breakout rialzista
+        if last_price > upper[-1] and last_rsi < 70:
+            return {
+                "type": "entry",
+                "symbol": symbol.replace("-USD", "USDT"),
+                "price": round(last_price, 2),
+                "strategy": "Breakout Volatilità"
+            }
+
+        # Segnale incrocio medie mobili
+        if sma_20[-2] < sma_50[-2] and sma_20[-1] > sma_50[-1]:
+            return {
+                "type": "entry",
+                "symbol": symbol.replace("-USD", "USDT"),
+                "price": round(last_price, 2),
+                "strategy": "Golden Cross"
+            }
+
+        # Segnale di uscita
+        if last_price < lower[-1] and last_rsi > 30:
+            return {
+                "type": "exit",
+                "symbol": symbol.replace("-USD", "USDT"),
+                "price": round(last_price, 2),
+                "strategy": "Take Profit / Breakdown"
+            }
+
+        return None
+
+    except Exception as e:
+        log(f"Errore analisi {symbol}: {e}")
+        return None
+
+
+def scan_assets():
+    for asset in ASSET_LIST:
+        signal = analyze_asset(asset)
+        if signal:
+            tipo = "📈 Segnale di ENTRATA" if signal["type"] == "entry" else "📉 Segnale di USCITA"
+            msg = f"""{tipo}
+Asset: {signal['symbol']}
+Prezzo: {signal['price']}
+Strategia: {signal['strategy']}"""
+            log(msg.replace("\n", " | "))
+            notify_telegram(msg)
+
 
 if __name__ == "__main__":
-    log("🔍 Avvio analisi tecnica e invio segnali Telegram")
-    main()
+    log("🔄 Avvio sistema di monitoraggio segnali reali")
+    while True:
+        try:
+            scan_assets()
+        except Exception as e:
+            log(f"Errore nel ciclo principale: {e}")
+        time.sleep(INTERVAL_MINUTES * 60)
