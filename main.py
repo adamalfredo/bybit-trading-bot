@@ -15,7 +15,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "MATIC-USD", "DOGE-USD"]
+ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "DOGE-USD"]  # Rimosso MATIC-USD
 INTERVAL_MINUTES = 15
 
 def log(msg):
@@ -55,7 +55,7 @@ def analyze_asset(symbol):
         last_price = close.iloc[-1]
         last_rsi = rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50
 
-        # Allineamento degli indici per confronto
+        # Allineamento indici per confronto
         s20, s50 = sma_20.align(sma_50, join="inner")
 
         # Golden Cross
