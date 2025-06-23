@@ -5,6 +5,7 @@ import requests
 import os
 import json
 from dotenv import load_dotenv
+from datetime import datetime
 
 load_dotenv()
 
@@ -19,9 +20,14 @@ EMA_PERIOD = 50
 TAKE_PROFIT = 1.07
 STOP_LOSS = 0.97
 TRADE_AMOUNT_USDT = 5
+BASE_URL = "https://api.bytick.com"  # alternativa sbloccata per alcuni paesi
 
-BASE_URL = "https://api.bytick.com"  # alternativo a bybit.com
 positions = {}
+DEBUG = True  # se False, stampa solo errori gravi
+
+def log(msg):
+    if DEBUG:
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
@@ -29,7 +35,7 @@ def send_telegram(message):
     try:
         requests.post(url, data=data)
     except Exception as e:
-        print(f"[Telegram] Errore invio messaggio: {e}")
+        log(f"[Telegram] Errore invio messaggio: {e}")
 
 def sign_request(params):
     param_str = "&".join([f"{key}={params[key]}" for key in sorted(params)])
@@ -56,8 +62,7 @@ def calculate_ema(prices, period):
     return ema
 
 def get_klines(symbol):
-    endpoint = "/v5/market/kline"
-    url = BASE_URL + endpoint
+    url = BASE_URL + "/v5/market/kline"
     params = {
         "category": "linear",
         "symbol": symbol,
@@ -72,14 +77,13 @@ def get_klines(symbol):
             volumes = [float(x[5]) for x in data["result"]["list"]]
             return closes, volumes
         else:
-            print(f"[{symbol}] Nessun risultato valido nei dati ricevuti.")
+            log(f"[{symbol}] Dati non validi ricevuti: {data}")
     except Exception as e:
-        print(f"[{symbol}] Errore durante richiesta dati: {e}")
+        log(f"[{symbol}] Errore durante richiesta dati: {e}")
     return [], []
 
 def place_order(symbol, side, qty):
-    endpoint = "/v5/order/create"
-    url = BASE_URL + endpoint
+    url = BASE_URL + "/v5/order/create"
     timestamp = str(int(time.time() * 1000))
     body = {
         "category": "spot",
@@ -98,10 +102,13 @@ def place_order(symbol, side, qty):
         response = requests.post(url, data=json.dumps(body), headers=headers)
         return response.json()
     except Exception as e:
-        print(f"[{symbol}] Errore invio ordine: {e}")
+        log(f"[{symbol}] Errore invio ordine: {e}")
         return {}
 
-# Ciclo principale del bot
+# Delay iniziale opzionale
+log("🟢 Bot in esecuzione.")
+time.sleep(10)
+
 while True:
     for symbol in SYMBOLS:
         try:
@@ -114,14 +121,17 @@ while True:
             price = closes[-1]
             avg_vol = sum(volumes[-20:]) / 20
             recent_vol = sum(volumes[-3:]) / 3
-
             has_position = symbol in positions
 
-            if 50 < rsi < 65 and price > ema and recent_vol > avg_vol * 1.1 and not has_position:
-                qty = round(TRADE_AMOUNT_USDT / price, 5)
-                result = place_order(symbol, "Buy", qty)
-                positions[symbol] = {"entry": price, "qty": qty}
-                send_telegram(f"✅ ACQUISTO {symbol} a {price:.2f} (qty: {qty})")
+            if 50 < rsi < 65 and price > ema and recent_vol > avg_vol * 1.1:
+                if not has_position or positions[symbol]["entry"] != price:
+                    qty = round(TRADE_AMOUNT_USDT / price, 5)
+                    result = place_order(symbol, "Buy", qty)
+                    positions[symbol] = {"entry": price, "qty": qty}
+                    send_telegram(f"✅ ACQUISTO {symbol} a {price:.2f} (qty: {qty})")
+                    log(f"ACQUISTO {symbol}: prezzo={price:.2f} qty={qty}")
+                else:
+                    log(f"[{symbol}] Posizione già aperta allo stesso prezzo: {price}")
 
             if has_position:
                 entry = positions[symbol]["entry"]
@@ -129,11 +139,10 @@ while True:
                 if price >= entry * TAKE_PROFIT or price <= entry * STOP_LOSS or price < ema:
                     result = place_order(symbol, "Sell", qty)
                     send_telegram(f"❌ VENDITA {symbol} a {price:.2f} (qty: {qty})")
+                    log(f"VENDITA {symbol}: prezzo={price:.2f} qty={qty}")
                     del positions[symbol]
 
         except Exception as e:
-            # NON inviare più su Telegram
-            print(f"[⚠️ {symbol}] Errore generale: {e}")
+            log(f"[⚠️ {symbol}] Errore generale: {e}")
 
     time.sleep(60)
-
