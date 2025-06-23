@@ -91,8 +91,9 @@ def get_klines(symbol):
 
 def place_order(symbol, side, qty):
     timestamp = str(int(time.time() * 1000))
+    url = BASE_URL + "/v5/order/create"
+    
     body = {
-        "apiKey": API_KEY,
         "category": "spot",
         "symbol": symbol,
         "side": side,
@@ -102,21 +103,30 @@ def place_order(symbol, side, qty):
         "timestamp": timestamp
     }
 
-    log(f"[DEBUG] Parametri ordine: apiKey={API_KEY}, apiSecret={(API_SECRET[:4] + '***') if API_SECRET else 'None'}")
+    # Firma dei parametri
+    sign_body = {
+        **body,
+        "apiKey": API_KEY
+    }
+    sign = sign_request(sign_body)
 
-    body["sign"] = sign_request(body)
-
-    url = BASE_URL + "/v5/order/create"
-    headers = {
-        "Content-Type": "application/json"
+    payload = {
+        **body,
+        "apiKey": API_KEY,
+        "sign": sign
     }
 
+    log(f"[DEBUG] Parametri inviati: {json.dumps(payload, indent=2)}")
+
+    headers = {"Content-Type": "application/json"}
+
     try:
-        response = requests.post(url, json=body, headers=headers)
+        response = requests.post(url, json=payload, headers=headers)
         return response.json()
     except Exception as e:
         log(f"[{symbol}] Errore ordine: {e}")
         return {}
+
 
 # Test ordine una volta all'avvio
 def test_order():
