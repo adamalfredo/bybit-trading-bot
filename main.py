@@ -2,7 +2,7 @@ import os
 import time
 import requests
 import yfinance as yf
-import talib
+import ta
 import numpy as np
 from dotenv import load_dotenv
 
