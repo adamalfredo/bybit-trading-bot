@@ -42,12 +42,17 @@ def analyze_asset(symbol):
 
         df.dropna(inplace=True)
 
-        df['rsi'] = ta.momentum.RSIIndicator(close=df['Close']).rsi()
-        bb = ta.volatility.BollingerBands(close=df['Close'])
+        # Usa solo le Series, non DataFrame
+        close = df['Close']
+        high = df['High']
+        low = df['Low']
+
+        df['rsi'] = ta.momentum.RSIIndicator(close=close).rsi()
+        bb = ta.volatility.BollingerBands(close=close)
         df['bb_upper'] = bb.bollinger_hband()
         df['bb_lower'] = bb.bollinger_lband()
-        df['sma_20'] = df['Close'].rolling(window=20).mean()
-        df['sma_50'] = df['Close'].rolling(window=50).mean()
+        df['sma_20'] = close.rolling(window=20).mean()
+        df['sma_50'] = close.rolling(window=50).mean()
 
         last = df.iloc[-1]
         prev = df.iloc[-2]
