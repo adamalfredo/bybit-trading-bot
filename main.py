@@ -36,12 +36,12 @@ def analyze_asset(symbol):
     try:
         df = yf.download(tickers=symbol, period="7d", interval="15m", progress=False)
 
-        if df is None or df.empty or len(df) < 50:
+        if df is None or df.empty or len(df) < 60:
             return None
 
-        df.dropna(inplace=True)
+        df = df.dropna().copy()
 
-        # Indicatori
+        # Indicatori tecnici con ta
         bb = ta.volatility.BollingerBands(close=df["Close"], window=20, window_dev=2)
         df["bb_upper"] = bb.bollinger_hband()
         df["bb_lower"] = bb.bollinger_lband()
@@ -49,12 +49,14 @@ def analyze_asset(symbol):
         df["sma20"] = ta.trend.SMAIndicator(close=df["Close"], window=20).sma_indicator()
         df["sma50"] = ta.trend.SMAIndicator(close=df["Close"], window=50).sma_indicator()
 
+        df = df.dropna()
+
         last = df.iloc[-1]
         prev = df.iloc[-2]
         last_price = last["Close"]
         symbol_clean = symbol.replace("-USD", "USDT")
 
-        # Segnale: breakout sopra la banda superiore
+        # 📈 Breakout sulla banda superiore
         if last_price > last["bb_upper"] and last["rsi"] < 70:
             return {
                 "type": "entry",
@@ -63,7 +65,7 @@ def analyze_asset(symbol):
                 "strategy": "Breakout Bollinger"
             }
 
-        # Segnale: golden cross
+        # 📈 Incrocio medie mobili (Golden Cross)
         if prev["sma20"] < prev["sma50"] and last["sma20"] > last["sma50"]:
             return {
                 "type": "entry",
@@ -72,7 +74,7 @@ def analyze_asset(symbol):
                 "strategy": "Golden Cross"
             }
 
-        # Segnale: take profit (breakdown sotto la banda inferiore)
+        # 📉 Breakdown sotto banda inferiore
         if last_price < last["bb_lower"] and last["rsi"] > 30:
             return {
                 "type": "exit",
