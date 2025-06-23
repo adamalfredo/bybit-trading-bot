@@ -91,20 +91,23 @@ def get_klines(symbol):
 
 def place_order(symbol, side, qty):
     timestamp = str(int(time.time() * 1000))
+
     body = {
         "category": "spot",
         "symbol": symbol,
         "side": side,
         "orderType": "Market",
         "qty": str(qty),
-        "timeInForce": "IOC",
-        "timestamp": timestamp
+        "timeInForce": "IOC"
     }
 
-    json_body = json.dumps(body, separators=(',', ':'))  # Attenzione: NO spazi!
+    json_body = json.dumps(body, separators=(',', ':'))
+
+    # Firma da generare con: timestamp + API_KEY + json_body
+    prehash = timestamp + API_KEY + json_body
     signature = hmac.new(
         API_SECRET.encode("utf-8"),
-        json_body.encode("utf-8"),
+        prehash.encode("utf-8"),
         hashlib.sha256
     ).hexdigest()
 
@@ -116,7 +119,7 @@ def place_order(symbol, side, qty):
     }
 
     log(f"[DEBUG] Parametri ordine inviati (headers): {headers}")
-    log(f"[DEBUG] Corpo JSON (usato anche per sign): {json_body}")
+    log(f"[DEBUG] Corpo JSON (per sign e invio): {json_body}")
 
     url = BASE_URL + "/v5/order/create"
 
