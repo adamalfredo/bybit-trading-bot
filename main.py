@@ -72,7 +72,7 @@ def place_order(symbol, side, qty):
     log(f"[DEBUG] Corpo JSON (usato anche per sign): {json_body}")
 
     try:
-        response = requests.post(BASE_URL + ORDER_ENDPOINT, headers=headers, data=json_body, timeout=10)
+        response = requests.post(BASE_URL + ORDER_ENDPOINT, headers=headers, json=body, timeout=10)
         result = response.json()
         log(f"Test ordine risultato: {result}")
         notify_telegram(f"[TEST] Risposta ordine: {result}")
