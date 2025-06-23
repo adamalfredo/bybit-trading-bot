@@ -25,7 +25,6 @@ BASE_URL = "https://api.bybit.com"
 
 positions = {}
 DEBUG = True
-RECV_WINDOW = "5000"
 
 
 def log(msg):
@@ -42,13 +41,14 @@ def send_telegram(message):
         log(f"[Telegram] Errore invio messaggio: {e}")
 
 
-def sign_request(timestamp, body):
-    raw = timestamp + API_KEY + RECV_WINDOW + body
-    return hmac.new(
+def sign_request(payload):
+    payload_str = json.dumps(payload, separators=(',', ':'), ensure_ascii=False)
+    signature = hmac.new(
         API_SECRET.encode("utf-8"),
-        raw.encode("utf-8"),
+        payload_str.encode("utf-8"),
         hashlib.sha256
     ).hexdigest()
+    return signature
 
 
 def calculate_rsi(prices):
@@ -95,9 +95,20 @@ def get_klines(symbol):
     return [], []
 
 
+def get_last_price(symbol):
+    url = BASE_URL + "/v5/market/tickers"
+    params = {"category": "spot", "symbol": symbol}
+    try:
+        res = requests.get(url, params=params).json()
+        return float(res["result"]["list"][0]["lastPrice"])
+    except Exception as e:
+        log(f"Errore get_last_price: {e}")
+        return 0
+
+
 def place_order(symbol, side, qty):
     timestamp = str(int(time.time() * 1000))
-    body = {
+    payload = {
         "category": "spot",
         "symbol": symbol,
         "side": side,
@@ -106,36 +117,35 @@ def place_order(symbol, side, qty):
         "timeInForce": "IOC",
         "timestamp": timestamp
     }
-    body_str = json.dumps(body, separators=(',', ':'), ensure_ascii=False)
-    sign = sign_request(timestamp, body_str)
 
     headers = {
         "X-BAPI-API-KEY": API_KEY,
         "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": RECV_WINDOW,
-        "X-BAPI-SIGN": sign,
+        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-SIGN": sign_request(payload),
         "Content-Type": "application/json"
     }
 
-    url = BASE_URL + "/v5/order/create"
-
     log(f"[DEBUG] Parametri ordine inviati (headers): {headers}")
-    log(f"[DEBUG] Corpo JSON (usato anche per sign): {body_str}")
+    log(f"[DEBUG] Corpo JSON (usato anche per sign): {json.dumps(payload)}")
 
     try:
-        response = requests.post(url, headers=headers, data=body_str)
+        response = requests.post(BASE_URL + "/v5/order/create", headers=headers, data=json.dumps(payload))
         return response.json()
     except Exception as e:
-        log(f"[{symbol}] Errore ordine: {e}")
+        log(f"[{symbol}] Errore invio ordine: {e}")
         return {}
 
 
 def test_order():
-    test_symbol = "BTCUSDT"
-    test_price = 51000  # es. valore BTC per stimare qty
-    test_qty = round(TRADE_AMOUNT_USDT / test_price, 6)
-    log(f"[DEBUG] Test ordine qty={test_qty}, apiKey={(API_KEY[:4] + '***') if API_KEY else 'None'}")
-    result = place_order(test_symbol, "Buy", test_qty)
+    symbol = "BTCUSDT"
+    price = get_last_price(symbol)
+    if price == 0:
+        log("[TEST] Prezzo non disponibile, test ignorato.")
+        return
+    qty = round(5.1 / price, 6)
+    log(f"[DEBUG] Test ordine qty={qty}, apiKey={(API_KEY[:4] + '***') if API_KEY else 'None'}")
+    result = place_order(symbol, "Buy", qty)
     send_telegram(f"[TEST] Risposta ordine: {result}")
     log(f"Test ordine risultato: {result}")
 
@@ -144,3 +154,39 @@ if __name__ == "__main__":
     log(f"API_KEY loaded: {bool(API_KEY)}, API_SECRET loaded: {bool(API_SECRET)}")
     log("🟢 Avvio bot e test ordine iniziale")
     test_order()
+
+    while True:
+        for symbol in SYMBOLS:
+            try:
+                closes, volumes = get_klines(symbol)
+                if len(closes) < EMA_PERIOD:
+                    continue
+
+                rsi = calculate_rsi(closes)
+                ema = calculate_ema(closes, EMA_PERIOD)
+                price = closes[-1]
+                avg_vol = sum(volumes[-20:]) / 20
+                recent_vol = sum(volumes[-3:]) / 3
+                has_position = symbol in positions
+
+                if 50 < rsi < 65 and price > ema and recent_vol > avg_vol * 1.1:
+                    if not has_position or positions[symbol]["entry"] != price:
+                        qty = round(max(5.1, TRADE_AMOUNT_USDT) / price, 6)
+                        result = place_order(symbol, "Buy", qty)
+                        positions[symbol] = {"entry": price, "qty": qty}
+                        send_telegram(f"✅ ACQUISTO {symbol} a {price:.2f} (qty: {qty})")
+                        log(f"ACQUISTO {symbol}: prezzo={price:.2f} qty={qty}")
+
+                if has_position:
+                    entry = positions[symbol]["entry"]
+                    qty = positions[symbol]["qty"]
+                    if price >= entry * TAKE_PROFIT or price <= entry * STOP_LOSS or price < ema:
+                        result = place_order(symbol, "Sell", qty)
+                        send_telegram(f"❌ VENDITA {symbol} a {price:.2f} (qty: {qty})")
+                        log(f"VENDITA {symbol}: prezzo={price:.2f} qty={qty}")
+                        del positions[symbol]
+
+            except Exception as e:
+                log(f"[⚠️ {symbol}] Errore: {e}")
+
+        time.sleep(60)
