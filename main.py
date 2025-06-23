@@ -12,49 +12,46 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 BASE_URL = "https://api.bybit.com"
 ORDER_ENDPOINT = "/v5/order/create"
-ORDER_QTY = "0.000050"  # almeno 5 USDT
+
+ORDER_QTY = "0.000050"
+
 
 def log(msg):
     timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
     print(f"{timestamp} {msg}")
 
+
 def notify_telegram(message):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
         try:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                data={"chat_id": TELEGRAM_CHAT_ID, "text": message},
-                timeout=10
-            )
+            requests.post(url, data=data, timeout=10)
         except Exception as e:
             log(f"Errore invio Telegram: {e}")
 
-def get_timestamp():
-    return str(int(time.time() * 1000))
 
 def sign_v5(secret, api_key, timestamp, recv_window, json_str):
-    to_sign = f"{api_key}{timestamp}{recv_window}{json_str}"
-    return hmac.new(secret.encode(), to_sign.encode(), hashlib.sha256).hexdigest()
+    string_to_sign = f"{api_key}{timestamp}{recv_window}{json_str}"
+    return hmac.new(secret.encode(), string_to_sign.encode(), hashlib.sha256).hexdigest()
+
 
 def place_order(symbol, side, qty):
-    timestamp = get_timestamp()
+    timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
 
     body = {
         "category": "spot",
         "symbol": symbol,
         "side": side,
-        "orderType": "market",
+        "orderType": "Market",  # Attenzione: "M" maiuscola!
         "qty": qty,
         "timeInForce": "IOC",
         "timestamp": timestamp
     }
 
-    json_body = json.dumps(body, separators=(",", ":"))  # questo va firmato
-
-    log(f"[DEBUG] Stringa per la firma: {API_KEY}{timestamp}{recv_window}{json_body}")
-
-    signature = sign_v5(API_SECRET, API_KEY, timestamp, recv_window, json.dumps(body, separators=(",", ":")))
+    json_body_str = json.dumps(body, separators=(",", ":"))
+    signature = sign_v5(API_SECRET, API_KEY, timestamp, recv_window, json_body_str)
 
     headers = {
         "X-BAPI-API-KEY": API_KEY,
@@ -64,8 +61,9 @@ def place_order(symbol, side, qty):
         "Content-Type": "application/json"
     }
 
+    log(f"[DEBUG] Stringa per la firma: {API_KEY}{timestamp}{recv_window}{json_body_str}")
     log(f"[DEBUG] Parametri ordine inviati (headers): {headers}")
-    log(f"[DEBUG] Corpo JSON (usato anche per sign): {json_body}")
+    log(f"[DEBUG] Corpo JSON (usato anche per sign): {json_body_str}")
 
     try:
         response = requests.post(BASE_URL + ORDER_ENDPOINT, headers=headers, json=body, timeout=10)
@@ -77,6 +75,7 @@ def place_order(symbol, side, qty):
         log(f"Errore richiesta ordine: {e}")
         notify_telegram(f"Errore ordine: {e}")
         return None
+
 
 if __name__ == "__main__":
     if not API_KEY or not API_SECRET:
