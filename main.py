@@ -105,7 +105,18 @@ def place_order(symbol, side, qty):
         log(f"[{symbol}] Errore invio ordine: {e}")
         return {}
 
-# Delay iniziale opzionale
+# Test ordine manuale (verrà eseguito una volta e poi termina il bot)
+log("\n🧪 Avvio test ordine manuale...")
+test_symbol = "BTCUSDT"
+test_price = 102600  # ipotetico prezzo di BTC per il test
+test_qty = round(1 / test_price, 6)  # circa 1 USDT
+response = place_order(test_symbol, "Buy", test_qty)
+send_telegram(f"[TEST] Risposta ordine: {response}")
+log(f"[TEST] Ordine test inviato: {response}")
+exit()
+
+# Se vuoi eseguire il bot normalmente, commenta la sezione sopra e decommenta qui sotto
+"""
 log("🟢 Bot in esecuzione.")
 time.sleep(10)
 
@@ -124,7 +135,7 @@ while True:
             has_position = symbol in positions
 
             if 50 < rsi < 65 and price > ema and recent_vol > avg_vol * 1.1:
-                if not has_position or positions[symbol]["entry"] != price:
+                if not has_position or abs(positions[symbol]["entry"] - price) > 0.01:
                     qty = round(TRADE_AMOUNT_USDT / price, 5)
                     result = place_order(symbol, "Buy", qty)
                     positions[symbol] = {"entry": price, "qty": qty}
@@ -146,3 +157,4 @@ while True:
             log(f"[⚠️ {symbol}] Errore generale: {e}")
 
     time.sleep(60)
+"""
