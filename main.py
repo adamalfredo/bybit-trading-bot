@@ -12,31 +12,29 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 BASE_URL = "https://api.bybit.com"
 ORDER_ENDPOINT = "/v5/order/create"
-
-ORDER_QTY = "0.000050"  # Minimo 5 USDT
-
+ORDER_QTY = "0.000050"  # almeno 5 USDT
 
 def log(msg):
     timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
     print(f"{timestamp} {msg}")
 
-
 def notify_telegram(message):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
         try:
-            requests.post(url, data=data, timeout=10)
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                data={"chat_id": TELEGRAM_CHAT_ID, "text": message},
+                timeout=10
+            )
         except Exception as e:
             log(f"Errore invio Telegram: {e}")
-
 
 def get_timestamp():
     return str(int(time.time() * 1000))
 
-def sign_v5(secret, api_key, timestamp, recv_window, json_body):
-    string_to_sign = f"{api_key}{timestamp}{recv_window}{json_body}"
-    return hmac.new(secret.encode(), string_to_sign.encode(), hashlib.sha256).hexdigest()
+def sign_v5(secret, api_key, timestamp, recv_window, json_str):
+    to_sign = f"{api_key}{timestamp}{recv_window}{json_str}"
+    return hmac.new(secret.encode(), to_sign.encode(), hashlib.sha256).hexdigest()
 
 def place_order(symbol, side, qty):
     timestamp = get_timestamp()
@@ -52,7 +50,7 @@ def place_order(symbol, side, qty):
         "timestamp": timestamp
     }
 
-    json_body = json.dumps(body, separators=(",", ":"))
+    json_body = json.dumps(body, separators=(",", ":"))  # questo va firmato
 
     signature = sign_v5(API_SECRET, API_KEY, timestamp, recv_window, json_body)
 
@@ -68,7 +66,7 @@ def place_order(symbol, side, qty):
     log(f"[DEBUG] Corpo JSON (usato anche per sign): {json_body}")
 
     try:
-        response = requests.post(BASE_URL + ORDER_ENDPOINT, headers=headers, json=body, timeout=10)
+        response = requests.post(BASE_URL + ORDER_ENDPOINT, headers=headers, data=json_body, timeout=10)
         result = response.json()
         log(f"Test ordine risultato: {result}")
         notify_telegram(f"[TEST] Risposta ordine: {result}")
@@ -77,8 +75,6 @@ def place_order(symbol, side, qty):
         log(f"Errore richiesta ordine: {e}")
         notify_telegram(f"Errore ordine: {e}")
         return None
-
-
 
 if __name__ == "__main__":
     if not API_KEY or not API_SECRET:
