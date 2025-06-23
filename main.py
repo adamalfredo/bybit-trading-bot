@@ -1,53 +1,63 @@
 import os
-import json
+import time
 import hmac
 import hashlib
-import time
 import requests
-import logging
-from dotenv import load_dotenv
+import json
 
-# Setup logging
-logging.basicConfig(level=logging.DEBUG, format='[%(asctime)s] %(levelname)s: %(message)s')
+API_KEY = os.getenv("BYBIT_API_KEY")
+API_SECRET = os.getenv("BYBIT_API_SECRET")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Load .env if exists
-load_dotenv()
+BASE_URL = "https://api.bybit.com"
+ORDER_ENDPOINT = "/v5/order/create"
 
-API_KEY = os.getenv("API_KEY")
-API_SECRET = os.getenv("API_SECRET")
+ORDER_QTY = "0.000050"  # Almeno 5 USDT per BTC
 
-if not API_KEY or not API_SECRET:
-    raise ValueError("API_KEY o API_SECRET non trovati nelle variabili d'ambiente.")
 
-# === FUNZIONE PER GENERARE LA FIRMA ===
-def generate_signature(secret, payload_str):
+def log(msg):
+    timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
+    print(f"{timestamp} {msg}")
+
+
+def notify_telegram(message):
+    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+        try:
+            requests.post(url, data=data, timeout=10)
+        except Exception as e:
+            log(f"Errore invio Telegram: {e}")
+
+
+def get_timestamp():
+    return str(int(time.time() * 1000))
+
+
+def sign_payload(secret, payload):
     return hmac.new(
-        secret.encode('utf-8'),
-        payload_str.encode('utf-8'),
+        secret.encode("utf-8"),
+        payload.encode("utf-8"),
         hashlib.sha256
     ).hexdigest()
 
-# === INVIO ORDINE DI TEST ===
-def invia_test_order():
-    url = "https://api.bybit.com/v5/order/create"
 
-    timestamp = str(int(time.time() * 1000))
+def place_order(symbol, side, qty):
+    timestamp = get_timestamp()
+
     body = {
         "category": "spot",
-        "symbol": "BTCUSDT",
-        "side": "Buy",
+        "symbol": symbol,
+        "side": side,
         "orderType": "Market",
-        "qty": "0.000050",
+        "qty": qty,
         "timeInForce": "IOC",
         "timestamp": timestamp
     }
 
-    # Serializza senza spazi e in ordine stabile
-    json_body = json.dumps(body, separators=(',', ':'), ensure_ascii=False)
-
-    logging.debug(f"Corpo JSON (usato anche per sign): {json_body}")
-
-    signature = generate_signature(API_SECRET, json_body)
+    json_body = json.dumps(body, separators=(",", ":"))
+    signature = sign_payload(API_SECRET, json_body)
 
     headers = {
         "X-BAPI-API-KEY": API_KEY,
@@ -57,19 +67,23 @@ def invia_test_order():
         "Content-Type": "application/json"
     }
 
-    logging.debug(f"Parametri ordine inviati (headers): {headers}")
-
-    response = requests.post(url, headers=headers, data=json_body)
-    logging.debug(f"Test ordine risultato: {response.text}")
+    log(f"[DEBUG] Parametri ordine inviati (headers): {headers}")
+    log(f"[DEBUG] Corpo JSON (usato anche per sign): {json_body}")
 
     try:
+        response = requests.post(BASE_URL + ORDER_ENDPOINT, headers=headers, data=json_body, timeout=10)
         result = response.json()
+        log(f"Test ordine risultato: {result}")
+        notify_telegram(f"[TEST] Risposta ordine: {result}")
+        return result
     except Exception as e:
-        result = {"error": str(e), "text": response.text}
+        log(f"Errore richiesta ordine: {e}")
+        notify_telegram(f"Errore ordine: {e}")
+        return None
 
-    return result
 
 if __name__ == "__main__":
-    logging.info("\U0001F7E2 Avvio bot e test ordine iniziale")
-    risultato = invia_test_order()
-    print("[TEST] Risposta ordine:", risultato)
+    log(f"API_KEY loaded: {bool(API_KEY)}, API_SECRET loaded: {bool(API_SECRET)}")
+    log("🟢 Avvio bot e test ordine iniziale")
+    log(f"[DEBUG] Test ordine qty={ORDER_QTY}, apiKey={(API_KEY[:4] + '***') if API_KEY else 'None'}")
+    place_order("BTCUSDT", "Buy", ORDER_QTY)
