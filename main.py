@@ -91,8 +91,7 @@ def get_klines(symbol):
 
 def place_order(symbol, side, qty):
     timestamp = str(int(time.time() * 1000))
-    body = {
-        "apiKey": API_KEY,
+    params = {
         "category": "spot",
         "symbol": symbol,
         "side": side,
@@ -102,21 +101,33 @@ def place_order(symbol, side, qty):
         "timestamp": timestamp
     }
 
-    body["sign"] = sign_request(body)
+    # Crea la firma
+    sign_payload = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    signature = hmac.new(
+        API_SECRET.encode("utf-8"),
+        sign_payload.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
 
-    url = BASE_URL + "/v5/order/create"
     headers = {
+        "X-BAPI-API-KEY": API_KEY,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
         "Content-Type": "application/json"
     }
 
-    log(f"[DEBUG] Parametri ordine inviati: {json.dumps(body, indent=2)}")
+    log(f"[DEBUG] Parametri ordine inviati (headers): {headers}")
+    log(f"[DEBUG] Corpo JSON: {json.dumps(params, indent=2)}")
+
+    url = BASE_URL + "/v5/order/create"
 
     try:
-        response = requests.post(url, json=body, headers=headers)
+        response = requests.post(url, json=params, headers=headers)
         return response.json()
     except Exception as e:
         log(f"[{symbol}] Errore ordine: {e}")
         return {}
+
 
 def test_order():
     test_symbol = "BTCUSDT"
