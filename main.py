@@ -7,7 +7,13 @@ import json
 from dotenv import load_dotenv
 from datetime import datetime
 
-# Carica variabili da Railway (usa .env solo in locale)
+DEBUG = True
+
+def log(msg):
+    if DEBUG:
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+
+# Carica variabili da Railway o .env locale
 load_dotenv()
 
 API_KEY = os.getenv("BYBIT_API_KEY")
@@ -15,7 +21,9 @@ API_SECRET = os.getenv("BYBIT_API_SECRET")
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-SYMBOLS = ["BTCUSDT"]  # Usa solo BTC per il test
+log(f"API_KEY loaded: {bool(API_KEY)}, API_SECRET loaded: {bool(API_SECRET)}")
+
+SYMBOLS = ["BTCUSDT"]
 RSI_PERIOD = 14
 EMA_PERIOD = 50
 TAKE_PROFIT = 1.07
@@ -24,11 +32,6 @@ TRADE_AMOUNT_USDT = 5
 BASE_URL = "https://api.bytick.com"
 
 positions = {}
-DEBUG = True
-
-def log(msg):
-    if DEBUG:
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
@@ -39,8 +42,7 @@ def send_telegram(message):
         log(f"[Telegram] Errore invio messaggio: {e}")
 
 def sign_request(params):
-    # Escludi apiKey dalla firma
-    sorted_params = sorted((k, str(v)) for k, v in params.items() if k != "apiKey")
+    sorted_params = sorted((k, str(v)) for k, v in params.items())
     query_string = "&".join([f"{k}={v}" for k, v in sorted_params])
     signature = hmac.new(
         API_SECRET.encode("utf-8"),
@@ -101,15 +103,12 @@ def place_order(symbol, side, qty):
         "timeInForce": "IOC",
         "timestamp": timestamp
     }
-    sign = sign_request(params)
-    params["sign"] = sign
+    signature = sign_request(params)
+    params["apiKey"] = API_KEY
+    params["sign"] = signature
 
     url = BASE_URL + "/v5/order/create"
-    headers = {
-        "Content-Type": "application/json",
-        "X-BYBIT-API-KEY": API_KEY
-    }
-
+    headers = {"Content-Type": "application/json"}
     try:
         response = requests.post(url, data=json.dumps(params), headers=headers)
         return response.json()
@@ -117,7 +116,6 @@ def place_order(symbol, side, qty):
         log(f"[{symbol}] Errore ordine: {e}")
         return {}
 
-# Test ordine una volta all'avvio
 def test_order():
     test_symbol = "BTCUSDT"
     test_price = 102600
