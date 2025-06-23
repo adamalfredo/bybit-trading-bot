@@ -21,7 +21,7 @@ EMA_PERIOD = 50
 TAKE_PROFIT = 1.07
 STOP_LOSS = 0.97
 TRADE_AMOUNT_USDT = 5
-BASE_URL = "https://api.bytick.com"
+BASE_URL = "https://api.bybit.com"
 
 positions = {}
 DEBUG = True
