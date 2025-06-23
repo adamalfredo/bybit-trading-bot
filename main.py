@@ -95,6 +95,7 @@ def get_klines(symbol):
 def place_order(symbol, side, qty):
     timestamp = str(int(time.time() * 1000))
     params = {
+        "apiKey": API_KEY,  # <- Spostato qui
         "category": "spot",
         "symbol": symbol,
         "side": side,
@@ -103,9 +104,7 @@ def place_order(symbol, side, qty):
         "timeInForce": "IOC",
         "timestamp": timestamp
     }
-    signature = sign_request(params)
-    params["apiKey"] = API_KEY
-    params["sign"] = signature
+    params["sign"] = sign_request(params)  # Firma ora contiene anche apiKey
 
     url = BASE_URL + "/v5/order/create"
     headers = {"Content-Type": "application/json"}
@@ -115,6 +114,7 @@ def place_order(symbol, side, qty):
     except Exception as e:
         log(f"[{symbol}] Errore ordine: {e}")
         return {}
+
 
 def test_order():
     test_symbol = "BTCUSDT"
