@@ -4,9 +4,7 @@ import requests
 import yfinance as yf
 import numpy as np
 import pandas as pd
-from ta.trend import SMAIndicator
-from ta.volatility import BollingerBands
-from ta.momentum import RSIIndicator
+import ta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -14,12 +12,14 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "DOGE-USD"]
+ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "MATIC-USD", "DOGE-USD"]
 INTERVAL_MINUTES = 15
+
 
 def log(msg):
     timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
     print(f"{timestamp} {msg}")
+
 
 def notify_telegram(message: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -31,50 +31,51 @@ def notify_telegram(message: str):
     except Exception as e:
         log(f"Errore Telegram: {e}")
 
+
 def analyze_asset(symbol):
     try:
         df = yf.download(tickers=symbol, period="7d", interval="15m", progress=False)
 
-        if df is None or df.empty or len(df) < 50:
+        if len(df) < 50:
             return None
 
         df.dropna(inplace=True)
-        df["SMA20"] = SMAIndicator(close=df["Close"], window=20).sma_indicator()
-        df["SMA50"] = SMAIndicator(close=df["Close"], window=50).sma_indicator()
-        bb = BollingerBands(close=df["Close"], window=20)
-        df["bb_upper"] = bb.bollinger_hband()
-        df["bb_lower"] = bb.bollinger_lband()
-        df["rsi"] = RSIIndicator(close=df["Close"], window=14).rsi()
+
+        # Indicatori tecnici (usando la libreria ta)
+        df['sma_20'] = ta.trend.sma_indicator(df['Close'], window=20)
+        df['sma_50'] = ta.trend.sma_indicator(df['Close'], window=50)
+        bb = ta.volatility.BollingerBands(df['Close'], window=20)
+        df['bb_upper'] = bb.bollinger_hband()
+        df['bb_lower'] = bb.bollinger_lband()
+        df['rsi'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
 
         last = df.iloc[-1]
         prev = df.iloc[-2]
 
-        symbol_usdt = symbol.replace("-USD", "USDT")
-
-        # Breakout di volatilità
-        if last["Close"] > last["bb_upper"] and last["rsi"] < 70:
+        # Segnale breakout rialzista
+        if last['Close'] > last['bb_upper'] and last['rsi'] < 70:
             return {
                 "type": "entry",
-                "symbol": symbol_usdt,
-                "price": round(last["Close"], 2),
+                "symbol": symbol.replace("-USD", "USDT"),
+                "price": round(last['Close'], 2),
                 "strategy": "Breakout Volatilità"
             }
 
-        # Golden Cross
-        if prev["SMA20"] < prev["SMA50"] and last["SMA20"] > last["SMA50"]:
+        # Segnale golden cross
+        if prev['sma_20'] < prev['sma_50'] and last['sma_20'] > last['sma_50']:
             return {
                 "type": "entry",
-                "symbol": symbol_usdt,
-                "price": round(last["Close"], 2),
+                "symbol": symbol.replace("-USD", "USDT"),
+                "price": round(last['Close'], 2),
                 "strategy": "Golden Cross"
             }
 
-        # Take Profit / Breakdown
-        if last["Close"] < last["bb_lower"] and last["rsi"] > 30:
+        # Segnale di uscita
+        if last['Close'] < last['bb_lower'] and last['rsi'] > 30:
             return {
                 "type": "exit",
-                "symbol": symbol_usdt,
-                "price": round(last["Close"], 2),
+                "symbol": symbol.replace("-USD", "USDT"),
+                "price": round(last['Close'], 2),
                 "strategy": "Take Profit / Breakdown"
             }
 
@@ -83,6 +84,7 @@ def analyze_asset(symbol):
     except Exception as e:
         log(f"Errore analisi {symbol}: {e}")
         return None
+
 
 def scan_assets():
     for asset in ASSET_LIST:
@@ -95,6 +97,7 @@ Prezzo: {signal['price']}
 Strategia: {signal['strategy']}"""
             log(msg.replace("\n", " | "))
             notify_telegram(msg)
+
 
 if __name__ == "__main__":
     log("🔄 Avvio sistema di monitoraggio segnali reali")
