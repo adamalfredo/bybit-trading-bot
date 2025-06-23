@@ -52,6 +52,8 @@ def place_order(symbol, side, qty):
 
     json_body = json.dumps(body, separators=(",", ":"))  # questo va firmato
 
+    log(f"[DEBUG] Stringa per la firma: {API_KEY}{timestamp}{recv_window}{json_body}")
+
     signature = sign_v5(API_SECRET, API_KEY, timestamp, recv_window, json_body)
 
     headers = {
