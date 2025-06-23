@@ -136,3 +136,4 @@ while True:
             print(f"[⚠️ {symbol}] Errore generale: {e}")
 
     time.sleep(60)
+
