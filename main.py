@@ -9,6 +9,7 @@ from datetime import datetime
 
 # Carica variabili da Railway (usa .env solo in locale)
 load_dotenv()
+log(f"API_KEY: {API_KEY}, API_SECRET: {API_SECRET}")
 
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
