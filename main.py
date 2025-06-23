@@ -44,7 +44,7 @@ def place_order(symbol, side, qty):
         "category": "spot",
         "symbol": symbol,
         "side": side,
-        "orderType": "Market",
+        "orderType": "market",
         "qty": qty,
         "timeInForce": "IOC",
         "timestamp": timestamp
