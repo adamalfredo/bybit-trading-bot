@@ -44,18 +44,16 @@ def analyze_asset(symbol):
 
         df.dropna(inplace=True)
 
-        # Forza le colonne a Series 1D per evitare errori
-        close = pd.Series(df["Close"].values.flatten(), index=df.index)
-
-        # Indicatori
-        bb = BollingerBands(close=close, window=20, window_dev=2)
-        rsi = RSIIndicator(close=close, window=14)
-        sma20 = SMAIndicator(close=close, window=20)
-        sma50 = SMAIndicator(close=close, window=50)
-
+        # Indicatori tecnici
+        bb = BollingerBands(close=df["Close"], window=20, window_dev=2)
         df["bb_upper"] = bb.bollinger_hband()
         df["bb_lower"] = bb.bollinger_lband()
+
+        rsi = RSIIndicator(close=df["Close"], window=14)
         df["rsi"] = rsi.rsi()
+
+        sma20 = SMAIndicator(close=df["Close"], window=20)
+        sma50 = SMAIndicator(close=df["Close"], window=50)
         df["sma20"] = sma20.sma_indicator()
         df["sma50"] = sma50.sma_indicator()
 
@@ -66,7 +64,6 @@ def analyze_asset(symbol):
         last_price = last["Close"]
         symbol_clean = symbol.replace("-USD", "USDT")
 
-        # Breakout rialzista
         if last_price > last["bb_upper"] and last["rsi"] < 70:
             return {
                 "type": "entry",
@@ -75,7 +72,6 @@ def analyze_asset(symbol):
                 "strategy": "Breakout Bollinger"
             }
 
-        # Incrocio medie mobili (Golden Cross)
         if prev["sma20"] < prev["sma50"] and last["sma20"] > last["sma50"]:
             return {
                 "type": "entry",
@@ -84,7 +80,6 @@ def analyze_asset(symbol):
                 "strategy": "Golden Cross"
             }
 
-        # Uscita tecnica (Breakdown)
         if last_price < last["bb_lower"] and last["rsi"] > 30:
             return {
                 "type": "exit",
