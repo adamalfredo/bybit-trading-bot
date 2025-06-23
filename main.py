@@ -4,17 +4,16 @@ import requests
 import yfinance as yf
 import numpy as np
 import pandas as pd
-from ta.trend import SMAIndicator
-from ta.volatility import BollingerBands
-from ta.momentum import RSIIndicator
 from dotenv import load_dotenv
+import ta
 
+# Carica le variabili di ambiente
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "MATIC-USD", "DOGE-USD"]
+ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "DOGE-USD"]
 INTERVAL_MINUTES = 15
 
 
@@ -37,49 +36,50 @@ def notify_telegram(message: str):
 def analyze_asset(symbol):
     try:
         df = yf.download(tickers=symbol, period="7d", interval="15m", progress=False)
-        if len(df) < 50:
+
+        if df is None or len(df) < 50:
             return None
 
         df.dropna(inplace=True)
 
-        # Indicatori tecnici corretti (usando Series, non DataFrame)
-        df['sma_20'] = SMAIndicator(close=df['Close'], window=20).sma_indicator()
-        df['sma_50'] = SMAIndicator(close=df['Close'], window=50).sma_indicator()
-
-        bb = BollingerBands(close=df['Close'], window=20)
+        df['sma_20'] = ta.trend.sma_indicator(df['Close'], window=20)
+        df['sma_50'] = ta.trend.sma_indicator(df['Close'], window=50)
+        bb = ta.volatility.BollingerBands(df['Close'], window=20)
         df['bb_upper'] = bb.bollinger_hband()
         df['bb_lower'] = bb.bollinger_lband()
-
-        df['rsi'] = RSIIndicator(close=df['Close'], window=14).rsi()
+        df['rsi'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
 
         last = df.iloc[-1]
         prev = df.iloc[-2]
 
-        # Segnale breakout rialzista
-        if last['Close'] > last['bb_upper'] and last['rsi'] < 70:
+        last_price = last['Close']
+        last_rsi = last['rsi']
+
+        # Breakout Bollinger con RSI non troppo alto
+        if last_price > last['bb_upper'] and last_rsi < 70:
             return {
                 "type": "entry",
                 "symbol": symbol.replace("-USD", "USDT"),
-                "price": round(last['Close'], 2),
+                "price": round(last_price, 2),
                 "strategy": "Breakout Volatilità"
             }
 
-        # Golden cross
+        # Golden Cross
         if prev['sma_20'] < prev['sma_50'] and last['sma_20'] > last['sma_50']:
             return {
                 "type": "entry",
                 "symbol": symbol.replace("-USD", "USDT"),
-                "price": round(last['Close'], 2),
+                "price": round(last_price, 2),
                 "strategy": "Golden Cross"
             }
 
-        # Segnale di uscita
-        if last['Close'] < last['bb_lower'] and last['rsi'] > 30:
+        # Uscita - take profit su breakdown e RSI in calo
+        if last_price < last['bb_lower'] and last_rsi > 30:
             return {
                 "type": "exit",
                 "symbol": symbol.replace("-USD", "USDT"),
-                "price": round(last['Close'], 2),
-                "strategy": "Take Profit / Breakdown"
+                "price": round(last_price, 2),
+                "strategy": "Breakdown + RSI"
             }
 
         return None
