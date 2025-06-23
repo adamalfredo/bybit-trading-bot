@@ -7,7 +7,7 @@ import json
 from dotenv import load_dotenv
 from datetime import datetime
 
-# Carica variabili da Railway (.env usato solo in locale)
+# Carica variabili da Railway o da .env in locale
 load_dotenv()
 
 API_KEY = os.getenv("BYBIT_API_KEY")
@@ -20,7 +20,7 @@ RSI_PERIOD = 14
 EMA_PERIOD = 50
 TAKE_PROFIT = 1.07
 STOP_LOSS = 0.97
-TRADE_AMOUNT_USDT = 50  # aggiornato
+TRADE_AMOUNT_USDT = 50  # aumentato
 BASE_URL = "https://api.bybit.com"
 
 positions = {}
@@ -38,14 +38,20 @@ def send_telegram(message):
     except Exception as e:
         log(f"[Telegram] Errore invio messaggio: {e}")
 
-def sign_request(payload):
-    query_string = json.dumps(payload, separators=(',', ':'), ensure_ascii=False)
-    return hmac.new(API_SECRET.encode(), query_string.encode(), hashlib.sha256).hexdigest()
+def sign_request_v5(timestamp, api_key, secret, body):
+    recv_window = "5000"
+    payload = f"{timestamp}{api_key}{recv_window}{body}"
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+    return signature, recv_window
 
 def get_klines(symbol):
     url = BASE_URL + "/v5/market/kline"
     params = {
-        "category": "spot",
+        "category": "linear",
         "symbol": symbol,
         "interval": "15",
         "limit": 100
@@ -62,35 +68,6 @@ def get_klines(symbol):
     except Exception as e:
         log(f"[{symbol}] Errore richiesta dati: {e}")
     return [], []
-
-def place_order(symbol, side, qty):
-    timestamp = str(int(time.time() * 1000))
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": side,
-        "orderType": "Market",
-        "qty": f"{qty:.6f}",
-        "timeInForce": "IOC",
-        "timestamp": timestamp
-    }
-    signature = sign_request(body)
-    headers = {
-        "X-BAPI-API-KEY": API_KEY,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-SIGN": signature,
-        "Content-Type": "application/json"
-    }
-
-    log(f"[DEBUG] Parametri ordine inviati (headers): {headers}")
-    log(f"[DEBUG] Corpo JSON (usato anche per sign): {json.dumps(body)}")
-
-    try:
-        response = requests.post(BASE_URL + "/v5/order/create", headers=headers, json=body)
-        return response.json()
-    except Exception as e:
-        log(f"[{symbol}] Errore ordine: {e}")
-        return {}
 
 def calculate_rsi(prices):
     gains, losses = [], []
@@ -112,9 +89,43 @@ def calculate_ema(prices, period):
         ema = price * k + ema * (1 - k)
     return ema
 
+def place_order(symbol, side, qty):
+    timestamp = str(int(time.time() * 1000))
+    body = {
+        "category": "spot",
+        "symbol": symbol,
+        "side": side,
+        "orderType": "Market",
+        "qty": f"{qty:.6f}",
+        "timeInForce": "IOC",
+        "timestamp": timestamp
+    }
+    json_body = json.dumps(body, separators=(',', ':'), sort_keys=True)
+
+    signature, recv_window = sign_request_v5(timestamp, API_KEY, API_SECRET, json_body)
+
+    headers = {
+        "X-BAPI-API-KEY": API_KEY,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN": signature,
+        "Content-Type": "application/json"
+    }
+
+    log(f"[DEBUG] Parametri ordine inviati (headers): {headers}")
+    log(f"[DEBUG] Corpo JSON (usato anche per sign): {json_body}")
+
+    url = BASE_URL + "/v5/order/create"
+    try:
+        response = requests.post(url, headers=headers, data=json_body)
+        return response.json()
+    except Exception as e:
+        log(f"[{symbol}] Errore ordine: {e}")
+        return {}
+
 def test_order():
     test_symbol = "BTCUSDT"
-    test_price = 51000  # stima per qty
+    test_price = 51000  # ipotetico
     test_qty = round(TRADE_AMOUNT_USDT / test_price, 6)
     log(f"[DEBUG] Test ordine qty={test_qty}, apiKey={(API_KEY[:4] + '***') if API_KEY else 'None'}")
     result = place_order(test_symbol, "Buy", test_qty)
@@ -125,39 +136,3 @@ if __name__ == "__main__":
     log(f"API_KEY loaded: {bool(API_KEY)}, API_SECRET loaded: {bool(API_SECRET)}")
     log("🟢 Avvio bot e test ordine iniziale")
     test_order()
-
-    while True:
-        for symbol in SYMBOLS:
-            try:
-                closes, volumes = get_klines(symbol)
-                if len(closes) < EMA_PERIOD:
-                    continue
-
-                rsi = calculate_rsi(closes)
-                ema = calculate_ema(closes, EMA_PERIOD)
-                price = closes[-1]
-                avg_vol = sum(volumes[-20:]) / 20
-                recent_vol = sum(volumes[-3:]) / 3
-                has_position = symbol in positions
-
-                if 50 < rsi < 65 and price > ema and recent_vol > avg_vol * 1.1:
-                    if not has_position or positions[symbol]["entry"] != price:
-                        qty = round(TRADE_AMOUNT_USDT / price, 6)
-                        result = place_order(symbol, "Buy", qty)
-                        positions[symbol] = {"entry": price, "qty": qty}
-                        send_telegram(f"✅ ACQUISTO {symbol} a {price:.2f} (qty: {qty})")
-                        log(f"ACQUISTO {symbol}: prezzo={price:.2f} qty={qty}")
-
-                if has_position:
-                    entry = positions[symbol]["entry"]
-                    qty = positions[symbol]["qty"]
-                    if price >= entry * TAKE_PROFIT or price <= entry * STOP_LOSS or price < ema:
-                        result = place_order(symbol, "Sell", qty)
-                        send_telegram(f"❌ VENDITA {symbol} a {price:.2f} (qty: {qty})")
-                        log(f"VENDITA {symbol}: prezzo={price:.2f} qty={qty}")
-                        del positions[symbol]
-
-            except Exception as e:
-                log(f"[⚠️ {symbol}] Errore: {e}")
-
-        time.sleep(60)
