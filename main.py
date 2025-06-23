@@ -73,15 +73,17 @@ def place_order(symbol, side, qty):
     body["sign"] = sign_request(body)
 
     url = BASE_URL + "/v5/order/create"
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    headers = {
+        "Content-Type": "application/json"
+    }
 
     try:
-        encoded = "&".join(f"{k}={v}" for k, v in body.items())
-        response = requests.post(url, data=encoded, headers=headers)
+        response = requests.post(url, json=body, headers=headers)
         return response.json()
     except Exception as e:
         log(f"[{symbol}] Errore ordine: {e}")
         return {}
+
 
 def test_order():
     test_symbol = "BTCUSDT"
