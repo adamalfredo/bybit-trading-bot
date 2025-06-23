@@ -3,25 +3,16 @@ import hmac
 import hashlib
 import requests
 import os
-import json
 from dotenv import load_dotenv
 from datetime import datetime
 
-DEBUG = True
-
-def log(msg):
-    if DEBUG:
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
-
-# Carica variabili da Railway o .env locale
+# Carica le variabili da Railway o .env
 load_dotenv()
 
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-log(f"API_KEY loaded: {bool(API_KEY)}, API_SECRET loaded: {bool(API_SECRET)}")
 
 SYMBOLS = ["BTCUSDT"]
 RSI_PERIOD = 14
@@ -32,6 +23,11 @@ TRADE_AMOUNT_USDT = 5
 BASE_URL = "https://api.bytick.com"
 
 positions = {}
+DEBUG = True
+
+def log(msg):
+    if DEBUG:
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
@@ -95,7 +91,7 @@ def get_klines(symbol):
 def place_order(symbol, side, qty):
     timestamp = str(int(time.time() * 1000))
     params = {
-        "apiKey": API_KEY,  # <- Spostato qui
+        "apiKey": API_KEY,
         "category": "spot",
         "symbol": symbol,
         "side": side,
@@ -104,18 +100,18 @@ def place_order(symbol, side, qty):
         "timeInForce": "IOC",
         "timestamp": timestamp
     }
-    params["sign"] = sign_request(params)  # Firma ora contiene anche apiKey
+    params["sign"] = sign_request(params)
 
     url = BASE_URL + "/v5/order/create"
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}  # <-- CORRETTO
     try:
-        response = requests.post(url, data=json.dumps(params), headers=headers)
+        response = requests.post(url, data=params, headers=headers)
         return response.json()
     except Exception as e:
         log(f"[{symbol}] Errore ordine: {e}")
         return {}
 
-
+# Test ordine una volta all'avvio
 def test_order():
     test_symbol = "BTCUSDT"
     test_price = 102600
@@ -125,6 +121,7 @@ def test_order():
     log(f"Test ordine risultato: {result}")
 
 if __name__ == "__main__":
+    log(f"API_KEY loaded: {API_KEY is not None}, API_SECRET loaded: {API_SECRET is not None}")
     log("🟢 Avvio bot e test ordine iniziale")
     test_order()
 
