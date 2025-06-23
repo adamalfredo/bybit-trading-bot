@@ -20,7 +20,7 @@ RSI_PERIOD = 14
 EMA_PERIOD = 50
 TAKE_PROFIT = 1.07
 STOP_LOSS = 0.97
-TRADE_AMOUNT_USDT = 50
+TRADE_AMOUNT_USDT = 100
 BASE_URL = "https://api.bybit.com"
 
 positions = {}
