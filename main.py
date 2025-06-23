@@ -4,7 +4,9 @@ import requests
 import yfinance as yf
 import numpy as np
 import pandas as pd
-import ta
+from ta.trend import SMAIndicator
+from ta.volatility import BollingerBands
+from ta.momentum import RSIIndicator
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -35,19 +37,20 @@ def notify_telegram(message: str):
 def analyze_asset(symbol):
     try:
         df = yf.download(tickers=symbol, period="7d", interval="15m", progress=False)
-
         if len(df) < 50:
             return None
 
         df.dropna(inplace=True)
 
-        # Indicatori tecnici (usando la libreria ta)
-        df['sma_20'] = ta.trend.sma_indicator(df['Close'], window=20)
-        df['sma_50'] = ta.trend.sma_indicator(df['Close'], window=50)
-        bb = ta.volatility.BollingerBands(df['Close'], window=20)
+        # Indicatori tecnici corretti (usando Series, non DataFrame)
+        df['sma_20'] = SMAIndicator(close=df['Close'], window=20).sma_indicator()
+        df['sma_50'] = SMAIndicator(close=df['Close'], window=50).sma_indicator()
+
+        bb = BollingerBands(close=df['Close'], window=20)
         df['bb_upper'] = bb.bollinger_hband()
         df['bb_lower'] = bb.bollinger_lband()
-        df['rsi'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
+
+        df['rsi'] = RSIIndicator(close=df['Close'], window=14).rsi()
 
         last = df.iloc[-1]
         prev = df.iloc[-2]
@@ -61,7 +64,7 @@ def analyze_asset(symbol):
                 "strategy": "Breakout Volatilità"
             }
 
-        # Segnale golden cross
+        # Golden cross
         if prev['sma_20'] < prev['sma_50'] and last['sma_20'] > last['sma_50']:
             return {
                 "type": "entry",
