@@ -7,16 +7,23 @@ import json
 from dotenv import load_dotenv
 from datetime import datetime
 
+DEBUG = True
+
+def log(msg):
+    if DEBUG:
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+
 # Carica variabili da Railway (usa .env solo in locale)
 load_dotenv()
-log(f"API_KEY: {API_KEY}, API_SECRET: {API_SECRET}")
 
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-SYMBOLS = ["BTCUSDT"]  # Usa solo BTC per il test
+log(f"API_KEY: {API_KEY}, API_SECRET: {API_SECRET}")  # ora è dopo la definizione di log()
+
+SYMBOLS = ["BTCUSDT"]
 RSI_PERIOD = 14
 EMA_PERIOD = 50
 TAKE_PROFIT = 1.07
@@ -25,11 +32,6 @@ TRADE_AMOUNT_USDT = 5
 BASE_URL = "https://api.bytick.com"
 
 positions = {}
-DEBUG = True
-
-def log(msg):
-    if DEBUG:
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
@@ -112,7 +114,6 @@ def place_order(symbol, side, qty):
         log(f"[{symbol}] Errore ordine: {e}")
         return {}
 
-# Test ordine una volta all'avvio
 def test_order():
     test_symbol = "BTCUSDT"
     test_price = 102600
