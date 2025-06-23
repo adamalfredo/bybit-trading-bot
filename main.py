@@ -10,7 +10,7 @@ API_SECRET = os.getenv("BYBIT_API_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-BASE_URL = "https://api.bybit.com"
+BASE_URL = "https://api-testnet.bybit.com"
 ORDER_ENDPOINT = "/v5/order/create"
 
 ORDER_QTY = "0.000050"
@@ -35,6 +35,25 @@ def sign_v5(secret, api_key, timestamp, recv_window, json_str):
     string_to_sign = f"{api_key}{timestamp}{recv_window}{json_str}"
     return hmac.new(secret.encode(), string_to_sign.encode(), hashlib.sha256).hexdigest()
 
+def test_signed_get():
+    endpoint = "/v5/account/info"
+    timestamp = get_timestamp()
+    recv_window = "5000"
+    query = ""
+
+    string_to_sign = f"{API_KEY}{timestamp}{recv_window}{query}"
+    signature = hmac.new(API_SECRET.encode(), string_to_sign.encode(), hashlib.sha256).hexdigest()
+
+    headers = {
+        "X-BAPI-API-KEY": API_KEY,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN": signature
+    }
+
+    url = BASE_URL + endpoint
+    response = requests.get(url, headers=headers)
+    log(f"GET /v5/account/info result: {response.json()}")
 
 def place_order(symbol, side, qty):
     timestamp = str(int(time.time() * 1000))
@@ -76,6 +95,8 @@ def place_order(symbol, side, qty):
         log(f"Errore richiesta ordine: {e}")
         notify_telegram(f"Errore ordine: {e}")
         return None
+
+
 
 
 if __name__ == "__main__":
