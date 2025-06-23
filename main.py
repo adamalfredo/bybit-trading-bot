@@ -3,10 +3,11 @@ import hmac
 import hashlib
 import requests
 import os
+import json
 from dotenv import load_dotenv
 from datetime import datetime
 
-# Carica le variabili da Railway o .env
+# Carica variabili da Railway (usa .env solo in locale)
 load_dotenv()
 
 API_KEY = os.getenv("BYBIT_API_KEY")
@@ -39,7 +40,7 @@ def send_telegram(message):
 
 def sign_request(params):
     sorted_params = sorted((k, str(v)) for k, v in params.items())
-    query_string = "&".join([f"{k}={v}" for k, v in sorted_params])
+    query_string = "&".join(f"{k}={v}" for k, v in sorted_params)
     signature = hmac.new(
         API_SECRET.encode("utf-8"),
         query_string.encode("utf-8"),
@@ -90,7 +91,7 @@ def get_klines(symbol):
 
 def place_order(symbol, side, qty):
     timestamp = str(int(time.time() * 1000))
-    params = {
+    body = {
         "apiKey": API_KEY,
         "category": "spot",
         "symbol": symbol,
@@ -100,12 +101,19 @@ def place_order(symbol, side, qty):
         "timeInForce": "IOC",
         "timestamp": timestamp
     }
-    params["sign"] = sign_request(params)
+
+    log(f"[DEBUG] Parametri ordine: apiKey={API_KEY}, apiSecret={(API_SECRET[:4] + '***') if API_SECRET else 'None'}")
+
+    body["sign"] = sign_request(body)
 
     url = BASE_URL + "/v5/order/create"
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}  # <-- CORRETTO
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+
     try:
-        response = requests.post(url, data=params, headers=headers)
+        encoded = "&".join(f"{k}={v}" for k, v in body.items())
+        response = requests.post(url, data=encoded, headers=headers)
         return response.json()
     except Exception as e:
         log(f"[{symbol}] Errore ordine: {e}")
@@ -116,12 +124,13 @@ def test_order():
     test_symbol = "BTCUSDT"
     test_price = 102600
     test_qty = round(TRADE_AMOUNT_USDT / test_price, 6)
+    log(f"[DEBUG] Test ordine qty={test_qty}, apiKey={(API_KEY[:4] + '***') if API_KEY else 'None'}")
     result = place_order(test_symbol, "Buy", test_qty)
     send_telegram(f"[TEST] Risposta ordine: {result}")
     log(f"Test ordine risultato: {result}")
 
 if __name__ == "__main__":
-    log(f"API_KEY loaded: {API_KEY is not None}, API_SECRET loaded: {API_SECRET is not None}")
+    log(f"API_KEY loaded: {bool(API_KEY)}, API_SECRET loaded: {bool(API_SECRET)}")
     log("🟢 Avvio bot e test ordine iniziale")
     test_order()
 
