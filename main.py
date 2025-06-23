@@ -3,7 +3,6 @@ import time
 import requests
 import yfinance as yf
 import pandas as pd
-import numpy as np
 import ta
 from dotenv import load_dotenv
 
@@ -42,7 +41,7 @@ def analyze_asset(symbol):
 
         df.dropna(inplace=True)
 
-        # Indicatori tecnici
+        # Indicatori
         bb = ta.volatility.BollingerBands(close=df["Close"], window=20, window_dev=2)
         df["bb_upper"] = bb.bollinger_hband()
         df["bb_lower"] = bb.bollinger_lband()
@@ -52,7 +51,6 @@ def analyze_asset(symbol):
 
         last = df.iloc[-1]
         prev = df.iloc[-2]
-
         last_price = last["Close"]
         symbol_clean = symbol.replace("-USD", "USDT")
 
