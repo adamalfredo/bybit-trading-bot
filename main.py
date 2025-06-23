@@ -3,7 +3,10 @@ import time
 import requests
 import yfinance as yf
 import pandas as pd
-import ta
+import numpy as np
+from ta.volatility import BollingerBands
+from ta.momentum import RSIIndicator
+from ta.trend import SMAIndicator
 from dotenv import load_dotenv
 
 # Carica variabili da .env
@@ -39,24 +42,23 @@ def analyze_asset(symbol):
         if df is None or df.empty or len(df) < 60:
             return None
 
-        df = df.dropna().copy()
+        df.dropna(inplace=True)
 
-        # Indicatori tecnici con ta
-        bb = ta.volatility.BollingerBands(close=df["Close"], window=20, window_dev=2)
+        close = df["Close"]
+        bb = BollingerBands(close=close, window=20, window_dev=2)
         df["bb_upper"] = bb.bollinger_hband()
         df["bb_lower"] = bb.bollinger_lband()
-        df["rsi"] = ta.momentum.RSIIndicator(close=df["Close"], window=14).rsi()
-        df["sma20"] = ta.trend.SMAIndicator(close=df["Close"], window=20).sma_indicator()
-        df["sma50"] = ta.trend.SMAIndicator(close=df["Close"], window=50).sma_indicator()
+        df["rsi"] = RSIIndicator(close=close, window=14).rsi()
+        df["sma20"] = SMAIndicator(close=close, window=20).sma_indicator()
+        df["sma50"] = SMAIndicator(close=close, window=50).sma_indicator()
 
-        df = df.dropna()
+        df.dropna(inplace=True)
 
         last = df.iloc[-1]
         prev = df.iloc[-2]
         last_price = last["Close"]
         symbol_clean = symbol.replace("-USD", "USDT")
 
-        # 📈 Breakout sulla banda superiore
         if last_price > last["bb_upper"] and last["rsi"] < 70:
             return {
                 "type": "entry",
@@ -65,7 +67,6 @@ def analyze_asset(symbol):
                 "strategy": "Breakout Bollinger"
             }
 
-        # 📈 Incrocio medie mobili (Golden Cross)
         if prev["sma20"] < prev["sma50"] and last["sma20"] > last["sma50"]:
             return {
                 "type": "entry",
@@ -74,7 +75,6 @@ def analyze_asset(symbol):
                 "strategy": "Golden Cross"
             }
 
-        # 📉 Breakdown sotto banda inferiore
         if last_price < last["bb_lower"] and last["rsi"] > 30:
             return {
                 "type": "exit",
