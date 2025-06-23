@@ -13,7 +13,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 BASE_URL = "https://api.bybit.com"
 ORDER_ENDPOINT = "/v5/order/create"
 
-ORDER_QTY = "0.000050"  # almeno 5 USDT per BTC
+ORDER_QTY = "0.000050"  # Minimo 5 USDT
 
 
 def log(msg):
@@ -35,13 +35,10 @@ def get_timestamp():
     return str(int(time.time() * 1000))
 
 
-def sign_payload(secret, params: dict) -> str:
-    # Ordina i parametri in base al nome della chiave e costruisci la query string
-    sorted_items = sorted(params.items())
-    query_string = "&".join(f"{key}={value}" for key, value in sorted_items)
+def sign_json(secret, json_str: str) -> str:
     return hmac.new(
         secret.encode("utf-8"),
-        query_string.encode("utf-8"),
+        json_str.encode("utf-8"),
         hashlib.sha256
     ).hexdigest()
 
@@ -59,7 +56,9 @@ def place_order(symbol, side, qty):
         "timestamp": timestamp
     }
 
-    signature = sign_payload(API_SECRET, body)
+    # Questo è ciò che va firmato
+    json_body = json.dumps(body, separators=(",", ":"))
+    signature = sign_json(API_SECRET, json_body)
 
     headers = {
         "X-BAPI-API-KEY": API_KEY,
@@ -68,8 +67,6 @@ def place_order(symbol, side, qty):
         "X-BAPI-SIGN": signature,
         "Content-Type": "application/json"
     }
-
-    json_body = json.dumps(body)
 
     log(f"[DEBUG] Parametri ordine inviati (headers): {headers}")
     log(f"[DEBUG] Corpo JSON (usato anche per sign): {json_body}")
