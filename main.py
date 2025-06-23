@@ -20,7 +20,7 @@ RSI_PERIOD = 14
 EMA_PERIOD = 50
 TAKE_PROFIT = 1.07
 STOP_LOSS = 0.97
-TRADE_AMOUNT_USDT = 5
+TRADE_AMOUNT_USDT = 50  # Aggiornato a 50 USDT
 BASE_URL = "https://api.bybit.com"
 
 positions = {}
@@ -38,15 +38,12 @@ def send_telegram(message):
     except Exception as e:
         log(f"[Telegram] Errore invio messaggio: {e}")
 
-def sign_request(params):
-    sorted_params = sorted((k, str(v)) for k, v in params.items())
-    query_string = "&".join([f"{k}={v}" for k, v in sorted_params])
-    signature = hmac.new(
+def sign_request(payload: str) -> str:
+    return hmac.new(
         API_SECRET.encode("utf-8"),
-        query_string.encode("utf-8"),
+        payload.encode("utf-8"),
         hashlib.sha256
     ).hexdigest()
-    return signature
 
 def calculate_rsi(prices):
     gains, losses = [], []
@@ -91,25 +88,18 @@ def get_klines(symbol):
 
 def place_order(symbol, side, qty):
     timestamp = str(int(time.time() * 1000))
-
     body = {
         "category": "spot",
         "symbol": symbol,
         "side": side,
         "orderType": "Market",
         "qty": str(qty),
-        "timeInForce": "IOC"
+        "timeInForce": "IOC",
+        "timestamp": timestamp
     }
 
-    json_body = json.dumps(body, separators=(',', ':'))
-
-    # Firma da generare con: timestamp + API_KEY + json_body
-    prehash = timestamp + API_KEY + json_body
-    signature = hmac.new(
-        API_SECRET.encode("utf-8"),
-        prehash.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
+    payload = json.dumps(body, separators=(',', ':'))
+    signature = sign_request(payload)
 
     headers = {
         "X-BAPI-API-KEY": API_KEY,
@@ -119,22 +109,18 @@ def place_order(symbol, side, qty):
     }
 
     log(f"[DEBUG] Parametri ordine inviati (headers): {headers}")
-    log(f"[DEBUG] Corpo JSON (per sign e invio): {json_body}")
-
-    url = BASE_URL + "/v5/order/create"
+    log(f"[DEBUG] Corpo JSON (usato anche per sign): {payload}")
 
     try:
-        response = requests.post(url, data=json_body, headers=headers)
+        response = requests.post(BASE_URL + "/v5/order/create", headers=headers, data=payload)
         return response.json()
     except Exception as e:
         log(f"[{symbol}] Errore ordine: {e}")
         return {}
 
-
-
 def test_order():
     test_symbol = "BTCUSDT"
-    test_price = 102600
+    test_price = 102000
     test_qty = round(TRADE_AMOUNT_USDT / test_price, 6)
     log(f"[DEBUG] Test ordine qty={test_qty}, apiKey={(API_KEY[:4] + '***') if API_KEY else 'None'}")
     result = place_order(test_symbol, "Buy", test_qty)
