@@ -108,12 +108,11 @@ def place_order(symbol, side, qty):
 
     url = BASE_URL + "/v5/order/create"
     headers = {
-        "Content-Type": "application/x-www-form-urlencoded"
+        "Content-Type": "application/json"
     }
 
     try:
-        encoded = "&".join(f"{k}={v}" for k, v in body.items())
-        response = requests.post(url, data=encoded, headers=headers)
+        response = requests.post(url, json=body, headers=headers)
         return response.json()
     except Exception as e:
         log(f"[{symbol}] Errore ordine: {e}")
