@@ -42,10 +42,10 @@ def analyze_asset(symbol):
 
         df.dropna(inplace=True)
 
-        # Usa solo le Series, non DataFrame
-        close = df['Close']
-        high = df['High']
-        low = df['Low']
+        # Forza in modo sicuro le Series 1D
+        close = df["Close"].squeeze()
+        high = df["High"].squeeze()
+        low = df["Low"].squeeze()
 
         df['rsi'] = ta.momentum.RSIIndicator(close=close).rsi()
         bb = ta.volatility.BollingerBands(close=close)
