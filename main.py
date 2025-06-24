@@ -37,7 +37,13 @@ def notify_telegram(message: str):
 
 def analyze_asset(symbol):
     try:
-        df = yf.download(tickers=symbol, period="7d", interval="15m", progress=False)
+        df = yf.download(
+            tickers=symbol,
+            period="7d",
+            interval="15m",
+            progress=False,
+            auto_adjust=True,
+        )
 
         # In alcune versioni `yf.download` restituisce colonne MultiIndex anche
         # per un singolo ticker. Questo causa errori nelle librerie di
@@ -45,10 +51,11 @@ def analyze_asset(symbol):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(-1)
 
-        # Normalizza i nomi delle colonne in modo da garantire la presenza
-        # di "Close", "Open", ecc. anche quando yfinance restituisce nomi
-        # minuscoli o diversi.
-        df.columns = [c.capitalize() for c in df.columns]
+        # Normalizza i nomi delle colonne e gestisce la possibile presenza di
+        # "Adj Close" al posto di "Close" nelle versioni recenti di yfinance.
+        df.columns = [c.title() for c in df.columns]
+        if "Adj Close" in df.columns and "Close" not in df.columns:
+            df.rename(columns={"Adj Close": "Close"}, inplace=True)
 
         if df is None or df.empty or len(df) < 60:
             return None
