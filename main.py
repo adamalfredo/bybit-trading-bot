@@ -131,7 +131,7 @@ Strategia: {signal['strategy']}"""
 
 if __name__ == "__main__":
     log("🔄 Avvio sistema di monitoraggio segnali reali")
-    notify_telegram("\ud83d\udd14 Test: bot avviato correttamente")
+    notify_telegram("🔔 Test: bot avviato correttamente")
     while True:
         try:
             scan_assets()
