@@ -158,15 +158,7 @@ Strategia: {sig['strategy']}"""
             log(msg.replace("\n", " | "))
             notify_telegram(msg)
 
-        mini_msg = (
-            f"📊 Mini-analisi {result['symbol']}\n"
-            f"Prezzo: {result['price']}\n"
-            f"RSI: {result['rsi']}\n"
-            f"SMA20: {result['sma20']}\n"
-            f"SMA50: {result['sma50']}"
-        )
-        log(mini_msg.replace("\n", " | "))
-        notify_telegram(mini_msg)
+        # Le mini-analisi sono state rimosse: il bot ora invia solo i segnali
 
 
 if __name__ == "__main__":
