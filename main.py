@@ -61,13 +61,26 @@ def analyze_asset(symbol):
         # Rende i nomi delle colonne uniformi in minuscolo e senza spazi
         df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
 
-        # Cerca la colonna di chiusura indipendentemente dal nome esatto
-        possible_close = [c for c in df.columns if "close" in c]
-        if possible_close:
-            # usa la prima occorrenza come riferimento
-            main_close = possible_close[0]
-            if main_close != "close":
-                df.rename(columns={main_close: "close"}, inplace=True)
+        # Determina il nome della colonna di chiusura con varie euristiche
+        priority = [
+            "close",
+            "adj_close",
+            "close_price",
+            "closing_price",
+            "closeprice",
+            "closingprice",
+            "last",
+            "c",
+        ]
+        close_col = next((c for c in priority if c in df.columns), None)
+        if not close_col:
+            for c in df.columns:
+                if "close" in c:
+                    close_col = c
+                    break
+
+        if close_col and close_col != "close":
+            df.rename(columns={close_col: "close"}, inplace=True)
 
         if "close" not in df.columns:
 
