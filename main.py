@@ -39,7 +39,9 @@ def analyze_asset(symbol):
     try:
         df = yf.download(tickers=symbol, period="7d", interval="15m", progress=False)
 
-        # Handle MultiIndex columns that yfinance may return
+        # In alcune versioni `yf.download` restituisce colonne MultiIndex anche
+        # per un singolo ticker. Questo causa errori nelle librerie di
+        # analisi tecnica che si aspettano serie 1-D.
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(-1)
 
