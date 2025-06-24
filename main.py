@@ -36,6 +36,7 @@ def notify_telegram(message: str):
 
 
 def analyze_asset(symbol):
+    """Analizza l'asset e restituisce informazioni e un eventuale segnale."""
     try:
         df = yf.download(
             tickers=symbol,
@@ -82,34 +83,26 @@ def analyze_asset(symbol):
 
         last = df.iloc[-1]
         prev = df.iloc[-2]
-        last_price = last["Close"]
+        last_price = float(last["Close"])
         symbol_clean = symbol.replace("-USD", "USDT")
 
+        result = {
+            "symbol": symbol_clean,
+            "price": round(last_price, 2),
+            "rsi": round(float(last["rsi"]), 2),
+            "sma20": round(float(last["sma20"]), 2),
+            "sma50": round(float(last["sma50"]), 2),
+            "signal": None,
+        }
+
         if last_price > last["bb_upper"] and last["rsi"] < 70:
-            return {
-                "type": "entry",
-                "symbol": symbol_clean,
-                "price": round(last_price, 2),
-                "strategy": "Breakout Bollinger"
-            }
+            result["signal"] = {"type": "entry", "strategy": "Breakout Bollinger"}
+        elif prev["sma20"] < prev["sma50"] and last["sma20"] > last["sma50"]:
+            result["signal"] = {"type": "entry", "strategy": "Golden Cross"}
+        elif last_price < last["bb_lower"] and last["rsi"] > 30:
+            result["signal"] = {"type": "exit", "strategy": "Breakdown"}
 
-        if prev["sma20"] < prev["sma50"] and last["sma20"] > last["sma50"]:
-            return {
-                "type": "entry",
-                "symbol": symbol_clean,
-                "price": round(last_price, 2),
-                "strategy": "Golden Cross"
-            }
-
-        if last_price < last["bb_lower"] and last["rsi"] > 30:
-            return {
-                "type": "exit",
-                "symbol": symbol_clean,
-                "price": round(last_price, 2),
-                "strategy": "Breakdown"
-            }
-
-        return None
+        return result
 
     except Exception as e:
         log(f"Errore analisi {symbol}: {e}")
@@ -118,15 +111,29 @@ def analyze_asset(symbol):
 
 def scan_assets():
     for asset in ASSET_LIST:
-        signal = analyze_asset(asset)
-        if signal:
-            tipo = "📈 Segnale di ENTRATA" if signal["type"] == "entry" else "📉 Segnale di USCITA"
+        result = analyze_asset(asset)
+        if not result:
+            continue
+
+        if result["signal"]:
+            sig = result["signal"]
+            tipo = "📈 Segnale di ENTRATA" if sig["type"] == "entry" else "📉 Segnale di USCITA"
             msg = f"""{tipo}
-Asset: {signal['symbol']}
-Prezzo: {signal['price']}
-Strategia: {signal['strategy']}"""
+Asset: {result['symbol']}
+Prezzo: {result['price']}
+Strategia: {sig['strategy']}"""
             log(msg.replace("\n", " | "))
             notify_telegram(msg)
+
+        mini_msg = (
+            f"📊 Mini-analisi {result['symbol']}\n"
+            f"Prezzo: {result['price']}\n"
+            f"RSI: {result['rsi']}\n"
+            f"SMA20: {result['sma20']}\n"
+            f"SMA50: {result['sma50']}"
+        )
+        log(mini_msg.replace("\n", " | "))
+        notify_telegram(mini_msg)
 
 
 if __name__ == "__main__":
