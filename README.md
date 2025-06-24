@@ -13,4 +13,4 @@
 - Usa 5 USDT per ogni trade spot
 - Riceverai notifiche su Telegram
 - All'avvio il bot invia un messaggio di prova su Telegram
-- In questa versione di test invia anche una mini-analisi per ogni asset ad ogni scansione
+- In questa versione di test invia una mini-analisi (o un messaggio di errore) per ogni asset ad ogni scansione

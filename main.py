@@ -36,7 +36,9 @@ def notify_telegram(message: str):
 
 
 def analyze_asset(symbol):
-    """Analizza l'asset e restituisce informazioni e un eventuale segnale."""
+    """Analizza l'asset e restituisce informazioni o errori."""
+    symbol_clean = symbol.replace("-USD", "USDT")
+    result = {"symbol": symbol_clean}
     try:
         df = yf.download(
             tickers=symbol,
@@ -47,7 +49,8 @@ def analyze_asset(symbol):
         )
 
         if df is None or df.empty or len(df) < 60:
-            return None
+            result["error"] = "dati insufficienti"
+            return result
 
         # In alcune versioni `yf.download` restituisce colonne MultiIndex anche
         # per un singolo ticker. Questo causa errori nelle librerie di
@@ -62,7 +65,8 @@ def analyze_asset(symbol):
             df.rename(columns={"Adj Close": "Close"}, inplace=True)
 
         if "Close" not in df.columns:
-            return None
+            result["error"] = "colonna Close assente"
+            return result
 
         df.dropna(inplace=True)
 
@@ -84,16 +88,16 @@ def analyze_asset(symbol):
         last = df.iloc[-1]
         prev = df.iloc[-2]
         last_price = float(last["Close"])
-        symbol_clean = symbol.replace("-USD", "USDT")
 
-        result = {
-            "symbol": symbol_clean,
-            "price": round(last_price, 2),
-            "rsi": round(float(last["rsi"]), 2),
-            "sma20": round(float(last["sma20"]), 2),
-            "sma50": round(float(last["sma50"]), 2),
-            "signal": None,
-        }
+        result.update(
+            {
+                "price": round(last_price, 2),
+                "rsi": round(float(last["rsi"]), 2),
+                "sma20": round(float(last["sma20"]), 2),
+                "sma50": round(float(last["sma50"]), 2),
+                "signal": None,
+            }
+        )
 
         if last_price > last["bb_upper"] and last["rsi"] < 70:
             result["signal"] = {"type": "entry", "strategy": "Breakout Bollinger"}
@@ -106,16 +110,20 @@ def analyze_asset(symbol):
 
     except Exception as e:
         log(f"Errore analisi {symbol}: {e}")
-        return None
+        result["error"] = str(e)
+        return result
 
 
 def scan_assets():
     for asset in ASSET_LIST:
         result = analyze_asset(asset)
-        if not result:
+        if "error" in result:
+            err_msg = f"⚠️ Errore analisi {result['symbol']}: {result['error']}"
+            log(err_msg)
+            notify_telegram(err_msg)
             continue
 
-        if result["signal"]:
+        if result.get("signal"):
             sig = result["signal"]
             tipo = "📈 Segnale di ENTRATA" if sig["type"] == "entry" else "📉 Segnale di USCITA"
             msg = f"""{tipo}
