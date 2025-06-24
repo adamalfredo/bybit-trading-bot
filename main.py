@@ -45,6 +45,11 @@ def analyze_asset(symbol):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(-1)
 
+        # Normalizza i nomi delle colonne in modo da garantire la presenza
+        # di "Close", "Open", ecc. anche quando yfinance restituisce nomi
+        # minuscoli o diversi.
+        df.columns = [c.capitalize() for c in df.columns]
+
         if df is None or df.empty or len(df) < 60:
             return None
 
