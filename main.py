@@ -39,6 +39,10 @@ def analyze_asset(symbol):
     try:
         df = yf.download(tickers=symbol, period="7d", interval="15m", progress=False)
 
+        # Handle MultiIndex columns that yfinance may return
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(-1)
+
         if df is None or df.empty or len(df) < 60:
             return None
 
