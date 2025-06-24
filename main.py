@@ -53,9 +53,15 @@ def analyze_asset(symbol):
 
         # Normalizza i nomi delle colonne e gestisce la possibile presenza di
         # "Adj Close" al posto di "Close" nelle versioni recenti di yfinance.
-        df.columns = [c.title() for c in df.columns]
+        df.columns = [str(c).strip().title() for c in df.columns]
         if "Adj Close" in df.columns and "Close" not in df.columns:
             df.rename(columns={"Adj Close": "Close"}, inplace=True)
+
+        # Alcuni rari casi restituiscono un DataFrame senza colonna "Close".
+        # Meglio interrompere l'analisi per evitare eccezioni nelle
+        # librerie di indicatori tecnici.
+        if "Close" not in df.columns:
+            raise KeyError("Close non trovato nei dati")
 
         if df is None or df.empty or len(df) < 60:
             return None
