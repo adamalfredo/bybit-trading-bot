@@ -8,6 +8,7 @@ from ta.volatility import BollingerBands
 from ta.momentum import RSIIndicator
 from ta.trend import SMAIndicator
 from dotenv import load_dotenv
+from typing import Optional
 
 # Carica variabili da .env
 load_dotenv()
@@ -35,6 +36,29 @@ def notify_telegram(message: str):
         log(f"Errore Telegram: {e}")
 
 
+def find_close_column(df: pd.DataFrame) -> Optional[str]:
+    """Trova il nome della colonna di chiusura, se esiste."""
+    cols = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+    df.columns = cols
+    priority = [
+        "close",
+        "adj_close",
+        "close_price",
+        "closing_price",
+        "closeprice",
+        "closingprice",
+        "last",
+        "c",
+    ]
+    for p in priority:
+        if p in df.columns:
+            return p
+    for c in df.columns:
+        if "close" in c:
+            return c
+    return None
+
+
 def analyze_asset(symbol):
     """Analizza l'asset e restituisce informazioni o errori."""
     symbol_clean = symbol.replace("-USD", "USDT")
@@ -58,33 +82,13 @@ def analyze_asset(symbol):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(-1)
 
-        # Rende i nomi delle colonne uniformi in minuscolo e senza spazi
-        df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
-
-        # Determina il nome della colonna di chiusura con varie euristiche
-        priority = [
-            "close",
-            "adj_close",
-            "close_price",
-            "closing_price",
-            "closeprice",
-            "closingprice",
-            "last",
-            "c",
-        ]
-        close_col = next((c for c in priority if c in df.columns), None)
-        if not close_col:
-            for c in df.columns:
-                if "close" in c:
-                    close_col = c
-                    break
-
+        close_col = find_close_column(df)
         if close_col and close_col != "close":
             df.rename(columns={close_col: "close"}, inplace=True)
 
         if "close" not in df.columns:
-
-            result["error"] = "colonna Close assente"
+            cols = ", ".join(df.columns)
+            result["error"] = f"colonna Close assente ({cols})"
             return result
 
         df.dropna(inplace=True)
