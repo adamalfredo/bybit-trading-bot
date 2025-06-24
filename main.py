@@ -4,6 +4,7 @@ import requests
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import re
 from ta.volatility import BollingerBands
 from ta.momentum import RSIIndicator
 from ta.trend import SMAIndicator
@@ -36,6 +37,9 @@ def notify_telegram(message: str):
 
 
 def analyze_asset(symbol):
+    """Analizza l'asset e restituisce informazioni o errori."""
+    symbol_clean = symbol.replace("-USD", "USDT")
+    result = {"symbol": symbol_clean}
     try:
         df = yf.download(
             tickers=symbol,
@@ -46,7 +50,8 @@ def analyze_asset(symbol):
         )
 
         if df is None or df.empty or len(df) < 60:
-            return None
+            result["error"] = "dati insufficienti"
+            return result
 
         # In alcune versioni `yf.download` restituisce colonne MultiIndex anche
         # per un singolo ticker. Questo causa errori nelle librerie di
@@ -54,27 +59,43 @@ def analyze_asset(symbol):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(-1)
 
-        # Normalizza i nomi delle colonne e gestisce la possibile presenza di
-        # "Adj Close" al posto di "Close" nelle versioni recenti di yfinance.
-        df.columns = [str(c).strip().title() for c in df.columns]
-        if "Adj Close" in df.columns and "Close" not in df.columns:
-            df.rename(columns={"Adj Close": "Close"}, inplace=True)
+        # Normalizza tutti i nomi rimuovendo spazi, segni e maiuscole
+        df.columns = [re.sub(r"[^a-z0-9]", "", str(c).lower()) for c in df.columns]
 
-        if "Close" not in df.columns:
-            return None
+        # Prova a individuare la colonna di chiusura con un set ampio di sinonimi
+        priority = {
+            "close",
+            "adjclose",
+            "closeprice",
+            "closingprice",
+            "close_price",
+            "closing_price",
+            "last",
+            "c",
+        }
+        close_col = next((c for c in df.columns if c in priority), None)
+        if not close_col:
+            close_col = next((c for c in df.columns if "close" in c), None)
+
+        if close_col and close_col != "close":
+            df.rename(columns={close_col: "close"}, inplace=True)
+
+        if "close" not in df.columns:
+            result["error"] = "colonna Close assente"
+            return result
 
         df.dropna(inplace=True)
 
         # Indicatori tecnici
-        bb = BollingerBands(close=df["Close"], window=20, window_dev=2)
+        bb = BollingerBands(close=df["close"], window=20, window_dev=2)
         df["bb_upper"] = bb.bollinger_hband()
         df["bb_lower"] = bb.bollinger_lband()
 
-        rsi = RSIIndicator(close=df["Close"], window=14)
+        rsi = RSIIndicator(close=df["close"], window=14)
         df["rsi"] = rsi.rsi()
 
-        sma20 = SMAIndicator(close=df["Close"], window=20)
-        sma50 = SMAIndicator(close=df["Close"], window=50)
+        sma20 = SMAIndicator(close=df["close"], window=20)
+        sma50 = SMAIndicator(close=df["close"], window=50)
         df["sma20"] = sma20.sma_indicator()
         df["sma50"] = sma50.sma_indicator()
 
@@ -82,51 +103,61 @@ def analyze_asset(symbol):
 
         last = df.iloc[-1]
         prev = df.iloc[-2]
-        last_price = last["Close"]
-        symbol_clean = symbol.replace("-USD", "USDT")
+        last_price = float(last["close"])
+
+        result.update(
+            {
+                "price": round(last_price, 2),
+                "rsi": round(float(last["rsi"]), 2),
+                "sma20": round(float(last["sma20"]), 2),
+                "sma50": round(float(last["sma50"]), 2),
+                "signal": None,
+            }
+        )
 
         if last_price > last["bb_upper"] and last["rsi"] < 70:
-            return {
-                "type": "entry",
-                "symbol": symbol_clean,
-                "price": round(last_price, 2),
-                "strategy": "Breakout Bollinger"
-            }
+            result["signal"] = {"type": "entry", "strategy": "Breakout Bollinger"}
+        elif prev["sma20"] < prev["sma50"] and last["sma20"] > last["sma50"]:
+            result["signal"] = {"type": "entry", "strategy": "Golden Cross"}
+        elif last_price < last["bb_lower"] and last["rsi"] > 30:
+            result["signal"] = {"type": "exit", "strategy": "Breakdown"}
 
-        if prev["sma20"] < prev["sma50"] and last["sma20"] > last["sma50"]:
-            return {
-                "type": "entry",
-                "symbol": symbol_clean,
-                "price": round(last_price, 2),
-                "strategy": "Golden Cross"
-            }
-
-        if last_price < last["bb_lower"] and last["rsi"] > 30:
-            return {
-                "type": "exit",
-                "symbol": symbol_clean,
-                "price": round(last_price, 2),
-                "strategy": "Breakdown"
-            }
-
-        return None
+        return result
 
     except Exception as e:
         log(f"Errore analisi {symbol}: {e}")
-        return None
+        result["error"] = str(e)
+        return result
 
 
 def scan_assets():
     for asset in ASSET_LIST:
-        signal = analyze_asset(asset)
-        if signal:
-            tipo = "📈 Segnale di ENTRATA" if signal["type"] == "entry" else "📉 Segnale di USCITA"
+        result = analyze_asset(asset)
+        if "error" in result:
+            err_msg = f"⚠️ Errore analisi {result['symbol']}: {result['error']}"
+            log(err_msg)
+            notify_telegram(err_msg)
+            continue
+
+        if result.get("signal"):
+            sig = result["signal"]
+            tipo = "📈 Segnale di ENTRATA" if sig["type"] == "entry" else "📉 Segnale di USCITA"
             msg = f"""{tipo}
-Asset: {signal['symbol']}
-Prezzo: {signal['price']}
-Strategia: {signal['strategy']}"""
+Asset: {result['symbol']}
+Prezzo: {result['price']}
+Strategia: {sig['strategy']}"""
             log(msg.replace("\n", " | "))
             notify_telegram(msg)
+
+        mini_msg = (
+            f"📊 Mini-analisi {result['symbol']}\n"
+            f"Prezzo: {result['price']}\n"
+            f"RSI: {result['rsi']}\n"
+            f"SMA20: {result['sma20']}\n"
+            f"SMA50: {result['sma50']}"
+        )
+        log(mini_msg.replace("\n", " | "))
+        notify_telegram(mini_msg)
 
 
 if __name__ == "__main__":
