@@ -83,6 +83,7 @@ def analyze_asset(symbol):
             df.rename(columns={close_col: "close"}, inplace=True)
 
         if "close" not in df.columns:
+
             result["error"] = "colonna Close assente"
             return result
 
