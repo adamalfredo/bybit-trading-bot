@@ -45,6 +45,9 @@ def analyze_asset(symbol):
             auto_adjust=True,
         )
 
+        if df is None or df.empty or len(df) < 60:
+            return None
+
         # In alcune versioni `yf.download` restituisce colonne MultiIndex anche
         # per un singolo ticker. Questo causa errori nelle librerie di
         # analisi tecnica che si aspettano serie 1-D.
@@ -57,13 +60,7 @@ def analyze_asset(symbol):
         if "Adj Close" in df.columns and "Close" not in df.columns:
             df.rename(columns={"Adj Close": "Close"}, inplace=True)
 
-        # Alcuni rari casi restituiscono un DataFrame senza colonna "Close".
-        # Meglio interrompere l'analisi per evitare eccezioni nelle
-        # librerie di indicatori tecnici.
         if "Close" not in df.columns:
-            raise KeyError("Close non trovato nei dati")
-
-        if df is None or df.empty or len(df) < 60:
             return None
 
         df.dropna(inplace=True)
