@@ -78,9 +78,11 @@ def analyze_asset(symbol):
 
         # In alcune versioni `yf.download` restituisce colonne MultiIndex anche
         # per un singolo ticker. Questo causa errori nelle librerie di
-        # analisi tecnica che si aspettano serie 1-D.
+        # analisi tecnica che si aspettano serie 1-D. L'indice 0 contiene i
+        # nomi delle colonne reali, mentre l'ultimo livello contiene il ticker
+        # ripetuto. Viene quindi utilizzato `get_level_values(0)`.
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(-1)
+            df.columns = df.columns.get_level_values(0)
 
         close_col = find_close_column(df)
         if close_col and close_col != "close":
