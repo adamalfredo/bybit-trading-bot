@@ -58,28 +58,30 @@ def analyze_asset(symbol):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(-1)
 
-        # Normalizza i nomi delle colonne e gestisce la possibile presenza di
-        # "Adj Close" al posto di "Close" nelle versioni recenti di yfinance.
-        df.columns = [str(c).strip().title() for c in df.columns]
-        if "Adj Close" in df.columns and "Close" not in df.columns:
-            df.rename(columns={"Adj Close": "Close"}, inplace=True)
+        # Rende i nomi delle colonne uniformi in minuscolo e senza spazi
+        df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
 
-        if "Close" not in df.columns:
+        # In alcune release esiste solo "adj_close" oppure solo "close".
+        if "close" not in df.columns and "adj_close" in df.columns:
+            df.rename(columns={"adj_close": "close"}, inplace=True)
+
+        if "close" not in df.columns:
+
             result["error"] = "colonna Close assente"
             return result
 
         df.dropna(inplace=True)
 
         # Indicatori tecnici
-        bb = BollingerBands(close=df["Close"], window=20, window_dev=2)
+        bb = BollingerBands(close=df["close"], window=20, window_dev=2)
         df["bb_upper"] = bb.bollinger_hband()
         df["bb_lower"] = bb.bollinger_lband()
 
-        rsi = RSIIndicator(close=df["Close"], window=14)
+        rsi = RSIIndicator(close=df["close"], window=14)
         df["rsi"] = rsi.rsi()
 
-        sma20 = SMAIndicator(close=df["Close"], window=20)
-        sma50 = SMAIndicator(close=df["Close"], window=50)
+        sma20 = SMAIndicator(close=df["close"], window=20)
+        sma50 = SMAIndicator(close=df["close"], window=50)
         df["sma20"] = sma20.sma_indicator()
         df["sma50"] = sma50.sma_indicator()
 
@@ -87,7 +89,7 @@ def analyze_asset(symbol):
 
         last = df.iloc[-1]
         prev = df.iloc[-2]
-        last_price = float(last["Close"])
+        last_price = float(last["close"])
 
         result.update(
             {
