@@ -1,9 +1,11 @@
 import os
 import time
+import hmac
+import json
+import hashlib
 import requests
 import yfinance as yf
 import pandas as pd
-import numpy as np
 from ta.volatility import BollingerBands
 from ta.momentum import RSIIndicator
 from ta.trend import SMAIndicator
@@ -16,8 +18,21 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
+BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
+BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
+BYBIT_BASE_URL = (
+    "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
+)
+
+ORDER_USDT = float(os.getenv("ORDER_USDT", "50"))
+
 ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "DOGE-USD"]
 INTERVAL_MINUTES = 15
+DOWNLOAD_RETRIES = 3
+
+# Cache delle informazioni sugli strumenti Bybit
+INSTRUMENT_CACHE = {}
 
 
 def log(msg):
@@ -34,6 +49,200 @@ def notify_telegram(message: str):
         requests.post(url, data=data, timeout=10)
     except Exception as e:
         log(f"Errore Telegram: {e}")
+
+
+def _sign(payload: str) -> str:
+    """Restituisce la firma HMAC richiesta dalle API Bybit."""
+    if not BYBIT_API_SECRET:
+        return ""
+    return hmac.new(
+        BYBIT_API_SECRET.encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()
+
+
+def fetch_history(symbol: str) -> pd.DataFrame:
+    """Scarica i dati da Yahoo Finance con alcuni tentativi."""
+    for attempt in range(1, DOWNLOAD_RETRIES + 1):
+        try:
+            df = yf.download(
+                tickers=symbol,
+                period="7d",
+                interval="15m",
+                progress=False,
+                auto_adjust=True,
+            )
+            if df is not None and not df.empty:
+                return df
+        except Exception as e:
+            log(f"Errore download {symbol} ({attempt}/{DOWNLOAD_RETRIES}): {e}")
+        time.sleep(2)
+    return pd.DataFrame()
+
+
+def _parse_precision(value, default=6):
+    """Converte basePrecision nel numero di decimali."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        s = str(value)
+        if "." in s:
+            return len(s.split(".")[1].rstrip("0"))
+        return default
+
+
+def get_instrument_info(symbol: str):
+    """Restituisce info dello strumento, inclusi minimi di ordine."""
+    if symbol in INSTRUMENT_CACHE:
+        return INSTRUMENT_CACHE[symbol]
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    # Endpoint principale (v5)
+    url = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
+    params = {"category": "spot", "symbol": symbol}
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("retCode") == 0 and data.get("result", {}).get("list"):
+            info = data["result"]["list"][0]
+            lot = info.get("lotSizeFilter", {})
+            min_qty = float(lot.get("minOrderQty", 0))
+            min_amt = float(lot.get("minOrderAmt", 0))
+            precision = _parse_precision(lot.get("basePrecision", 6))
+            INSTRUMENT_CACHE[symbol] = (min_qty, min_amt, precision)
+            return INSTRUMENT_CACHE[symbol]
+    except Exception as e:
+        log(f"Errore info strumento {symbol} (v5): {e}")
+
+    # Fallback per le vecchie API spot
+    url = f"{BYBIT_BASE_URL}/spot/v3/public/symbols"
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        symbols = data.get("result", {}).get("list", [])
+        for item in symbols:
+            if item.get("name") == symbol:
+                min_qty = float(item.get("minTradeQty", 0))
+                min_amt = float(
+                    item.get("minTradeAmount", item.get("minTradeAmt", 0))
+                )
+                precision = _parse_precision(item.get("basePrecision", 6))
+                INSTRUMENT_CACHE[symbol] = (min_qty, min_amt, precision)
+                return INSTRUMENT_CACHE[symbol]
+    except Exception as e:
+        log(f"Errore info strumento {symbol} (fallback): {e}")
+
+    return 0.0, 0.0, 6
+
+
+def calculate_quantity(symbol: str, usdt: float, price: float) -> tuple[float, float]:
+    """Calcola la quantità e l'USDT realmente utilizzato."""
+    min_qty, min_amt, precision = get_instrument_info(symbol)
+    actual_usdt = max(usdt, min_amt)
+    qty = actual_usdt / price if price > 0 else 0
+    if min_qty > 0:
+        qty = max(qty, min_qty)
+        actual_usdt = qty * price
+    qty = round(qty, precision)
+    actual_usdt = qty * price
+    return qty, actual_usdt
+
+
+def send_order(symbol: str, side: str, quantity: float) -> None:
+    """Invia un ordine di mercato su Bybit."""
+    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
+        log("Chiavi Bybit mancanti: ordine non inviato")
+        return
+
+    endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
+    timestamp = str(int(time.time() * 1000))
+    recv_window = "5000"
+    body = {
+        "category": "spot",
+        "symbol": symbol,
+        "side": side,
+        "orderType": "Market",
+        "qty": str(quantity),
+        "timeInForce": "IOC",
+    }
+    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+    signature_payload = f"{timestamp}{BYBIT_API_KEY}{recv_window}{body_json}"
+    signature = _sign(signature_payload)
+
+    headers = {
+        "X-BAPI-API-KEY": BYBIT_API_KEY,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        resp = requests.post(endpoint, headers=headers, data=body_json, timeout=10)
+        data = resp.json()
+        if data.get("retCode") != 0:
+            msg = f"Errore ordine {symbol}: {data}"
+            if data.get("retCode") == 170140:
+                msg = (
+                    f"Ordine troppo piccolo per {symbol}. "
+                    "Aumenta ORDER_USDT."
+                )
+            log(msg)
+            notify_telegram(msg)
+        else:
+            msg = f"✅ Ordine {side} {symbol} inviato ({quantity})"
+            log(msg)
+            notify_telegram(msg)
+    except Exception as e:
+        msg = f"Errore invio ordine {symbol}: {e}"
+        log(msg)
+        notify_telegram(msg)
+
+
+def test_bybit_connection() -> None:
+    """Esegue una semplice chiamata autenticata per verificare le API."""
+    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
+        log("Chiavi Bybit mancanti: impossibile testare la connessione")
+        return
+
+    endpoint = f"{BYBIT_BASE_URL}/v5/account/info"
+    timestamp = str(int(time.time() * 1000))
+    recv_window = "5000"
+    signature_payload = f"{timestamp}{BYBIT_API_KEY}{recv_window}"
+    signature = _sign(signature_payload)
+    headers = {
+        "X-BAPI-API-KEY": BYBIT_API_KEY,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN-TYPE": "2",
+    }
+    try:
+        resp = requests.get(endpoint, headers=headers, timeout=10)
+        data = resp.json()
+        if data.get("retCode") == 0:
+            msg = "✅ Connessione a Bybit riuscita"
+            log(msg)
+            notify_telegram(msg)
+        else:
+            msg = f"Test Bybit fallito: {data}"
+            log(msg)
+            notify_telegram(msg)
+    except Exception as e:
+        msg = f"Errore connessione Bybit: {e}"
+        log(msg)
+        notify_telegram(msg)
+
+
+def initial_buy_test() -> None:
+    """Compatibilità con le vecchie versioni."""
+    log("initial_buy_test non è più disponibile: eseguo test_bybit_connection")
+    test_bybit_connection()
+
+
 
 
 def find_close_column(df: pd.DataFrame) -> Optional[str]:
@@ -64,13 +273,7 @@ def analyze_asset(symbol):
     symbol_clean = symbol.replace("-USD", "USDT")
     result = {"symbol": symbol_clean}
     try:
-        df = yf.download(
-            tickers=symbol,
-            period="7d",
-            interval="15m",
-            progress=False,
-            auto_adjust=True,
-        )
+        df = fetch_history(symbol)
 
         if df is None or df.empty or len(df) < 60:
             result["error"] = "dati insufficienti"
@@ -158,11 +361,20 @@ Strategia: {sig['strategy']}"""
             log(msg.replace("\n", " | "))
             notify_telegram(msg)
 
+            qty, used_usdt = calculate_quantity(
+                result["symbol"], ORDER_USDT, result["price"]
+            )
+            side = "Buy" if sig["type"] == "entry" else "Sell"
+            log(f"Invio ordine da {used_usdt:.2f} USDT su {result['symbol']}")
+            send_order(result["symbol"], side, qty)
+
         # Le mini-analisi sono state rimosse: il bot ora invia solo i segnali
 
 
 if __name__ == "__main__":
     log("🔄 Avvio sistema di monitoraggio segnali reali")
+    # Esegui solo un test di connessione alle API, senza alcun ordine di prova
+    test_bybit_connection()
     notify_telegram("🔔 Test: bot avviato correttamente")
     while True:
         try:
