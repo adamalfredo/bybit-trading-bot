@@ -38,6 +38,9 @@ INSTRUMENT_CACHE = {}
 # Cache delle informazioni sugli strumenti Bybit
 INSTRUMENT_CACHE = {}
 
+# Cache delle informazioni sugli strumenti Bybit
+INSTRUMENT_CACHE = {}
+
 def log(msg):
     timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
     print(f"{timestamp} {msg}")
@@ -135,18 +138,21 @@ def get_instrument_info(symbol: str):
                 return INSTRUMENT_CACHE[symbol]
     except Exception as e:
         log(f"Errore info strumento {symbol} (fallback): {e}")
+
     return 0.0, 0.0, 6
 
 
-def calculate_quantity(symbol: str, usdt: float, price: float) -> float:
-    """Calcola la quantità rispettando i minimi Bybit."""
+def calculate_quantity(symbol: str, usdt: float, price: float) -> tuple[float, float]:
+    """Calcola la quantità e l'USDT realmente utilizzato."""
     min_qty, min_amt, precision = get_instrument_info(symbol)
-    qty = usdt / price if price > 0 else 0
-    if min_amt > 0:
-        qty = max(qty, min_amt / price)
+    actual_usdt = max(usdt, min_amt)
+    qty = actual_usdt / price if price > 0 else 0
     if min_qty > 0:
         qty = max(qty, min_qty)
-    return round(qty, precision)
+        actual_usdt = qty * price
+    qty = round(qty, precision)
+    actual_usdt = qty * price
+    return qty, actual_usdt
 
 def send_order(symbol: str, side: str, quantity: float) -> None:
     """Invia un ordine di mercato su Bybit."""
@@ -236,10 +242,11 @@ def test_bybit_connection() -> None:
 
 def initial_buy_test() -> None:
     """Esegue un acquisto di prova di BTC per verificare il collegamento."""
-    msg = f"⚡ Ordine di test: acquisto BTC per {ORDER_USDT} USDT"
+    min_qty, min_amt, _ = get_instrument_info("BTCUSDT")
+    intended = max(ORDER_USDT, min_amt)
+    msg = f"⚡ Ordine di test: acquisto BTC per almeno {intended} USDT"
     log(msg)
     notify_telegram(msg)
-    min_qty, min_amt, _ = get_instrument_info("BTCUSDT")
     if min_qty == 0 and min_amt == 0:
         msg = "Impossibile ottenere i minimi di ordine per BTCUSDT. Test saltato"
         log(msg)
@@ -268,7 +275,10 @@ def initial_buy_test() -> None:
 
     df.dropna(inplace=True)
     price = float(df.iloc[-1]["close"])
-    qty = calculate_quantity("BTCUSDT", ORDER_USDT, price)
+    qty, used_usdt = calculate_quantity("BTCUSDT", ORDER_USDT, price)
+    msg = f"➡️ Ordine di test con {used_usdt:.2f} USDT"
+    log(msg)
+    notify_telegram(msg)
     send_order("BTCUSDT", "Buy", qty)
 
 
@@ -388,8 +398,11 @@ Strategia: {sig['strategy']}"""
             log(msg.replace("\n", " | "))
             notify_telegram(msg)
 
-            qty = calculate_quantity(result["symbol"], ORDER_USDT, result["price"])
+            qty, used_usdt = calculate_quantity(
+                result["symbol"], ORDER_USDT, result["price"]
+            )
             side = "Buy" if sig["type"] == "entry" else "Sell"
+            log(f"Invio ordine da {used_usdt:.2f} USDT su {result['symbol']}")
             send_order(result["symbol"], side, qty)
 
         # Le mini-analisi sono state rimosse: il bot ora invia solo i segnali
