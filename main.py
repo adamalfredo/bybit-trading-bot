@@ -26,7 +26,7 @@ BYBIT_BASE_URL = (
     "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
 )
 
-ORDER_USDT = float(os.getenv("ORDER_USDT", "5"))
+ORDER_USDT = float(os.getenv("ORDER_USDT", "10"))
 
 ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "DOGE-USD"]
 INTERVAL_MINUTES = 15
@@ -111,7 +111,13 @@ def send_order(symbol: str, side: str, quantity: float) -> None:
         resp = requests.post(endpoint, headers=headers, data=body_json, timeout=10)
         data = resp.json()
         if data.get("retCode") != 0:
-            log(f"Errore ordine {symbol}: {data}")
+            msg = f"Errore ordine {symbol}: {data}"
+            if data.get("retCode") == 170140:
+                msg = (
+                    f"Ordine troppo piccolo per {symbol}. "
+                    "Aumenta ORDER_USDT."
+                )
+            log(msg)
         else:
             log(f"Ordine {side} {symbol} inviato: {data}")
     except Exception as e:
@@ -168,7 +174,6 @@ def initial_buy_test() -> None:
         return
 
     df.dropna(inplace=True)
-
     price = float(df.iloc[-1]["close"])
     qty = round(ORDER_USDT / price, 6)
     send_order("BTCUSDT", "Buy", qty)
