@@ -18,3 +18,4 @@
 
 ## Aggiornamento
 Il bot ora supporta l'invio di ordini automatici su Bybit utilizzando le chiavi API presenti nel file `.env`.
+All'avvio viene eseguito un breve test di connessione alle API di Bybit per verificare che le credenziali siano corrette.

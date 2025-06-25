@@ -84,6 +84,7 @@ def send_order(symbol: str, side: str, quantity: float) -> None:
         "X-BAPI-TIMESTAMP": timestamp,
         "X-BAPI-RECV-WINDOW": recv_window,
         "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json",
     }
 
     try:
@@ -95,6 +96,35 @@ def send_order(symbol: str, side: str, quantity: float) -> None:
             log(f"Ordine {side} {symbol} inviato: {data}")
     except Exception as e:
         log(f"Errore invio ordine {symbol}: {e}")
+
+
+def test_bybit_connection() -> None:
+    """Esegue una semplice chiamata autenticata per verificare le API."""
+    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
+        log("Chiavi Bybit mancanti: impossibile testare la connessione")
+        return
+
+    endpoint = f"{BYBIT_BASE_URL}/v5/account/info"
+    timestamp = str(int(time.time() * 1000))
+    recv_window = "5000"
+    signature_payload = f"{timestamp}{BYBIT_API_KEY}{recv_window}"
+    signature = _sign(signature_payload)
+    headers = {
+        "X-BAPI-API-KEY": BYBIT_API_KEY,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN-TYPE": "2",
+    }
+    try:
+        resp = requests.get(endpoint, headers=headers, timeout=10)
+        data = resp.json()
+        if data.get("retCode") == 0:
+            log("✅ Connessione a Bybit riuscita")
+        else:
+            log(f"Test Bybit fallito: {data}")
+    except Exception as e:
+        log(f"Errore connessione Bybit: {e}")
 
 
 def find_close_column(df: pd.DataFrame) -> Optional[str]:
@@ -228,6 +258,7 @@ Strategia: {sig['strategy']}"""
 
 if __name__ == "__main__":
     log("🔄 Avvio sistema di monitoraggio segnali reali")
+    test_bybit_connection()
     notify_telegram("🔔 Test: bot avviato correttamente")
     while True:
         try:
