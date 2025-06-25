@@ -71,9 +71,10 @@ def send_order(symbol: str, side: str, quantity: float) -> None:
         "symbol": symbol,
         "side": side,
         "orderType": "Market",
-        "qty": quantity,
+        "qty": str(quantity),
+        "timeInForce": "IOC",
     }
-    body_json = json.dumps(body)
+    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
     signature_payload = f"{timestamp}{BYBIT_API_KEY}{recv_window}{body_json}"
     signature = _sign(signature_payload)
 
@@ -82,7 +83,7 @@ def send_order(symbol: str, side: str, quantity: float) -> None:
         "X-BAPI-SIGN": signature,
         "X-BAPI-TIMESTAMP": timestamp,
         "X-BAPI-RECV-WINDOW": recv_window,
-        "Content-Type": "application/json",
+        "X-BAPI-SIGN-TYPE": "2",
     }
 
     try:
