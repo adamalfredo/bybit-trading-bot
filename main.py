@@ -38,9 +38,6 @@ INSTRUMENT_CACHE = {}
 # Cache delle informazioni sugli strumenti Bybit
 INSTRUMENT_CACHE = {}
 
-# Cache delle informazioni sugli strumenti Bybit
-INSTRUMENT_CACHE = {}
-
 def log(msg):
     timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
     print(f"{timestamp} {msg}")
@@ -239,48 +236,6 @@ def test_bybit_connection() -> None:
         msg = f"Errore connessione Bybit: {e}"
         log(msg)
         notify_telegram(msg)
-
-def initial_buy_test() -> None:
-    """Esegue un acquisto di prova di BTC per verificare il collegamento."""
-    min_qty, min_amt, _ = get_instrument_info("BTCUSDT")
-    intended = max(ORDER_USDT, min_amt)
-    msg = f"⚡ Ordine di test: acquisto BTC per almeno {intended} USDT"
-    log(msg)
-    notify_telegram(msg)
-    if min_qty == 0 and min_amt == 0:
-        msg = "Impossibile ottenere i minimi di ordine per BTCUSDT. Test saltato"
-        log(msg)
-        notify_telegram(msg)
-        return
-    df = fetch_history("BTC-USD")
-    if df is None or df.empty:
-        msg = "Impossibile ottenere il prezzo BTC per l'ordine di test"
-        log(msg)
-        notify_telegram(msg)
-        return
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    close_col = find_close_column(df)
-    if close_col and close_col != "close":
-        df.rename(columns={close_col: "close"}, inplace=True)
-
-    if "close" not in df.columns:
-        cols = ", ".join(df.columns)
-        msg = f"Colonna Close assente nel test ({cols})"
-        log(msg)
-        notify_telegram(msg)
-        return
-
-    df.dropna(inplace=True)
-    price = float(df.iloc[-1]["close"])
-    qty, used_usdt = calculate_quantity("BTCUSDT", ORDER_USDT, price)
-    msg = f"➡️ Ordine di test con {used_usdt:.2f} USDT"
-    log(msg)
-    notify_telegram(msg)
-    send_order("BTCUSDT", "Buy", qty)
-
 
 def find_close_column(df: pd.DataFrame) -> Optional[str]:
     """Trova il nome della colonna di chiusura, se esiste."""
