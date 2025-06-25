@@ -32,6 +32,8 @@ ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "DOGE-USD
 INTERVAL_MINUTES = 15
 DOWNLOAD_RETRIES = 3
 
+# Cache delle informazioni sugli strumenti Bybit
+INSTRUMENT_CACHE = {}
 
 def log(msg):
     timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
@@ -76,6 +78,39 @@ def fetch_history(symbol: str) -> pd.DataFrame:
         time.sleep(2)
     return pd.DataFrame()
 
+
+def get_instrument_info(symbol: str):
+    """Restituisce info dello strumento, inclusi minimi di ordine."""
+    if symbol in INSTRUMENT_CACHE:
+        return INSTRUMENT_CACHE[symbol]
+
+    url = f"{BYBIT_BASE_URL}/v5/market/instruments"
+    params = {"category": "spot", "symbol": symbol}
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        if data.get("retCode") == 0 and data.get("result", {}).get("list"):
+            info = data["result"]["list"][0]
+            lot = info.get("lotSizeFilter", {})
+            min_qty = float(lot.get("minOrderQty", 0))
+            min_amt = float(lot.get("minOrderAmt", 0))
+            precision = int(lot.get("basePrecision", 6))
+            INSTRUMENT_CACHE[symbol] = (min_qty, min_amt, precision)
+            return INSTRUMENT_CACHE[symbol]
+    except Exception as e:
+        log(f"Errore info strumento {symbol}: {e}")
+    return 0.0, 0.0, 6
+
+
+def calculate_quantity(symbol: str, usdt: float, price: float) -> float:
+    """Calcola la quantità rispettando i minimi Bybit."""
+    min_qty, min_amt, precision = get_instrument_info(symbol)
+    qty = usdt / price if price > 0 else 0
+    if min_amt > 0:
+        qty = max(qty, min_amt / price)
+    if min_qty > 0:
+        qty = max(qty, min_qty)
+    return round(qty, precision)
 
 def send_order(symbol: str, side: str, quantity: float) -> None:
     """Invia un ordine di mercato su Bybit."""
@@ -175,7 +210,7 @@ def initial_buy_test() -> None:
 
     df.dropna(inplace=True)
     price = float(df.iloc[-1]["close"])
-    qty = round(ORDER_USDT / price, 6)
+    qty = calculate_quantity("BTCUSDT", ORDER_USDT, price)
     send_order("BTCUSDT", "Buy", qty)
 
 
@@ -295,7 +330,7 @@ Strategia: {sig['strategy']}"""
             log(msg.replace("\n", " | "))
             notify_telegram(msg)
 
-            qty = round(ORDER_USDT / result["price"], 6)
+            qty = calculate_quantity(result["symbol"], ORDER_USDT, result["price"])
             side = "Buy" if sig["type"] == "entry" else "Sell"
             send_order(result["symbol"], side, qty)
 

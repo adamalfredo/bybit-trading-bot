@@ -10,11 +10,13 @@
 
 ## ⚠️ Attenzione
 - Il bot è attivo 24/7
-- Usa 10 USDT per ogni trade spot (modificabile con `ORDER_USDT`)
+- Usa 10 USDT per ogni trade spot (modificabile con `ORDER_USDT`);
+  il bot verifica il minimo richiesto da Bybit e aumenta la quantità se necessario
 - Riceverai notifiche su Telegram
 - All'avvio il bot invia un messaggio di prova su Telegram
 - In questa versione il bot può inviare ordini automatici su Bybit se imposti le chiavi API
-- All'avvio viene effettuato un piccolo acquisto di BTC per 10 USDT come test
+- All'avvio viene effettuato un piccolo acquisto di BTC (circa 10 USDT) per
+  verificare la connessione; la quantità viene adeguata al minimo richiesto
 - Se i dati non contengono la colonna "Close" viene indicata nel log la lista delle colonne trovate
 - Se il download dei dati fallisce per problemi di rete, il bot effettua alcuni tentativi automatici
 
