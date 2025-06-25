@@ -16,6 +16,8 @@
 - Riceverai notifiche su Telegram, compreso l'esito degli ordini eseguiti
 - All'avvio il bot invia un messaggio di prova su Telegram e verifica la
   connessione a Bybit; **non** viene eseguito alcun ordine di test
+- Per compatibilità con versioni precedenti, la funzione `initial_buy_test()`
+  ora reindirizza a `test_bybit_connection()` evitando crash
 - In questa versione il bot può inviare ordini automatici su Bybit se imposti le chiavi API
 - Se i dati non contengono la colonna "Close" viene indicata nel log la lista delle colonne trovate
 - Se il download dei dati fallisce per problemi di rete, il bot effettua alcuni tentativi automatici
