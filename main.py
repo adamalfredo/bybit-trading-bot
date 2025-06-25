@@ -35,6 +35,8 @@ DOWNLOAD_RETRIES = 3
 # Cache delle informazioni sugli strumenti Bybit
 INSTRUMENT_CACHE = {}
 
+# Cache delle informazioni sugli strumenti Bybit
+INSTRUMENT_CACHE = {}
 
 def log(msg):
     timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
@@ -123,7 +125,6 @@ def get_instrument_info(symbol: str):
                 return INSTRUMENT_CACHE[symbol]
     except Exception as e:
         log(f"Errore info strumento {symbol} (fallback): {e}")
-
     return 0.0, 0.0, 6
 
 
@@ -136,7 +137,6 @@ def calculate_quantity(symbol: str, usdt: float, price: float) -> float:
     if min_qty > 0:
         qty = max(qty, min_qty)
     return round(qty, precision)
-
 
 def send_order(symbol: str, side: str, quantity: float) -> None:
     """Invia un ordine di mercato su Bybit."""
