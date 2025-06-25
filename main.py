@@ -149,11 +149,26 @@ def test_bybit_connection() -> None:
 
 def initial_buy_test() -> None:
     """Esegue un acquisto di prova di BTC per verificare il collegamento."""
-    log("⚡ Ordine di test: acquisto BTC per 5 USDT")
+    log(f"⚡ Ordine di test: acquisto BTC per {ORDER_USDT} USDT")
     df = fetch_history("BTC-USD")
     if df is None or df.empty:
         log("Impossibile ottenere il prezzo BTC per l'ordine di test")
         return
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    close_col = find_close_column(df)
+    if close_col and close_col != "close":
+        df.rename(columns={close_col: "close"}, inplace=True)
+
+    if "close" not in df.columns:
+        cols = ", ".join(df.columns)
+        log(f"Colonna Close assente nel test ({cols})")
+        return
+
+    df.dropna(inplace=True)
+
     price = float(df.iloc[-1]["close"])
     qty = round(ORDER_USDT / price, 6)
     send_order("BTCUSDT", "Buy", qty)
