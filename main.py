@@ -82,6 +82,16 @@ def fetch_history(symbol: str) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+def _parse_precision(value, default=6):
+    """Converte basePrecision nel numero di decimali."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        s = str(value)
+        if "." in s:
+            return len(s.split(".")[1].rstrip("0"))
+        return default
+
 def get_instrument_info(symbol: str):
     """Restituisce info dello strumento, inclusi minimi di ordine."""
     if symbol in INSTRUMENT_CACHE:
@@ -101,7 +111,7 @@ def get_instrument_info(symbol: str):
             lot = info.get("lotSizeFilter", {})
             min_qty = float(lot.get("minOrderQty", 0))
             min_amt = float(lot.get("minOrderAmt", 0))
-            precision = int(lot.get("basePrecision", 6))
+            precision = _parse_precision(lot.get("basePrecision", 6))
             INSTRUMENT_CACHE[symbol] = (min_qty, min_amt, precision)
             return INSTRUMENT_CACHE[symbol]
     except Exception as e:
@@ -120,7 +130,7 @@ def get_instrument_info(symbol: str):
                 min_amt = float(
                     item.get("minTradeAmount", item.get("minTradeAmt", 0))
                 )
-                precision = int(item.get("basePrecision", 6))
+                precision = _parse_precision(item.get("basePrecision", 6))
                 INSTRUMENT_CACHE[symbol] = (min_qty, min_amt, precision)
                 return INSTRUMENT_CACHE[symbol]
     except Exception as e:
