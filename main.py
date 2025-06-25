@@ -35,6 +35,9 @@ DOWNLOAD_RETRIES = 3
 # Cache delle informazioni sugli strumenti Bybit
 INSTRUMENT_CACHE = {}
 
+# Cache delle informazioni sugli strumenti Bybit
+INSTRUMENT_CACHE = {}
+
 def log(msg):
     timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
     print(f"{timestamp} {msg}")
@@ -84,10 +87,14 @@ def get_instrument_info(symbol: str):
     if symbol in INSTRUMENT_CACHE:
         return INSTRUMENT_CACHE[symbol]
 
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    # Endpoint principale (v5)
     url = f"{BYBIT_BASE_URL}/v5/market/instruments"
     params = {"category": "spot", "symbol": symbol}
     try:
-        resp = requests.get(url, params=params, timeout=10)
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        resp.raise_for_status()
         data = resp.json()
         if data.get("retCode") == 0 and data.get("result", {}).get("list"):
             info = data["result"]["list"][0]
@@ -98,7 +105,26 @@ def get_instrument_info(symbol: str):
             INSTRUMENT_CACHE[symbol] = (min_qty, min_amt, precision)
             return INSTRUMENT_CACHE[symbol]
     except Exception as e:
-        log(f"Errore info strumento {symbol}: {e}")
+        log(f"Errore info strumento {symbol} (v5): {e}")
+
+    # Fallback per le vecchie API spot
+    url = f"{BYBIT_BASE_URL}/spot/v3/public/symbols"
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        symbols = data.get("result", {}).get("list", [])
+        for item in symbols:
+            if item.get("name") == symbol:
+                min_qty = float(item.get("minTradeQty", 0))
+                min_amt = float(
+                    item.get("minTradeAmount", item.get("minTradeAmt", 0))
+                )
+                precision = int(item.get("basePrecision", 6))
+                INSTRUMENT_CACHE[symbol] = (min_qty, min_amt, precision)
+                return INSTRUMENT_CACHE[symbol]
+    except Exception as e:
+        log(f"Errore info strumento {symbol} (fallback): {e}")
     return 0.0, 0.0, 6
 
 
@@ -191,6 +217,10 @@ def test_bybit_connection() -> None:
 def initial_buy_test() -> None:
     """Esegue un acquisto di prova di BTC per verificare il collegamento."""
     log(f"⚡ Ordine di test: acquisto BTC per {ORDER_USDT} USDT")
+    min_qty, min_amt, _ = get_instrument_info("BTCUSDT")
+    if min_qty == 0 and min_amt == 0:
+        log("Impossibile ottenere i minimi di ordine per BTCUSDT. Test saltato")
+        return
     df = fetch_history("BTC-USD")
     if df is None or df.empty:
         log("Impossibile ottenere il prezzo BTC per l'ordine di test")
