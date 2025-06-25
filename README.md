@@ -15,3 +15,10 @@
 - All'avvio il bot invia un messaggio di prova su Telegram
 - In questa versione di test invia solo i segnali (o un messaggio di errore) per ogni asset ad ogni scansione
 - Se i dati non contengono la colonna "Close" viene indicata nel log la lista delle colonne trovate
+
+## ✅ Nuovo progetto Railway
+- Clicca su "New Project".
+- Scegli "Deploy from GitHub repo".
+- Autorizza l'accesso se necessario e seleziona il tuo repo adamalfredo/bybit-trading-bot.
+- Aggiungi variabili di ambiente
+- Nel tab Settings > Start Command, inserisci: python main.py
