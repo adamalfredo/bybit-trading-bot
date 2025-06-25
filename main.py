@@ -3,6 +3,7 @@ import time
 import hmac
 import json
 import hashlib
+from decimal import Decimal, ROUND_DOWN
 import requests
 import yfinance as yf
 import pandas as pd
@@ -138,7 +139,9 @@ def get_instrument_info(symbol: str):
     return 0.0, 0.0, 6
 
 
-def calculate_quantity(symbol: str, usdt: float, price: float) -> tuple[float, float]:
+def calculate_quantity(
+    symbol: str, usdt: float, price: float
+) -> tuple[float, float, int]:
     """Calcola la quantità e l'USDT realmente utilizzato."""
     min_qty, min_amt, precision = get_instrument_info(symbol)
     actual_usdt = max(usdt, min_amt)
@@ -148,9 +151,20 @@ def calculate_quantity(symbol: str, usdt: float, price: float) -> tuple[float, f
         actual_usdt = qty * price
     qty = round(qty, precision)
     actual_usdt = qty * price
-    return qty, actual_usdt
+    return qty, actual_usdt, precision
 
-def send_order(symbol: str, side: str, quantity: float) -> None:
+def _format_quantity(quantity: float, precision: int) -> str:
+    """Restituisce la quantità con la precisione corretta."""
+    q = Decimal(str(quantity)).quantize(
+        Decimal(1) if precision == 0 else Decimal('1').scaleb(-precision),
+        rounding=ROUND_DOWN,
+    )
+    if precision == 0:
+        return str(int(q))
+    return format(q, f'.{precision}f').rstrip('0').rstrip('.')
+
+
+def send_order(symbol: str, side: str, quantity: float, precision: int) -> None:
     """Invia un ordine di mercato su Bybit."""
     if not BYBIT_API_KEY or not BYBIT_API_SECRET:
         log("Chiavi Bybit mancanti: ordine non inviato")
@@ -159,12 +173,13 @@ def send_order(symbol: str, side: str, quantity: float) -> None:
     endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
+    qty_str = _format_quantity(quantity, precision)
     body = {
         "category": "spot",
         "symbol": symbol,
         "side": side,
         "orderType": "Market",
-        "qty": str(quantity),
+        "qty": qty_str,
         "timeInForce": "IOC",
     }
     body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
@@ -184,16 +199,22 @@ def send_order(symbol: str, side: str, quantity: float) -> None:
         resp = requests.post(endpoint, headers=headers, data=body_json, timeout=10)
         data = resp.json()
         if data.get("retCode") != 0:
-            msg = f"Errore ordine {symbol}: {data}"
-            if data.get("retCode") == 170140:
+            code = data.get("retCode")
+            if code == 170140:
                 msg = (
                     f"Ordine troppo piccolo per {symbol}. "
                     "Aumenta ORDER_USDT."
                 )
+            elif code == 170131:
+                msg = f"Saldo insufficiente per {symbol}."
+            elif code == 170137:
+                msg = f"Decimali eccessivi per {symbol}."
+            else:
+                msg = f"Errore ordine {symbol}: {data}"
             log(msg)
             notify_telegram(msg)
         else:
-            msg = f"✅ Ordine {side} {symbol} inviato ({quantity})"
+            msg = f"✅ Ordine {side} {symbol} inviato ({qty_str})"
             log(msg)
             notify_telegram(msg)
     except Exception as e:
@@ -357,12 +378,12 @@ Strategia: {sig['strategy']}"""
             log(msg.replace("\n", " | "))
             notify_telegram(msg)
 
-            qty, used_usdt = calculate_quantity(
+            qty, used_usdt, prec = calculate_quantity(
                 result["symbol"], ORDER_USDT, result["price"]
             )
             side = "Buy" if sig["type"] == "entry" else "Sell"
             log(f"Invio ordine da {used_usdt:.2f} USDT su {result['symbol']}")
-            send_order(result["symbol"], side, qty)
+            send_order(result["symbol"], side, qty, prec)
 
         # Le mini-analisi sono state rimosse: il bot ora invia solo i segnali
 
