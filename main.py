@@ -189,10 +189,15 @@ def send_order(symbol: str, side: str, quantity: float) -> None:
                     "Aumenta ORDER_USDT."
                 )
             log(msg)
+            notify_telegram(msg)
         else:
-            log(f"Ordine {side} {symbol} inviato: {data}")
+            msg = f"✅ Ordine {side} {symbol} inviato ({quantity})"
+            log(msg)
+            notify_telegram(msg)
     except Exception as e:
-        log(f"Errore invio ordine {symbol}: {e}")
+        msg = f"Errore invio ordine {symbol}: {e}"
+        log(msg)
+        notify_telegram(msg)
 
 
 def test_bybit_connection() -> None:
@@ -217,23 +222,34 @@ def test_bybit_connection() -> None:
         resp = requests.get(endpoint, headers=headers, timeout=10)
         data = resp.json()
         if data.get("retCode") == 0:
-            log("✅ Connessione a Bybit riuscita")
+            msg = "✅ Connessione a Bybit riuscita"
+            log(msg)
+            notify_telegram(msg)
         else:
-            log(f"Test Bybit fallito: {data}")
+            msg = f"Test Bybit fallito: {data}"
+            log(msg)
+            notify_telegram(msg)
     except Exception as e:
-        log(f"Errore connessione Bybit: {e}")
-
+        msg = f"Errore connessione Bybit: {e}"
+        log(msg)
+        notify_telegram(msg)
 
 def initial_buy_test() -> None:
     """Esegue un acquisto di prova di BTC per verificare il collegamento."""
-    log(f"⚡ Ordine di test: acquisto BTC per {ORDER_USDT} USDT")
+    msg = f"⚡ Ordine di test: acquisto BTC per {ORDER_USDT} USDT"
+    log(msg)
+    notify_telegram(msg)
     min_qty, min_amt, _ = get_instrument_info("BTCUSDT")
     if min_qty == 0 and min_amt == 0:
-        log("Impossibile ottenere i minimi di ordine per BTCUSDT. Test saltato")
+        msg = "Impossibile ottenere i minimi di ordine per BTCUSDT. Test saltato"
+        log(msg)
+        notify_telegram(msg)
         return
     df = fetch_history("BTC-USD")
     if df is None or df.empty:
-        log("Impossibile ottenere il prezzo BTC per l'ordine di test")
+        msg = "Impossibile ottenere il prezzo BTC per l'ordine di test"
+        log(msg)
+        notify_telegram(msg)
         return
 
     if isinstance(df.columns, pd.MultiIndex):
@@ -245,7 +261,9 @@ def initial_buy_test() -> None:
 
     if "close" not in df.columns:
         cols = ", ".join(df.columns)
-        log(f"Colonna Close assente nel test ({cols})")
+        msg = f"Colonna Close assente nel test ({cols})"
+        log(msg)
+        notify_telegram(msg)
         return
 
     df.dropna(inplace=True)

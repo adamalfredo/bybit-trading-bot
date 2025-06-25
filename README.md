@@ -14,7 +14,7 @@
   il bot prova a recuperare i limiti minimi di ordine direttamente da Bybit;
   se la richiesta fallisce usa un endpoint alternativo e, in caso di ulteriori
   problemi, salta l'ordine di test
-- Riceverai notifiche su Telegram
+- Riceverai notifiche su Telegram, compreso l'esito degli ordini eseguiti
 - All'avvio il bot invia un messaggio di prova su Telegram
 - In questa versione il bot può inviare ordini automatici su Bybit se imposti le chiavi API
  - All'avvio viene effettuato un piccolo acquisto di BTC (circa 50 USDT) per
