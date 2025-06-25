@@ -1,5 +1,8 @@
 import os
 import time
+import hmac
+import json
+import hashlib
 import requests
 import yfinance as yf
 import pandas as pd
@@ -15,6 +18,15 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
+BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
+BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
+BYBIT_BASE_URL = (
+    "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
+)
+
+ORDER_USDT = float(os.getenv("ORDER_USDT", "5"))
 
 ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "DOGE-USD"]
 INTERVAL_MINUTES = 15
@@ -34,6 +46,54 @@ def notify_telegram(message: str):
         requests.post(url, data=data, timeout=10)
     except Exception as e:
         log(f"Errore Telegram: {e}")
+
+
+def _sign(payload: str) -> str:
+    """Restituisce la firma HMAC richiesta dalle API Bybit."""
+    if not BYBIT_API_SECRET:
+        return ""
+    return hmac.new(
+        BYBIT_API_SECRET.encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()
+
+
+def send_order(symbol: str, side: str, quantity: float) -> None:
+    """Invia un ordine di mercato su Bybit."""
+    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
+        log("Chiavi Bybit mancanti: ordine non inviato")
+        return
+
+    endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
+    timestamp = str(int(time.time() * 1000))
+    recv_window = "5000"
+    body = {
+        "category": "spot",
+        "symbol": symbol,
+        "side": side,
+        "orderType": "Market",
+        "qty": quantity,
+    }
+    body_json = json.dumps(body)
+    signature_payload = f"{timestamp}{BYBIT_API_KEY}{recv_window}{body_json}"
+    signature = _sign(signature_payload)
+
+    headers = {
+        "X-BAPI-API-KEY": BYBIT_API_KEY,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "Content-Type": "application/json",
+    }
+
+    try:
+        resp = requests.post(endpoint, headers=headers, data=body_json, timeout=10)
+        data = resp.json()
+        if data.get("retCode") != 0:
+            log(f"Errore ordine {symbol}: {data}")
+        else:
+            log(f"Ordine {side} {symbol} inviato: {data}")
+    except Exception as e:
+        log(f"Errore invio ordine {symbol}: {e}")
 
 
 def find_close_column(df: pd.DataFrame) -> Optional[str]:
@@ -157,6 +217,10 @@ Prezzo: {result['price']}
 Strategia: {sig['strategy']}"""
             log(msg.replace("\n", " | "))
             notify_telegram(msg)
+
+            qty = round(ORDER_USDT / result["price"], 6)
+            side = "Buy" if sig["type"] == "entry" else "Sell"
+            send_order(result["symbol"], side, qty)
 
         # Le mini-analisi sono state rimosse: il bot ora invia solo i segnali
 

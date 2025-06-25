@@ -10,11 +10,11 @@
 
 ## ⚠️ Attenzione
 - Il bot è attivo 24/7
-- Usa 5 USDT per ogni trade spot
+- Usa 5 USDT per ogni trade spot (modificabile con `ORDER_USDT`)
 - Riceverai notifiche su Telegram
 - All'avvio il bot invia un messaggio di prova su Telegram
-- In questa versione di test invia solo i segnali (o un messaggio di errore) per ogni asset ad ogni scansione
+- In questa versione il bot può inviare ordini automatici su Bybit se imposti le chiavi API
 - Se i dati non contengono la colonna "Close" viene indicata nel log la lista delle colonne trovate
 
-## Aggiornamento di test
-Questo commit serve solo per verificare il bypass del ruleset.
+## Aggiornamento
+Il bot ora supporta l'invio di ordini automatici su Bybit utilizzando le chiavi API presenti nel file `.env`.
