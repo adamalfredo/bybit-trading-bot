@@ -35,6 +35,8 @@ DOWNLOAD_RETRIES = 3
 # Cache delle informazioni sugli strumenti Bybit
 INSTRUMENT_CACHE = {}
 
+# Cache delle informazioni sugli strumenti Bybit
+INSTRUMENT_CACHE = {}
 
 def log(msg):
     timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
@@ -89,7 +91,6 @@ def _parse_precision(value, default=6):
         if "." in s:
             return len(s.split(".")[1].rstrip("0"))
         return default
-
 
 def get_instrument_info(symbol: str):
     """Restituisce info dello strumento, inclusi minimi di ordine."""
@@ -149,7 +150,6 @@ def calculate_quantity(symbol: str, usdt: float, price: float) -> tuple[float, f
     qty = round(qty, precision)
     actual_usdt = qty * price
     return qty, actual_usdt
-
 
 def send_order(symbol: str, side: str, quantity: float) -> None:
     """Invia un ordine di mercato su Bybit."""
@@ -237,14 +237,10 @@ def test_bybit_connection() -> None:
         log(msg)
         notify_telegram(msg)
 
-
 def initial_buy_test() -> None:
     """Compatibilità con le vecchie versioni."""
     log("initial_buy_test non è più disponibile: eseguo test_bybit_connection")
     test_bybit_connection()
-
-
-
 
 def find_close_column(df: pd.DataFrame) -> Optional[str]:
     """Trova il nome della colonna di chiusura, se esiste."""
@@ -377,6 +373,7 @@ if __name__ == "__main__":
     # Esegui solo un test di connessione alle API, senza alcun ordine di prova
     test_bybit_connection()
     notify_telegram("🔔 Test: bot avviato correttamente")
+    initial_buy_test()
     while True:
         try:
             scan_assets()
