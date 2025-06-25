@@ -14,6 +14,7 @@
 - Riceverai notifiche su Telegram
 - All'avvio il bot invia un messaggio di prova su Telegram
 - In questa versione il bot può inviare ordini automatici su Bybit se imposti le chiavi API
+- All'avvio viene effettuato un piccolo acquisto di BTC per 5 USDT come test
 - Se i dati non contengono la colonna "Close" viene indicata nel log la lista delle colonne trovate
 - Se il download dei dati fallisce per problemi di rete, il bot effettua alcuni tentativi automatici
 

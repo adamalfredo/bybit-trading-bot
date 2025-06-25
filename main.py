@@ -147,6 +147,18 @@ def test_bybit_connection() -> None:
         log(f"Errore connessione Bybit: {e}")
 
 
+def initial_buy_test() -> None:
+    """Esegue un acquisto di prova di BTC per verificare il collegamento."""
+    log("⚡ Ordine di test: acquisto BTC per 5 USDT")
+    df = fetch_history("BTC-USD")
+    if df is None or df.empty:
+        log("Impossibile ottenere il prezzo BTC per l'ordine di test")
+        return
+    price = float(df.iloc[-1]["close"])
+    qty = round(ORDER_USDT / price, 6)
+    send_order("BTCUSDT", "Buy", qty)
+
+
 def find_close_column(df: pd.DataFrame) -> Optional[str]:
     """Trova il nome della colonna di chiusura, se esiste."""
     cols = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
@@ -274,6 +286,7 @@ if __name__ == "__main__":
     log("🔄 Avvio sistema di monitoraggio segnali reali")
     test_bybit_connection()
     notify_telegram("🔔 Test: bot avviato correttamente")
+    initial_buy_test()
     while True:
         try:
             scan_assets()
