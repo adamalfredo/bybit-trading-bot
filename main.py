@@ -30,6 +30,7 @@ ORDER_USDT = float(os.getenv("ORDER_USDT", "5"))
 
 ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "DOGE-USD"]
 INTERVAL_MINUTES = 15
+DOWNLOAD_RETRIES = 3
 
 
 def log(msg):
@@ -55,6 +56,25 @@ def _sign(payload: str) -> str:
     return hmac.new(
         BYBIT_API_SECRET.encode(), payload.encode(), hashlib.sha256
     ).hexdigest()
+
+
+def fetch_history(symbol: str) -> pd.DataFrame:
+    """Scarica i dati da Yahoo Finance con alcuni tentativi."""
+    for attempt in range(1, DOWNLOAD_RETRIES + 1):
+        try:
+            df = yf.download(
+                tickers=symbol,
+                period="7d",
+                interval="15m",
+                progress=False,
+                auto_adjust=True,
+            )
+            if df is not None and not df.empty:
+                return df
+        except Exception as e:
+            log(f"Errore download {symbol} ({attempt}/{DOWNLOAD_RETRIES}): {e}")
+        time.sleep(2)
+    return pd.DataFrame()
 
 
 def send_order(symbol: str, side: str, quantity: float) -> None:
@@ -155,13 +175,7 @@ def analyze_asset(symbol):
     symbol_clean = symbol.replace("-USD", "USDT")
     result = {"symbol": symbol_clean}
     try:
-        df = yf.download(
-            tickers=symbol,
-            period="7d",
-            interval="15m",
-            progress=False,
-            auto_adjust=True,
-        )
+        df = fetch_history(symbol)
 
         if df is None or df.empty or len(df) < 60:
             result["error"] = "dati insufficienti"

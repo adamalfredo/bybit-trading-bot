@@ -15,6 +15,7 @@
 - All'avvio il bot invia un messaggio di prova su Telegram
 - In questa versione il bot può inviare ordini automatici su Bybit se imposti le chiavi API
 - Se i dati non contengono la colonna "Close" viene indicata nel log la lista delle colonne trovate
+- Se il download dei dati fallisce per problemi di rete, il bot effettua alcuni tentativi automatici
 
 ## Aggiornamento
 Il bot ora supporta l'invio di ordini automatici su Bybit utilizzando le chiavi API presenti nel file `.env`.
