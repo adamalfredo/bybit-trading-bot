@@ -10,9 +10,12 @@
 
 ## ⚠️ Attenzione
 - Il bot è attivo 24/7
-- Usa 50 USDT per ogni trade spot (modificabile con `ORDER_USDT`); il bot
-  recupera i limiti minimi di Bybit e, se necessari, aumenta automaticamente
-  l'importo per rispettarli. Se il recupero fallisce usa un endpoint alternativo
+- Usa almeno 50 USDT per ogni acquisto spot (variabile `ORDER_USDT` ma con
+  soglia minima a 50). Il bot recupera i limiti di Bybit e, se necessari,
+  aumenta automaticamente l'importo per rispettarli. Se il recupero fallisce usa
+  un endpoint alternativo. In uscita il bot vende l'intero saldo della moneta.
+- La quantità viene adeguata allo `qtyStep` di Bybit per evitare errori sui
+  decimali degli ordini
 - Riceverai notifiche su Telegram, compreso l'esito degli ordini eseguiti
 - All'avvio il bot invia un messaggio di prova su Telegram e verifica la
   connessione a Bybit; **non** viene eseguito alcun ordine di test

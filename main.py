@@ -26,7 +26,8 @@ BYBIT_BASE_URL = (
     "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
 )
 
-ORDER_USDT = float(os.getenv("ORDER_USDT", "50"))
+MIN_ORDER_USDT = 50.0
+ORDER_USDT = max(MIN_ORDER_USDT, float(os.getenv("ORDER_USDT", str(MIN_ORDER_USDT))))
 
 ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "DOGE-USD"]
 INTERVAL_MINUTES = 15
@@ -92,8 +93,9 @@ def _parse_precision(value, default=6):
             return len(s.split(".")[1].rstrip("0"))
         return default
 
+
 def get_instrument_info(symbol: str):
-    """Restituisce info dello strumento, inclusi minimi di ordine."""
+    """Restituisce info dello strumento, inclusi minimi di ordine e step."""
     if symbol in INSTRUMENT_CACHE:
         return INSTRUMENT_CACHE[symbol]
 
@@ -111,8 +113,9 @@ def get_instrument_info(symbol: str):
             lot = info.get("lotSizeFilter", {})
             min_qty = float(lot.get("minOrderQty", 0))
             min_amt = float(lot.get("minOrderAmt", 0))
-            precision = _parse_precision(lot.get("basePrecision", 6))
-            INSTRUMENT_CACHE[symbol] = (min_qty, min_amt, precision)
+            qty_step = float(lot.get("qtyStep", 0))
+            precision = _parse_precision(lot.get("qtyStep", lot.get("basePrecision", 6)))
+            INSTRUMENT_CACHE[symbol] = (min_qty, min_amt, qty_step, precision)
             return INSTRUMENT_CACHE[symbol]
     except Exception as e:
         log(f"Errore info strumento {symbol} (v5): {e}")
@@ -127,29 +130,39 @@ def get_instrument_info(symbol: str):
         for item in symbols:
             if item.get("name") == symbol:
                 min_qty = float(item.get("minTradeQty", 0))
-                min_amt = float(
-                    item.get("minTradeAmount", item.get("minTradeAmt", 0))
-                )
-                precision = _parse_precision(item.get("basePrecision", 6))
-                INSTRUMENT_CACHE[symbol] = (min_qty, min_amt, precision)
+                min_amt = float(item.get("minTradeAmount", item.get("minTradeAmt", 0)))
+                qty_step = float(item.get("qtyStep", item.get("lotSize", 0)))
+                precision = _parse_precision(item.get("qtyStep", item.get("basePrecision", 6)))
+                INSTRUMENT_CACHE[symbol] = (min_qty, min_amt, qty_step, precision)
                 return INSTRUMENT_CACHE[symbol]
     except Exception as e:
         log(f"Errore info strumento {symbol} (fallback): {e}")
 
-    return 0.0, 0.0, 6
-
+    return 0.0, 0.0, 0.0, 6
 
 def calculate_quantity(
     symbol: str, usdt: float, price: float
 ) -> tuple[float, float, int]:
     """Calcola la quantità e l'USDT realmente utilizzato."""
-    min_qty, min_amt, precision = get_instrument_info(symbol)
+    min_qty, min_amt, qty_step, precision = get_instrument_info(symbol)
+
     actual_usdt = max(usdt, min_amt)
     qty = actual_usdt / price if price > 0 else 0
+
     if min_qty > 0:
         qty = max(qty, min_qty)
         actual_usdt = qty * price
-    qty = round(qty, precision)
+
+    if qty_step:
+        step = Decimal(str(qty_step))
+        qty = (Decimal(str(qty)) / step).to_integral_value(rounding=ROUND_DOWN) * step
+    else:
+        qty = Decimal(str(qty)).quantize(
+            Decimal(1) if precision == 0 else Decimal('1').scaleb(-precision),
+            rounding=ROUND_DOWN,
+        )
+
+    qty = float(qty)
     actual_usdt = qty * price
     return qty, actual_usdt, precision
 
@@ -222,6 +235,55 @@ def send_order(symbol: str, side: str, quantity: float, precision: int) -> None:
         log(msg)
         notify_telegram(msg)
 
+def get_balance(coin: str) -> float:
+    """Restituisce il saldo disponibile per la coin indicata."""
+    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
+        return 0.0
+
+    endpoint = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
+    timestamp = str(int(time.time() * 1000))
+    recv_window = "5000"
+    params = {"accountType": "SPOT", "coin": coin}
+    param_str = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    signature_payload = f"{timestamp}{BYBIT_API_KEY}{recv_window}{param_str}"
+    sign = _sign(signature_payload)
+    headers = {
+        "X-BAPI-API-KEY": BYBIT_API_KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN-TYPE": "2",
+    }
+    try:
+        resp = requests.get(
+            f"{endpoint}?{param_str}", headers=headers, timeout=10
+        )
+        data = resp.json()
+        if data.get("retCode") == 0:
+            lists = data.get("result", {}).get("list", [])
+            if lists and lists[0].get("coin"):
+                for c in lists[0]["coin"]:
+                    if c.get("coin") == coin:
+                        return float(c.get("availableToWithdraw", 0))
+    except Exception as e:
+        log(f"Errore ottenimento saldo {coin}: {e}")
+    return 0.0
+
+
+def round_quantity(symbol: str, quantity: float) -> tuple[float, int]:
+    """Arrotonda la quantità secondo lo step e la precisione di Bybit."""
+    _, _, qty_step, precision = get_instrument_info(symbol)
+    if qty_step:
+        step = Decimal(str(qty_step))
+        quantity = (
+            Decimal(str(quantity)) / step
+        ).to_integral_value(rounding=ROUND_DOWN) * step
+    else:
+        quantity = Decimal(str(quantity)).quantize(
+            Decimal(1) if precision == 0 else Decimal("1").scaleb(-precision),
+            rounding=ROUND_DOWN,
+        )
+    return float(quantity), precision
 
 def test_bybit_connection() -> None:
     """Esegue una semplice chiamata autenticata per verificare le API."""
@@ -378,13 +440,27 @@ Strategia: {sig['strategy']}"""
             log(msg.replace("\n", " | "))
             notify_telegram(msg)
 
-            qty, used_usdt, prec = calculate_quantity(
-                result["symbol"], ORDER_USDT, result["price"]
-            )
-            side = "Buy" if sig["type"] == "entry" else "Sell"
-            log(f"Invio ordine da {used_usdt:.2f} USDT su {result['symbol']}")
-            send_order(result["symbol"], side, qty, prec)
-
+            if sig["type"] == "entry":
+                qty, used_usdt, prec = calculate_quantity(
+                    result["symbol"], ORDER_USDT, result["price"]
+                )
+                log(
+                    f"Invio ordine da {used_usdt:.2f} USDT su {result['symbol']}"
+                )
+                send_order(result["symbol"], "Buy", qty, prec)
+            else:
+                coin = result["symbol"].replace("USDT", "")
+                bal = get_balance(coin)
+                if bal <= 0:
+                    warn = f"Saldo {coin} insufficiente: nessuna vendita"
+                    log(warn)
+                    notify_telegram(warn)
+                    continue
+                qty, prec = round_quantity(result["symbol"], bal)
+                log(
+                    f"Vendo tutto {coin}: {qty} (~{qty * result['price']:.2f} USDT)"
+                )
+                send_order(result["symbol"], "Sell", qty, prec)
         # Le mini-analisi sono state rimosse: il bot ora invia solo i segnali
 
 
