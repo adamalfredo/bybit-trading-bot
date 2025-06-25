@@ -26,7 +26,7 @@ BYBIT_BASE_URL = (
     "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
 )
 
-ORDER_USDT = float(os.getenv("ORDER_USDT", "10"))
+ORDER_USDT = float(os.getenv("ORDER_USDT", "50"))
 
 ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "DOGE-USD"]
 INTERVAL_MINUTES = 15
