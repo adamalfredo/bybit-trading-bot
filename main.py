@@ -84,7 +84,6 @@ def send_order(symbol: str, side: str, quantity: float) -> None:
         "X-BAPI-TIMESTAMP": timestamp,
         "X-BAPI-RECV-WINDOW": recv_window,
         "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json",
     }
 
     try:
