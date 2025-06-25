@@ -5,16 +5,24 @@
 1. Vai su https://render.com
 2. Clicca su "New + > Web Service"
 3. Carica lo ZIP di questo progetto
-4. Rinomina `.env.example` in `.env` ed inserisci le tue credenziali
+4. Rinomina `.env.example` in `.env` ed inserisci le tue credenziali (puoi impostare `BYBIT_TESTNET=true` per usare la testnet)
 5. Render leggerà automaticamente `render.yaml` e configurerà il bot
 
 ## ⚠️ Attenzione
 - Il bot è attivo 24/7
-- Usa 5 USDT per ogni trade spot
-- Riceverai notifiche su Telegram
+- Usa 50 USDT per ogni trade spot (modificabile con `ORDER_USDT`);
+  il bot prova a recuperare i limiti minimi di ordine direttamente da Bybit;
+  se la richiesta fallisce usa un endpoint alternativo e, in caso di ulteriori
+  problemi, salta l'ordine di test
+- Riceverai notifiche su Telegram, compreso l'esito degli ordini eseguiti
 - All'avvio il bot invia un messaggio di prova su Telegram
-- In questa versione di test invia solo i segnali (o un messaggio di errore) per ogni asset ad ogni scansione
+- In questa versione il bot può inviare ordini automatici su Bybit se imposti le chiavi API
+ - All'avvio viene effettuato un piccolo acquisto di BTC (circa 50 USDT) per
+  verificare la connessione; la quantità viene adeguata al minimo recuperato e
+  l'operazione viene saltata se i dati sui minimi non sono disponibili
 - Se i dati non contengono la colonna "Close" viene indicata nel log la lista delle colonne trovate
+- Se il download dei dati fallisce per problemi di rete, il bot effettua alcuni tentativi automatici
 
-## Aggiornamento di test
-Questo commit serve solo per verificare il bypass del ruleset.
+## Aggiornamento
+Il bot ora supporta l'invio di ordini automatici su Bybit utilizzando le chiavi API presenti nel file `.env`.
+All'avvio viene eseguito un breve test di connessione alle API di Bybit per verificare che le credenziali siano corrette.
