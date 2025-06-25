@@ -168,6 +168,7 @@ def initial_buy_test() -> None:
         return
 
     df.dropna(inplace=True)
+
     price = float(df.iloc[-1]["close"])
     qty = round(ORDER_USDT / price, 6)
     send_order("BTCUSDT", "Buy", qty)
