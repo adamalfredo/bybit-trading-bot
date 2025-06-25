@@ -90,7 +90,7 @@ def get_instrument_info(symbol: str):
     headers = {"User-Agent": "Mozilla/5.0"}
 
     # Endpoint principale (v5)
-    url = f"{BYBIT_BASE_URL}/v5/market/instruments"
+    url = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
     params = {"category": "spot", "symbol": symbol}
     try:
         resp = requests.get(url, params=params, headers=headers, timeout=10)
