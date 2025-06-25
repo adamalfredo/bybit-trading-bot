@@ -35,6 +35,11 @@ DOWNLOAD_RETRIES = 3
 # Cache delle informazioni sugli strumenti Bybit
 INSTRUMENT_CACHE = {}
 
+# Cache delle informazioni sugli strumenti Bybit
+INSTRUMENT_CACHE = {}
+
+# Cache delle informazioni sugli strumenti Bybit
+INSTRUMENT_CACHE = {}
 
 def log(msg):
     timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
@@ -89,7 +94,6 @@ def _parse_precision(value, default=6):
         if "." in s:
             return len(s.split(".")[1].rstrip("0"))
         return default
-
 
 def get_instrument_info(symbol: str):
     """Restituisce info dello strumento, inclusi minimi di ordine."""
@@ -149,7 +153,6 @@ def calculate_quantity(symbol: str, usdt: float, price: float) -> tuple[float, f
     qty = round(qty, precision)
     actual_usdt = qty * price
     return qty, actual_usdt
-
 
 def send_order(symbol: str, side: str, quantity: float) -> None:
     """Invia un ordine di mercato su Bybit."""
@@ -236,7 +239,6 @@ def test_bybit_connection() -> None:
         msg = f"Errore connessione Bybit: {e}"
         log(msg)
         notify_telegram(msg)
-
 
 def initial_buy_test() -> None:
     """Esegue un acquisto di prova di BTC per verificare il collegamento."""
