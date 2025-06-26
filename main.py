@@ -295,9 +295,10 @@ def get_balance(coin: str) -> float:
     return 0.0
 
 
-def round_quantity(symbol: str, quantity: float) -> tuple[float, int]:
-    """Arrotonda la quantità secondo lo step e la precisione di Bybit."""
-    _, _, qty_step, precision = get_instrument_info(symbol)
+def round_quantity(symbol: str, quantity: float, price: float) -> tuple[float, int]:
+    """Arrotonda la quantità secondo lo step e verifica i minimi di Bybit."""
+    min_qty, min_amt, qty_step, precision = get_instrument_info(symbol)
+
     if qty_step:
         step = Decimal(str(qty_step))
         quantity = (
@@ -308,7 +309,12 @@ def round_quantity(symbol: str, quantity: float) -> tuple[float, int]:
             Decimal(1) if precision == 0 else Decimal("1").scaleb(-precision),
             rounding=ROUND_DOWN,
         )
-    return float(quantity), precision
+
+    qty_f = float(quantity)
+    if qty_f < min_qty or qty_f * price < min_amt:
+        return 0.0, precision
+
+    return qty_f, precision
 
 def test_bybit_connection() -> None:
     """Esegue una semplice chiamata autenticata per verificare le API."""
@@ -481,7 +487,14 @@ Strategia: {sig['strategy']}"""
                     log(warn)
                     notify_telegram(warn)
                     continue
-                qty, prec = round_quantity(result["symbol"], bal)
+                qty, prec = round_quantity(result["symbol"], bal, result["price"])
+                if qty <= 0:
+                    warn = (
+                        f"Saldo {coin} insufficiente per ordine minimo: nessuna vendita"
+                    )
+                    log(warn)
+                    notify_telegram(warn)
+                    continue
                 log(
                     f"Vendo tutto {coin}: {qty} (~{qty * result['price']:.2f} USDT)"
                 )
