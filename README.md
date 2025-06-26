@@ -5,7 +5,7 @@
 1. Vai su https://render.com
 2. Clicca su "New + > Web Service"
 3. Carica lo ZIP di questo progetto
-4. Rinomina `.env.example` in `.env` ed inserisci le tue credenziali (puoi impostare `BYBIT_TESTNET=true` per usare la testnet)
+4. Rinomina `.env.example` in `.env` ed inserisci le tue credenziali (puoi impostare `BYBIT_TESTNET=true` per usare la testnet). Se utilizzi l'account unificato non cambiare `BYBIT_ACCOUNT_TYPE` (di default `UNIFIED`)
 5. Render leggerà automaticamente `render.yaml` e configurerà il bot
 
 ## ⚠️ Attenzione
@@ -19,6 +19,7 @@
 - La quantità viene adeguata allo `qtyStep` di Bybit e arrotondata verso l'alto
   così che il valore rispetti sempre i minimi imposti dall'exchange
 - Riceverai notifiche su Telegram, compreso l'esito degli ordini eseguiti
+- Se non usi l'account unificato imposta `BYBIT_ACCOUNT_TYPE=SPOT` nel file `.env`
 - All'avvio il bot invia un messaggio di prova su Telegram e verifica la
   connessione a Bybit; **non** viene eseguito alcun ordine di test
 - Per compatibilità con versioni precedenti, la funzione `initial_buy_test()`

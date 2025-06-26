@@ -25,6 +25,7 @@ BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
 BYBIT_BASE_URL = (
     "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
 )
+BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
 MIN_ORDER_USDT = 50.0
 ORDER_USDT = max(MIN_ORDER_USDT, float(os.getenv("ORDER_USDT", str(MIN_ORDER_USDT))))
@@ -240,7 +241,7 @@ def get_balance(coin: str) -> float:
     endpoint = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
-    params = {"accountType": "SPOT", "coin": coin}
+    params = {"accountType": BYBIT_ACCOUNT_TYPE, "coin": coin}
     param_str = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
     signature_payload = f"{timestamp}{BYBIT_API_KEY}{recv_window}{param_str}"
     sign = _sign(signature_payload)
