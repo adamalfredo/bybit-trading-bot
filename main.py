@@ -32,6 +32,8 @@ ORDER_USDT = max(MIN_ORDER_USDT, float(os.getenv("ORDER_USDT", str(MIN_ORDER_USD
 ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "DOGE-USD"]
 INTERVAL_MINUTES = 15
 DOWNLOAD_RETRIES = 3
+# Cache delle informazioni sugli strumenti Bybit
+INSTRUMENT_CACHE = {}
 
 # Cache delle informazioni sugli strumenti Bybit
 INSTRUMENT_CACHE = {}
@@ -140,29 +142,30 @@ def get_instrument_info(symbol: str):
 
     return 0.0, 0.0, 0.0, 6
 
+def _round_up_step(value: float, step: float) -> float:
+    step_dec = Decimal(str(step))
+    val_dec = Decimal(str(value))
+    return float((val_dec / step_dec).to_integral_value(rounding=ROUND_UP) * step_dec)
+
 def calculate_quantity(
     symbol: str, usdt: float, price: float
 ) -> tuple[float, float, int]:
     """Calcola la quantità e l'USDT realmente utilizzato."""
     min_qty, min_amt, qty_step, precision = get_instrument_info(symbol)
 
-    actual_usdt = max(usdt, min_amt)
-    qty = actual_usdt / price if price > 0 else 0
+    if price <= 0:
+        return 0.0, 0.0, precision
 
-    if min_qty > 0:
-        qty = max(qty, min_qty)
-        actual_usdt = qty * price
+    target_qty = max(usdt / price, min_qty, min_amt / price)
 
     if qty_step:
-        step = Decimal(str(qty_step))
-        qty = (Decimal(str(qty)) / step).to_integral_value(rounding=ROUND_DOWN) * step
+        qty = _round_up_step(target_qty, qty_step)
     else:
-        qty = Decimal(str(qty)).quantize(
-            Decimal(1) if precision == 0 else Decimal('1').scaleb(-precision),
-            rounding=ROUND_DOWN,
+        step = Decimal('1').scaleb(-precision)
+        qty = float(
+            Decimal(str(target_qty)).quantize(step, rounding=ROUND_UP)
         )
 
-    qty = float(qty)
     actual_usdt = qty * price
     return qty, actual_usdt, precision
 
@@ -461,8 +464,6 @@ Strategia: {sig['strategy']}"""
                     f"Vendo tutto {coin}: {qty} (~{qty * result['price']:.2f} USDT)"
                 )
                 send_order(result["symbol"], "Sell", qty, prec)
-        # Le mini-analisi sono state rimosse: il bot ora invia solo i segnali
-
 
 if __name__ == "__main__":
     log("🔄 Avvio sistema di monitoraggio segnali reali")
