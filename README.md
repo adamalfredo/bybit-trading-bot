@@ -14,6 +14,8 @@
   soglia minima a 50). Il bot recupera i limiti di Bybit e, se necessari,
   aumenta automaticamente l'importo per rispettarli. Se il recupero fallisce usa
   un endpoint alternativo. In uscita il bot vende l'intero saldo della moneta.
+- Il recupero del saldo spot è stato reso più robusto e viene segnalato nel log
+  se la coin richiesta non è presente nella risposta dell'API di Bybit
 - La quantità viene adeguata allo `qtyStep` di Bybit e arrotondata verso l'alto
   così che il valore rispetti sempre i minimi imposti dall'exchange
 - Riceverai notifiche su Telegram, compreso l'esito degli ordini eseguiti

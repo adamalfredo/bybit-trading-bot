@@ -35,12 +35,6 @@ DOWNLOAD_RETRIES = 3
 # Cache delle informazioni sugli strumenti Bybit
 INSTRUMENT_CACHE = {}
 
-# Cache delle informazioni sugli strumenti Bybit
-INSTRUMENT_CACHE = {}
-
-# Cache delle informazioni sugli strumenti Bybit
-INSTRUMENT_CACHE = {}
-
 def log(msg):
     timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
     print(f"{timestamp} {msg}")
@@ -263,11 +257,38 @@ def get_balance(coin: str) -> float:
         )
         data = resp.json()
         if data.get("retCode") == 0:
-            lists = data.get("result", {}).get("list", [])
-            if lists and lists[0].get("coin"):
-                for c in lists[0]["coin"]:
-                    if c.get("coin") == coin:
-                        return float(c.get("availableToWithdraw", 0))
+            result = data.get("result", {})
+            lists = result.get("list") or result.get("balances")
+            if isinstance(lists, list):
+                for item in lists:
+                    coins = (
+                        item.get("coin")
+                        or item.get("coins")
+                        or item.get("balances")
+                        or []
+                    )
+                    for c in coins:
+                        if c.get("coin") == coin:
+                            for key in (
+                                "availableToWithdraw",
+                                "availableBalance",
+                                "walletBalance",
+                                "free",
+                                "transferBalance",
+                                "equity",
+                                "total",
+                            ):
+                                if key in c and c[key] is not None:
+                                    try:
+                                        return float(c[key])
+                                    except (TypeError, ValueError):
+                                        continue
+            log(
+                f"Coin {coin} non trovata nella risposta saldo: "
+                f"{data.get('result')!r}"
+            )
+        else:
+            log(f"Errore saldo {coin}: {data}")
     except Exception as e:
         log(f"Errore ottenimento saldo {coin}: {e}")
     return 0.0
