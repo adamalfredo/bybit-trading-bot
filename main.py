@@ -148,6 +148,10 @@ def calculate_quantity(
     """Calcola la quantità e l'USDT realmente utilizzato."""
     min_qty, min_amt, qty_step, precision = get_instrument_info(symbol)
 
+    if min_qty == 0 and min_amt == 0:
+        log(f"Limiti Bybit assenti per {symbol}: operazione ignorata")
+        return 0.0, 0.0, precision
+
     if price <= 0:
         return 0.0, 0.0, precision
 
@@ -301,6 +305,10 @@ def get_balance(coin: str) -> float:
 def round_quantity(symbol: str, quantity: float, price: float) -> tuple[float, int]:
     """Arrotonda la quantità secondo lo step e verifica i minimi di Bybit."""
     min_qty, min_amt, qty_step, precision = get_instrument_info(symbol)
+
+    if min_qty == 0 and min_amt == 0:
+        log(f"Limiti Bybit assenti per {symbol}: operazione ignorata")
+        return 0.0, precision
 
     if qty_step:
         step = Decimal(str(qty_step))
