@@ -369,10 +369,6 @@ def test_bybit_connection() -> None:
         log(msg)
         notify_telegram(msg)
 
-def initial_buy_test() -> None:
-    """Alias mantenuto per retrocompatibilità."""
-    test_bybit_connection()
-
 def find_close_column(df: pd.DataFrame) -> Optional[str]:
     """Trova il nome della colonna di chiusura, se esiste."""
     cols = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
@@ -533,7 +529,6 @@ if __name__ == "__main__":
     # Esegui solo un test di connessione alle API, senza alcun ordine di prova
     test_bybit_connection()
     notify_telegram("🔔 Test: bot avviato correttamente")
-    initial_buy_test()
     while True:
         try:
             scan_assets()
