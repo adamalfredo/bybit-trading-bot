@@ -20,8 +20,9 @@
 - Prima di ogni acquisto viene controllato il saldo USDT disponibile
 - Riceverai notifiche su Telegram, compreso l'esito degli ordini eseguiti
 - Se non usi l'account unificato imposta `BYBIT_ACCOUNT_TYPE=SPOT` nel file `.env`
-- All'avvio il bot invia un messaggio di prova su Telegram e verifica la
-  connessione a Bybit; **non** viene eseguito alcun ordine di test
+- All'avvio il bot invia un messaggio di prova su Telegram, verifica la
+  connessione a Bybit ed esegue un acquisto iniziale di BTC utilizzando
+  l'importo `ORDER_USDT`
 - In questa versione il bot può inviare ordini automatici su Bybit se imposti le chiavi API
 - Se i dati non contengono la colonna "Close" viene indicata nel log la lista delle colonne trovate
 - Se il download dei dati fallisce per problemi di rete, il bot effettua alcuni tentativi automatici
