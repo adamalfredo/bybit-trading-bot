@@ -81,14 +81,22 @@ def fetch_history(symbol: str) -> pd.DataFrame:
 
 
 def _parse_precision(value, default=6):
-    """Converte basePrecision nel numero di decimali."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        s = str(value)
-        if "." in s:
-            return len(s.split(".")[1].rstrip("0"))
+    """Restituisce il numero di decimali partendo da un valore."""
+    if value is None:
         return default
+    s = str(value).strip()
+    if s.isdigit():
+        return int(s)
+    try:
+        dec = Decimal(s)
+    except Exception:
+        return default
+    if dec == dec.to_integral():
+        return 0
+    s = format(dec.normalize(), "f")
+    if "." in s:
+        return len(s.split(".")[1].rstrip("0"))
+    return default
 
 
 def get_instrument_info(symbol: str):
@@ -111,7 +119,13 @@ def get_instrument_info(symbol: str):
             min_qty = float(lot.get("minOrderQty", 0))
             min_amt = float(lot.get("minOrderAmt", 0))
             qty_step = float(lot.get("qtyStep", 0))
-            precision = _parse_precision(lot.get("qtyStep", lot.get("basePrecision", 6)))
+            base_prec = _parse_precision(lot.get("basePrecision"), 6)
+            if qty_step == 0:
+                if base_prec:
+                    qty_step = 10 ** -base_prec
+                else:
+                    qty_step = 10 ** -_parse_precision(min_qty)
+            precision = max(_parse_precision(qty_step), base_prec)
             INSTRUMENT_CACHE[symbol] = (min_qty, min_amt, qty_step, precision)
             log(
                 f"{symbol}: minOrderQty={min_qty}, minOrderAmt={min_amt}, qtyStep={qty_step}"
@@ -132,7 +146,13 @@ def get_instrument_info(symbol: str):
                 min_qty = float(item.get("minTradeQty", 0))
                 min_amt = float(item.get("minTradeAmount", item.get("minTradeAmt", 0)))
                 qty_step = float(item.get("qtyStep", item.get("lotSize", 0)))
-                precision = _parse_precision(item.get("qtyStep", item.get("basePrecision", 6)))
+                base_prec = _parse_precision(item.get("basePrecision"), 6)
+                if qty_step == 0:
+                    if base_prec:
+                        qty_step = 10 ** -base_prec
+                    else:
+                        qty_step = 10 ** -_parse_precision(min_qty)
+                precision = max(_parse_precision(qty_step), base_prec)
                 INSTRUMENT_CACHE[symbol] = (min_qty, min_amt, qty_step, precision)
                 log(
                     f"{symbol}: minOrderQty={min_qty}, minOrderAmt={min_amt}, qtyStep={qty_step}"
