@@ -3,7 +3,7 @@ import time
 import hmac
 import json
 import hashlib
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 import requests
 import yfinance as yf
 import pandas as pd
@@ -33,6 +33,7 @@ ORDER_USDT = max(MIN_ORDER_USDT, float(os.getenv("ORDER_USDT", str(MIN_ORDER_USD
 ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "DOGE-USD"]
 INTERVAL_MINUTES = 15
 DOWNLOAD_RETRIES = 3
+
 # Cache delle informazioni sugli strumenti Bybit
 INSTRUMENT_CACHE = {}
 
@@ -464,7 +465,7 @@ def scan_assets():
         if result.get("signal"):
             sig = result["signal"]
             tipo = "📈 Segnale di ENTRATA" if sig["type"] == "entry" else "📉 Segnale di USCITA"
-            msg = f"""{tipo}
+            msg = f"""OK - {tipo}
 Asset: {result['symbol']}
 Prezzo: {result['price']}
 Strategia: {sig['strategy']}"""
