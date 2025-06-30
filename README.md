@@ -1,12 +1,11 @@
-# Bot di trading Bybit (versione per Render)
+# Bot di trading Bybit
 
-## ✅ Come usarlo
+## ✅ Come usarlo con Railway
 
-1. Vai su https://render.com
-2. Clicca su "New + > Web Service"
-3. Carica lo ZIP di questo progetto
-4. Rinomina `.env.example` in `.env` ed inserisci le tue credenziali (puoi impostare `BYBIT_TESTNET=true` per usare la testnet). Se utilizzi l'account unificato non cambiare `BYBIT_ACCOUNT_TYPE` (di default `UNIFIED`)
-5. Render leggerà automaticamente `render.yaml` e configurerà il bot
+1. Vai su https://railway.app
+2. Crea un nuovo progetto e carica questo repository
+3. Rinomina `.env.example` in `.env` ed inserisci le tue credenziali (puoi impostare `BYBIT_TESTNET=true` per usare la testnet). Se utilizzi l'account unificato non cambiare `BYBIT_ACCOUNT_TYPE` (di default `UNIFIED`)
+4. Imposta `pip install -r requirements.txt` come comando di build e `python main.py` come comando di start
 
 ## ⚠️ Attenzione
 - Il bot è attivo 24/7

@@ -512,7 +512,6 @@ Strategia: {sig['strategy']}"""
                     f"Vendo tutto {coin}: {qty} (~{qty * result['price']:.2f} USDT)"
                 )
                 send_order(result["symbol"], "Sell", qty, prec)
-
 if __name__ == "__main__":
     log("🔄 Avvio sistema di monitoraggio segnali reali")
     # Esegui solo un test di connessione alle API, senza alcun ordine di prova
