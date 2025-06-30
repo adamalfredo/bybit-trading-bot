@@ -202,7 +202,7 @@ def _format_quantity(quantity: float, precision: int) -> str:
     )
     if precision == 0:
         return str(int(q))
-    return format(q, f'.{precision}f').rstrip('0').rstrip('.')
+    return format(q, f'.{precision}f')
 
 
 def send_order(symbol: str, side: str, quantity: float, precision: int) -> None:
