@@ -35,8 +35,6 @@ INTERVAL_MINUTES = 15
 DOWNLOAD_RETRIES = 3
 # Cache delle informazioni sugli strumenti Bybit
 INSTRUMENT_CACHE = {}
-# Cache delle informazioni sugli strumenti Bybit
-INSTRUMENT_CACHE = {}
 
 def log(msg):
     timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
@@ -183,6 +181,9 @@ def send_order(symbol: str, side: str, quantity: float, precision: int) -> None:
         log("Chiavi Bybit mancanti: ordine non inviato")
         return
 
+    if quantity <= 0:
+        log(f"Quantit\u00e0 non valida per l'ordine {symbol}")
+        return
     endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
@@ -191,7 +192,7 @@ def send_order(symbol: str, side: str, quantity: float, precision: int) -> None:
         "category": "spot",
         "symbol": symbol,
         "side": side,
-        "orderType": "Market",
+        "orderType": "MARKET",
         "qty": qty_str,
         "timeInForce": "IOC",
     }
@@ -476,6 +477,17 @@ Strategia: {sig['strategy']}"""
                 qty, used_usdt, prec = calculate_quantity(
                     result["symbol"], ORDER_USDT, result["price"]
                 )
+                if qty <= 0:
+                    warn = f"Quantit\u00e0 calcolata nulla per {result['symbol']}"
+                    log(warn)
+                    notify_telegram(warn)
+                    continue
+                usdt_balance = get_balance("USDT")
+                if usdt_balance < used_usdt:
+                    warn = f"Saldo USDT insufficiente per acquistare {result['symbol']}"
+                    log(warn)
+                    notify_telegram(warn)
+                    continue
                 log(
                     f"Invio ordine da {used_usdt:.2f} USDT su {result['symbol']}"
                 )

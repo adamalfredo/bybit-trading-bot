@@ -18,6 +18,7 @@
   se la coin richiesta non è presente nella risposta dell'API di Bybit
 - La quantità viene adeguata allo `qtyStep` di Bybit e arrotondata verso l'alto
   così che il valore rispetti sempre i minimi imposti dall'exchange
+- Prima di ogni acquisto viene controllato il saldo USDT disponibile
 - Riceverai notifiche su Telegram, compreso l'esito degli ordini eseguiti
 - Se non usi l'account unificato imposta `BYBIT_ACCOUNT_TYPE=SPOT` nel file `.env`
 - All'avvio il bot invia un messaggio di prova su Telegram e verifica la
