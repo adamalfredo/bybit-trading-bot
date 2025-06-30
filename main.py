@@ -389,6 +389,42 @@ def test_bybit_connection() -> None:
         log(msg)
         notify_telegram(msg)
 
+def get_last_price(symbol: str) -> Optional[float]:
+    """Recupera l'ultimo prezzo disponibile da Bybit."""
+    url = f"{BYBIT_BASE_URL}/v5/market/tickers"
+    params = {"category": "spot", "symbol": symbol}
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        if data.get("retCode") == 0:
+            lst = data.get("result", {}).get("list")
+            if lst:
+                price = lst[0].get("lastPrice")
+                if price is not None:
+                    return float(price)
+    except Exception as e:
+        log(f"Errore prezzo {symbol}: {e}")
+    return None
+
+def initial_btc_purchase() -> None:
+    """Esegue un acquisto iniziale di BTC se possibile."""
+    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
+        return
+    price = get_last_price("BTCUSDT")
+    if price is None:
+        log("Prezzo BTC non disponibile: acquisto iniziale saltato")
+        return
+    qty, used_usdt, prec = calculate_quantity("BTCUSDT", ORDER_USDT, price)
+    if qty <= 0:
+        log("Quantit\u00e0 calcolata nulla per BTC")
+        return
+    usdt_balance = get_balance("USDT")
+    if usdt_balance < used_usdt:
+        log("Saldo USDT insufficiente per acquisto iniziale BTC")
+        return
+    log(f"Acquisto iniziale BTC: {used_usdt:.2f} USDT al prezzo {price}")
+    send_order("BTCUSDT", "Buy", qty, prec)
+
 def find_close_column(df: pd.DataFrame) -> Optional[str]:
     """Trova il nome della colonna di chiusura, se esiste."""
     cols = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
@@ -546,8 +582,9 @@ Strategia: {sig['strategy']}"""
                 send_order(result["symbol"], "Sell", qty, prec)
 if __name__ == "__main__":
     log("🔄 Avvio sistema di monitoraggio segnali reali")
-    # Esegui solo un test di connessione alle API, senza alcun ordine di prova
+    # Testa la connessione alle API e poi esegue un acquisto iniziale di BTC
     test_bybit_connection()
+    initial_btc_purchase()
     notify_telegram("🔔 Test: bot avviato correttamente")
     while True:
         try:
