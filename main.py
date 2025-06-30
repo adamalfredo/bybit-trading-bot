@@ -113,6 +113,9 @@ def get_instrument_info(symbol: str):
             qty_step = float(lot.get("qtyStep", 0))
             precision = _parse_precision(lot.get("qtyStep", lot.get("basePrecision", 6)))
             INSTRUMENT_CACHE[symbol] = (min_qty, min_amt, qty_step, precision)
+            log(
+                f"{symbol}: minOrderQty={min_qty}, minOrderAmt={min_amt}, qtyStep={qty_step}"
+            )
             return INSTRUMENT_CACHE[symbol]
     except Exception as e:
         log(f"Errore info strumento {symbol} (v5): {e}")
@@ -131,6 +134,9 @@ def get_instrument_info(symbol: str):
                 qty_step = float(item.get("qtyStep", item.get("lotSize", 0)))
                 precision = _parse_precision(item.get("qtyStep", item.get("basePrecision", 6)))
                 INSTRUMENT_CACHE[symbol] = (min_qty, min_amt, qty_step, precision)
+                log(
+                    f"{symbol}: minOrderQty={min_qty}, minOrderAmt={min_amt}, qtyStep={qty_step}"
+                )
                 return INSTRUMENT_CACHE[symbol]
     except Exception as e:
         log(f"Errore info strumento {symbol} (fallback): {e}")
@@ -215,8 +221,10 @@ def send_order(symbol: str, side: str, quantity: float, precision: int) -> None:
         if data.get("retCode") != 0:
             code = data.get("retCode")
             if code == 170140:
+                min_qty, min_amt, qty_step, _ = get_instrument_info(symbol)
                 msg = (
                     f"Ordine troppo piccolo per {symbol}. "
+                    f"minQty={min_qty}, minAmt={min_amt}, qtyStep={qty_step}. "
                     "Aumenta ORDER_USDT."
                 )
             elif code == 170131:
