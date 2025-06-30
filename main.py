@@ -33,7 +33,8 @@ ORDER_USDT = max(MIN_ORDER_USDT, float(os.getenv("ORDER_USDT", str(MIN_ORDER_USD
 ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "DOGE-USD"]
 INTERVAL_MINUTES = 15
 DOWNLOAD_RETRIES = 3
-
+# Cache delle informazioni sugli strumenti Bybit
+INSTRUMENT_CACHE = {}
 # Cache delle informazioni sugli strumenti Bybit
 INSTRUMENT_CACHE = {}
 
@@ -352,8 +353,7 @@ def test_bybit_connection() -> None:
         notify_telegram(msg)
 
 def initial_buy_test() -> None:
-    """Compatibilità con le vecchie versioni."""
-    log("initial_buy_test non è più disponibile: eseguo test_bybit_connection")
+    """Alias mantenuto per retrocompatibilità."""
     test_bybit_connection()
 
 def find_close_column(df: pd.DataFrame) -> Optional[str]:
