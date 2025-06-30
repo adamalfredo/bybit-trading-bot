@@ -33,10 +33,8 @@ ORDER_USDT = max(MIN_ORDER_USDT, float(os.getenv("ORDER_USDT", str(MIN_ORDER_USD
 ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "DOGE-USD"]
 INTERVAL_MINUTES = 15
 DOWNLOAD_RETRIES = 3
-
 # Cache delle informazioni sugli strumenti Bybit
 INSTRUMENT_CACHE = {}
-
 
 def log(msg):
     timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
@@ -139,12 +137,10 @@ def get_instrument_info(symbol: str):
 
     return 0.0, 0.0, 0.0, 6
 
-
 def _round_up_step(value: float, step: float) -> float:
     step_dec = Decimal(str(step))
     val_dec = Decimal(str(value))
     return float((val_dec / step_dec).to_integral_value(rounding=ROUND_UP) * step_dec)
-
 
 def calculate_quantity(
     symbol: str, usdt: float, price: float
@@ -168,7 +164,6 @@ def calculate_quantity(
     actual_usdt = qty * price
     return qty, actual_usdt, precision
 
-
 def _format_quantity(quantity: float, precision: int) -> str:
     """Restituisce la quantità con la precisione corretta."""
     q = Decimal(str(quantity)).quantize(
@@ -189,7 +184,6 @@ def send_order(symbol: str, side: str, quantity: float, precision: int) -> None:
     if quantity <= 0:
         log(f"Quantit\u00e0 non valida per l'ordine {symbol}")
         return
-
     endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
@@ -241,7 +235,6 @@ def send_order(symbol: str, side: str, quantity: float, precision: int) -> None:
         msg = f"Errore invio ordine {symbol}: {e}"
         log(msg)
         notify_telegram(msg)
-
 
 def get_balance(coin: str) -> float:
     """Restituisce il saldo disponibile per la coin indicata."""
@@ -326,7 +319,6 @@ def round_quantity(symbol: str, quantity: float, price: float) -> tuple[float, i
 
     return qty_f, precision
 
-
 def test_bybit_connection() -> None:
     """Esegue una semplice chiamata autenticata per verificare le API."""
     if not BYBIT_API_KEY or not BYBIT_API_SECRET:
@@ -361,13 +353,9 @@ def test_bybit_connection() -> None:
         log(msg)
         notify_telegram(msg)
 
-
 def initial_buy_test() -> None:
     """Alias mantenuto per retrocompatibilità."""
     test_bybit_connection()
-
-
-
 
 def find_close_column(df: pd.DataFrame) -> Optional[str]:
     """Trova il nome della colonna di chiusura, se esiste."""
@@ -524,15 +512,12 @@ Strategia: {sig['strategy']}"""
                     f"Vendo tutto {coin}: {qty} (~{qty * result['price']:.2f} USDT)"
                 )
                 send_order(result["symbol"], "Sell", qty, prec)
-
-        # Le mini-analisi sono state rimosse: il bot ora invia solo i segnali
-
-
 if __name__ == "__main__":
     log("🔄 Avvio sistema di monitoraggio segnali reali")
     # Esegui solo un test di connessione alle API, senza alcun ordine di prova
     test_bybit_connection()
     notify_telegram("🔔 Test: bot avviato correttamente")
+    initial_buy_test()
     while True:
         try:
             scan_assets()
