@@ -227,18 +227,6 @@ def send_order(symbol: str, side: str, quantity: float, precision: int, price: f
     qty_str = _format_quantity(quantity, precision)
     actual_usdt = float(qty_str) * price
 
-    # Verifica se l'importo è sotto il minimo ammesso da Bybit
-    min_qty, min_amt, qty_step, _ = get_instrument_info(symbol)
-    if actual_usdt < min_amt or float(qty_str) < min_qty:
-        msg = (
-            f"Ordine troppo piccolo per {symbol} dopo arrotondamento: "
-            f"{qty_str} ({actual_usdt:.2f} USDT). "
-            f"minQty={min_qty}, minAmt={min_amt}. Aumenta ORDER_USDT."
-        )
-        log(msg)
-        notify_telegram(msg)
-        return
-
     endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
