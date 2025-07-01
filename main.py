@@ -218,7 +218,7 @@ def _format_quantity(quantity: float, precision: int) -> str:
 
 
 def send_order(symbol: str, side: str, quantity: float, precision: int, price: float):
-    """Invia un ordine di mercato su Bybit."""
+    """Invia un ordine di mercato su Bybit (BUY con quoteQty in USDT, SELL con qty classico)."""
     if not BYBIT_API_KEY or not BYBIT_API_SECRET:
         log("Chiavi Bybit mancanti: ordine non inviato")
         return
@@ -231,32 +231,25 @@ def send_order(symbol: str, side: str, quantity: float, precision: int, price: f
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
 
-    # Corpo della richiesta
+    body = {
+        "category": "spot",
+        "symbol": symbol,
+        "side": side,
+        "orderType": "MARKET",
+        "timeInForce": "IOC"
+    }
+
     if side.upper() == "BUY":
-        # In acquisto usiamo quoteQty
-        body = {
-            "category": "spot",
-            "symbol": symbol,
-            "side": side,
-            "orderType": "MARKET",
-            "quoteQty": str(quantity),
-            "timeInForce": "IOC"
-        }
+        # USDT da spendere, senza calcolo di quantità
+        body["quoteQty"] = f"{quantity:.2f}"
         usdt_display = quantity
     else:
-        # In vendita usiamo qty classico
+        # Vendita: si usa qty classico
         qty_str = _format_quantity(quantity, precision)
-        body = {
-            "category": "spot",
-            "symbol": symbol,
-            "side": side,
-            "orderType": "MARKET",
-            "qty": qty_str,
-            "timeInForce": "IOC"
-        }
+        body["qty"] = qty_str
         usdt_display = float(qty_str) * price
 
-    # Firma e intestazioni
+    # Firma
     body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
     signature_payload = f"{timestamp}{BYBIT_API_KEY}{recv_window}{body_json}"
     signature = _sign(signature_payload)
@@ -281,6 +274,8 @@ def send_order(symbol: str, side: str, quantity: float, precision: int, price: f
                 msg = f"Saldo insufficiente per {symbol}."
             elif code == 170137:
                 msg = f"Decimali eccessivi per {symbol}."
+            elif code == 170003:
+                msg = f"❌ Errore parametri: {data.get('retMsg', '')} (probabile malformazione quoteQty)"
             else:
                 msg = f"Errore ordine {symbol}: {data}"
             log(msg)
