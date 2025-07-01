@@ -254,12 +254,13 @@ def send_buy_order(symbol: str, usdt: float):
         "type": "MARKET",
         "quoteOrderQty": f"{usdt:.2f}",
         "timestamp": timestamp,
+        "recvWindow": 5000
     }
 
-    # Firma
+    # Firma HMAC SHA256 dei parametri
     query_string = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
     signature = _sign(query_string)
-    signed_query = f"{query_string}&signature={signature}"
+    params["signature"] = signature
 
     headers = {
         "X-BAPI-API-KEY": BYBIT_API_KEY,
@@ -267,13 +268,9 @@ def send_buy_order(symbol: str, usdt: float):
     }
 
     try:
-        resp = requests.post(endpoint, headers=headers, data=signed_query, timeout=10)
-        if resp.status_code != 200:
-            log(f"❌ Errore HTTP: {resp.status_code} - {resp.text}")
-            notify_telegram(f"❌ Errore HTTP {resp.status_code} durante l'acquisto {symbol}")
-            return
-
+        resp = requests.post(endpoint, headers=headers, data=params, timeout=10)
         data = resp.json()
+
         if data.get("ret_code") == 0:
             log(f"✅ Ordine BUY {symbol} inviato con {usdt:.2f} USDT")
             notify_telegram(f"✅ Ordine BUY {symbol} inviato con {usdt:.2f} USDT")
