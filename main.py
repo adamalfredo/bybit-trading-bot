@@ -12,8 +12,12 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 BASE = "https://api.bybit.com"
 ORDER_USDT = 10
-ASSETS = ["DOGEUSDT", "BTCUSDT"]
+ASSETS = [
+    "DOGEUSDT", "BTCUSDT", "AVAXUSDT", "SOLUSDT", "ETHUSDT", "LINKUSDT",
+    "MATICUSDT", "ARBUSDT", "OPUSDT", "LTCUSDT", "XRPUSDT"
+]
 INTERVAL_MINUTES = 15
+
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
@@ -102,12 +106,12 @@ def analyze_asset(symbol: str):
     try:
         df = fetch_history(symbol)
         if df is None:
-            return None
+            return None, None
 
         df.dropna(inplace=True)
         close = find_close_column(df)
         if close is None:
-            return None
+            return None, None
 
         bb = BollingerBands(close=close)
         df["bb_upper"] = bb.bollinger_hband()
@@ -120,16 +124,18 @@ def analyze_asset(symbol: str):
         last = df.iloc[-1]
         prev = df.iloc[-2]
 
+        price = float(last["Close"])
+
         if last["Close"] > last["bb_upper"] and last["rsi"] < 70:
-            return "entry"
+            return "entry", f"Breakout Bollinger"
         elif prev["sma20"] < prev["sma50"] and last["sma20"] > last["sma50"]:
-            return "entry"
+            return "entry", f"Incrocio SMA 20/50"
         elif last["Close"] < last["bb_lower"] and last["rsi"] > 30:
-            return "exit"
-        return None
+            return "exit", f"Rimbalzo RSI + BB"
+        return None, None
     except Exception as e:
         log(f"Errore analisi {symbol}: {e}")
-        return None
+        return None, None
 
 def get_free_qty(symbol: str):
     try:
@@ -157,19 +163,22 @@ def get_free_qty(symbol: str):
 
 if __name__ == "__main__":
     log("🔄 Avvio sistema di acquisto iniziale (DOGE + BTC)")
+    notify_telegram("✅ Connessione a Bybit riuscita")
+    notify_telegram("🧪 Test: bot avviato correttamente")
+
     market_buy("DOGEUSDT", ORDER_USDT)
     market_buy("BTCUSDT", ORDER_USDT)
 
     while True:
         for symbol in ASSETS:
-            signal = analyze_asset(symbol)
+            signal, strategy = analyze_asset(symbol)
             if signal:
-                msg = f"📢 Segnale {signal.upper()} su {symbol}"
-                log(msg)
-                notify_telegram(msg)
+                price = fetch_history(symbol).iloc[-1]["Close"]
                 if signal == "entry":
+                    notify_telegram(f"\uD83D\uDCC8 Segnale di ENTRATA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
                     market_buy(symbol, ORDER_USDT)
                 elif signal == "exit":
+                    notify_telegram(f"\uD83D\uDCC9 Segnale di USCITA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
                     qty = get_free_qty(symbol)
                     if qty > 0:
                         market_sell(symbol, qty)
