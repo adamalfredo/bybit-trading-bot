@@ -163,60 +163,6 @@ def get_instrument_info(symbol: str):
 
     return 0.0, 0.0, 0.0, 6
 
-def _round_up_step(value: float, step: float) -> float:
-    step_dec = Decimal(str(step))
-    val_dec = Decimal(str(value))
-    return float((val_dec / step_dec).to_integral_value(rounding=ROUND_UP) * step_dec)
-
-def calculate_quantity(
-    symbol: str, usdt: float, price: float
-) -> tuple[float, float, int]:
-    """Calcola la quantità da acquistare nel rispetto dei limiti Bybit."""
-    min_qty, min_amt, qty_step, precision = get_instrument_info(symbol)
-
-    if min_qty == 0 and min_amt == 0:
-        log(f"Limiti Bybit assenti per {symbol}: operazione ignorata")
-        return 0.0, 0.0, precision
-
-    if price <= 0 or usdt <= 0:
-        return 0.0, 0.0, precision
-
-    target_qty = usdt / price
-
-    # Arrotonda in giù
-    step = Decimal(str(qty_step))
-    qty_down = (
-        Decimal(str(target_qty)) / step
-    ).to_integral_value(rounding=ROUND_DOWN) * step
-
-    # Se non basta, prova ad arrotondare in su (ma entro budget)
-    actual_usdt_down = float(qty_down) * price
-    if actual_usdt_down >= min_amt:
-        return float(qty_down), actual_usdt_down, precision
-
-    # Prova ad arrotondare in su
-    qty_up = (
-        Decimal(str(target_qty)) / step
-    ).to_integral_value(rounding=ROUND_UP) * step
-    actual_usdt_up = float(qty_up) * price
-
-    if actual_usdt_up <= usdt and float(qty_up) >= min_qty and actual_usdt_up >= min_amt:
-        return float(qty_up), actual_usdt_up, precision
-
-    # Nessuna delle due va bene
-    return 0.0, 0.0, precision
-
-def _format_quantity(quantity: float, precision: int) -> str:
-    """Restituisce la quantità con la precisione corretta."""
-    q = Decimal(str(quantity)).quantize(
-        Decimal(1) if precision == 0 else Decimal('1').scaleb(-precision),
-        rounding=ROUND_DOWN,
-    )
-    if precision == 0:
-        return str(int(q))
-    return format(q, f'.{precision}f')
-
-
 def send_order(symbol: str, side: str, quantity: float, precision: int, price: float):
     """Invia un ordine di mercato su Bybit (BUY con quoteQty in USDT, SELL con qty classico)."""
     if not BYBIT_API_KEY or not BYBIT_API_SECRET:
@@ -282,6 +228,58 @@ def send_order(symbol: str, side: str, quantity: float, precision: int, price: f
             notify_telegram(msg)
         else:
             msg = f"✅ Ordine {side} {symbol} inviato: ~{usdt_display:.2f} USDT"
+            log(msg)
+            notify_telegram(msg)
+    except Exception as e:
+        msg = f"Errore invio ordine {symbol}: {e}"
+        log(msg)
+        notify_telegram(msg)
+
+def send_buy_order(symbol: str, usdt: float):
+    """Invia un ordine MARKET di acquisto specificando solo l'USDT da spendere."""
+    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
+        log("Chiavi Bybit mancanti: ordine non inviato")
+        return
+
+    if usdt < 5:
+        log(f"Importo troppo basso per {symbol}: {usdt} USDT")
+        return
+
+    quote_qty = format(usdt, ".2f")  # stringa con 2 decimali obbligatori
+
+    endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
+    timestamp = str(int(time.time() * 1000))
+    recv_window = "5000"
+
+    body = {
+        "category": "spot",
+        "symbol": symbol,
+        "side": "Buy",
+        "orderType": "MARKET",
+        "quoteQty": quote_qty
+    }
+
+    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+    signature_payload = f"{timestamp}{BYBIT_API_KEY}{recv_window}{body_json}"
+    signature = _sign(signature_payload)
+
+    headers = {
+        "X-BAPI-API-KEY": BYBIT_API_KEY,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        resp = requests.post(endpoint, headers=headers, data=body_json, timeout=10)
+        data = resp.json()
+        if data.get("retCode") == 0:
+            log(f"✅ Ordine BUY {symbol} inviato con {quote_qty} USDT")
+            notify_telegram(f"✅ Ordine BUY {symbol} inviato con {quote_qty} USDT")
+        else:
+            msg = f"❌ Errore ordine {symbol}: {data.get('retMsg')} ({data.get('retCode')})"
             log(msg)
             notify_telegram(msg)
     except Exception as e:
@@ -427,24 +425,14 @@ def get_last_price(symbol: str) -> Optional[float]:
         log(f"Errore prezzo {symbol}: {e}")
     return None
 
-def initial_btc_purchase() -> None:
-    """Esegue un acquisto iniziale di BTC se possibile."""
-    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
-        return
-    price = get_last_price("BTCUSDT")
-    if price is None:
-        log("Prezzo BTC non disponibile: acquisto iniziale saltato")
-        return
-    qty, used_usdt, prec = calculate_quantity("BTCUSDT", ORDER_USDT, price)
-    if qty <= 0:
-        log("Quantit\u00e0 calcolata nulla per BTC")
-        return
+def initial_btc_purchase():
+    """Acquisto iniziale di BTC con importo fisso."""
     usdt_balance = get_balance("USDT")
-    if usdt_balance < used_usdt:
+    if usdt_balance < ORDER_USDT:
         log("Saldo USDT insufficiente per acquisto iniziale BTC")
         return
-    log(f"Acquisto iniziale BTC: {used_usdt:.2f} USDT al prezzo {price}")
-    send_order("BTCUSDT", "Buy", qty, prec, price)
+    log(f"Acquisto iniziale BTC: {ORDER_USDT:.2f} USDT")
+    send_buy_order("BTCUSDT", ORDER_USDT)
 
 def find_close_column(df: pd.DataFrame) -> Optional[str]:
     """Trova il nome della colonna di chiusura, se esiste."""
@@ -556,31 +544,21 @@ def scan_assets():
             sig = result["signal"]
             tipo = "📈 Segnale di ENTRATA" if sig["type"] == "entry" else "📉 Segnale di USCITA"
             msg = f"""OK - {tipo}
-Asset: {result['symbol']}
-Prezzo: {result['price']}
-Strategia: {sig['strategy']}"""
+            Asset: {result['symbol']}
+            Prezzo: {result['price']}
+            Strategia: {sig['strategy']}"""
             log(msg.replace("\n", " | "))
             notify_telegram(msg)
 
             if sig["type"] == "entry":
-                qty, used_usdt, prec = calculate_quantity(
-                    result["symbol"], ORDER_USDT, result["price"]
-                )
-                if qty <= 0:
-                    warn = f"Quantit\u00e0 calcolata nulla per {result['symbol']}"
-                    log(warn)
-                    notify_telegram(warn)
-                    continue
                 usdt_balance = get_balance("USDT")
-                if usdt_balance < used_usdt:
+                if usdt_balance < ORDER_USDT:
                     warn = f"Saldo USDT insufficiente per acquistare {result['symbol']}"
                     log(warn)
                     notify_telegram(warn)
                     continue
-                log(
-                    f"Invio ordine da {used_usdt:.2f} USDT su {result['symbol']}"
-                )
-                send_order(result["symbol"], "Buy", qty, prec, result["price"])
+                log(f"Invio ordine da {ORDER_USDT:.2f} USDT su {result['symbol']}")
+                send_buy_order(result["symbol"], ORDER_USDT)
             else:
                 coin = result["symbol"].replace("USDT", "")
                 bal = get_balance(coin)
