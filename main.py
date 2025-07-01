@@ -27,7 +27,7 @@ BYBIT_BASE_URL = (
 )
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
-MIN_ORDER_USDT = 51
+MIN_ORDER_USDT = 52
 ORDER_USDT = max(MIN_ORDER_USDT, float(os.getenv("ORDER_USDT", str(MIN_ORDER_USDT))))
 
 ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "DOGE-USD"]
@@ -171,40 +171,33 @@ def _round_up_step(value: float, step: float) -> float:
 def calculate_quantity(
     symbol: str, usdt: float, price: float
 ) -> tuple[float, float, int]:
-    """Calcola la quantità e l'USDT realmente utilizzato."""
+    """Calcola la quantità da acquistare nel rispetto dei limiti Bybit."""
     min_qty, min_amt, qty_step, precision = get_instrument_info(symbol)
 
     if min_qty == 0 and min_amt == 0:
         log(f"Limiti Bybit assenti per {symbol}: operazione ignorata")
         return 0.0, 0.0, precision
 
-    if price <= 0:
+    if price <= 0 or usdt <= 0:
         return 0.0, 0.0, precision
 
-    # Quantità iniziale basata sull'importo richiesto
-    target_qty = max(usdt / price, min_qty, min_amt / price)
+    # Calcola quantità target iniziale
+    target_qty = usdt / price
 
+    # Applica arrotondamento in base a qty_step o precision
     if qty_step:
-        qty = _round_up_step(target_qty, qty_step)
+        step = Decimal(str(qty_step))
+        qty = (
+            Decimal(str(target_qty)) / step
+        ).to_integral_value(rounding=ROUND_DOWN) * step
     else:
-        step = Decimal('1').scaleb(-precision)
-        qty = float(Decimal(str(target_qty)).quantize(step, rounding=ROUND_UP))
+        step = Decimal("1").scaleb(-precision)
+        qty = Decimal(str(target_qty)).quantize(step, rounding=ROUND_DOWN)
 
+    qty = float(qty)
     actual_usdt = qty * price
 
-    # Se sfora il budget usdt, ridimensiona correttamente
-    if actual_usdt > usdt:
-        max_qty = usdt / price
-        if qty_step:
-            qty = float(
-                Decimal(str(max_qty)).quantize(Decimal(str(qty_step)), rounding=ROUND_DOWN)
-            )
-        else:
-            step = Decimal('1').scaleb(-precision)
-            qty = float(Decimal(str(max_qty)).quantize(step, rounding=ROUND_DOWN))
-        actual_usdt = qty * price
-
-    # Verifica che rispetti i minimi di Bybit
+    # Verifica se rispetta i limiti minimi dopo arrotondamento
     if qty < min_qty or actual_usdt < min_amt:
         return 0.0, 0.0, precision
 
