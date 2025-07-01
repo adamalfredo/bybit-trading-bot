@@ -236,7 +236,7 @@ def send_order(symbol: str, side: str, quantity: float, precision: int, price: f
         notify_telegram(msg)
 
 def send_buy_order(symbol: str, usdt: float):
-    """Invia un ordine MARKET usando quoteOrderQty su Bybit SPOT V1."""
+    """Invia un ordine MARKET usando quoteOrderQty su Bybit Spot."""
     if not BYBIT_API_KEY or not BYBIT_API_SECRET:
         log("Chiavi Bybit mancanti: ordine non inviato")
         return
@@ -257,23 +257,22 @@ def send_buy_order(symbol: str, usdt: float):
         "recvWindow": 5000
     }
 
-    # Firma HMAC SHA256 dei parametri
     query_string = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
     signature = _sign(query_string)
     params["signature"] = signature
 
     headers = {
-        "X-BAPI-API-KEY": BYBIT_API_KEY,
-        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Type": "application/x-www-form-urlencoded"
     }
 
     try:
-        resp = requests.post(endpoint, headers=headers, data=params, timeout=10)
+        resp = requests.post(endpoint, headers=headers, params=params, timeout=10)
         data = resp.json()
 
         if data.get("ret_code") == 0:
-            log(f"✅ Ordine BUY {symbol} inviato con {usdt:.2f} USDT")
-            notify_telegram(f"✅ Ordine BUY {symbol} inviato con {usdt:.2f} USDT")
+            msg = f"✅ Ordine BUY {symbol} inviato con {usdt:.2f} USDT"
+            log(msg)
+            notify_telegram(msg)
         else:
             msg = f"❌ Errore ordine {symbol}: {data.get('ret_msg')} ({data.get('ret_code')})"
             log(msg)
