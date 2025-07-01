@@ -227,21 +227,36 @@ def send_order(symbol: str, side: str, quantity: float, precision: int, price: f
         log(f"Quantità non valida per l'ordine {symbol}")
         return
 
-    qty_str = _format_quantity(quantity, precision)
-    actual_usdt = float(qty_str) * price
-
     endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
 
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": side,
-        "orderType": "MARKET",
-        "qty": qty_str,
-        "timeInForce": "IOC",
-    }
+    # Corpo della richiesta
+    if side.upper() == "BUY":
+        # In acquisto usiamo quoteQty
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": side,
+            "orderType": "MARKET",
+            "quoteQty": str(quantity),
+            "timeInForce": "IOC"
+        }
+        usdt_display = quantity
+    else:
+        # In vendita usiamo qty classico
+        qty_str = _format_quantity(quantity, precision)
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": side,
+            "orderType": "MARKET",
+            "qty": qty_str,
+            "timeInForce": "IOC"
+        }
+        usdt_display = float(qty_str) * price
+
+    # Firma e intestazioni
     body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
     signature_payload = f"{timestamp}{BYBIT_API_KEY}{recv_window}{body_json}"
     signature = _sign(signature_payload)
@@ -270,9 +285,8 @@ def send_order(symbol: str, side: str, quantity: float, precision: int, price: f
                 msg = f"Errore ordine {symbol}: {data}"
             log(msg)
             notify_telegram(msg)
-
         else:
-            msg = f"✅ Ordine {side} {symbol} inviato: {qty_str} ({actual_usdt:.2f} USDT)"
+            msg = f"✅ Ordine {side} {symbol} inviato: ~{usdt_display:.2f} USDT"
             log(msg)
             notify_telegram(msg)
     except Exception as e:
