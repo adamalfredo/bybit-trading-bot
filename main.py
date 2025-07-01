@@ -228,12 +228,28 @@ def send_order(symbol: str, side: str, quantity: float, precision: int, price: f
         return
 
     if quantity <= 0:
-        log(f"Quantit\u00e0 non valida per l'ordine {symbol}")
+        log(f"Quantità non valida per l'ordine {symbol}")
         return
+
+    qty_str = _format_quantity(quantity, precision)
+    actual_usdt = float(qty_str) * price
+
+    # Verifica se l'importo è sotto il minimo ammesso da Bybit
+    min_qty, min_amt, qty_step, _ = get_instrument_info(symbol)
+    if actual_usdt < min_amt or float(qty_str) < min_qty:
+        msg = (
+            f"Ordine troppo piccolo per {symbol} dopo arrotondamento: "
+            f"{qty_str} ({actual_usdt:.2f} USDT). "
+            f"minQty={min_qty}, minAmt={min_amt}. Aumenta ORDER_USDT."
+        )
+        log(msg)
+        notify_telegram(msg)
+        return
+
     endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
-    qty_str = _format_quantity(quantity, precision)
+
     body = {
         "category": "spot",
         "symbol": symbol,
@@ -261,7 +277,6 @@ def send_order(symbol: str, side: str, quantity: float, precision: int, price: f
         if data.get("retCode") != 0:
             code = data.get("retCode")
             if code == 170140:
-                min_qty, min_amt, qty_step, _ = get_instrument_info(symbol)
                 msg = (
                     f"Ordine troppo piccolo per {symbol}. "
                     f"minQty={min_qty}, minAmt={min_amt}, qtyStep={qty_step}. "
@@ -276,7 +291,7 @@ def send_order(symbol: str, side: str, quantity: float, precision: int, price: f
             log(msg)
             notify_telegram(msg)
         else:
-            msg = f"✅ Ordine {side} {symbol} inviato: {qty_str} ({qty * price:.2f} USDT)"
+            msg = f"✅ Ordine {side} {symbol} inviato: {qty_str} ({actual_usdt:.2f} USDT)"
             log(msg)
             notify_telegram(msg)
     except Exception as e:
