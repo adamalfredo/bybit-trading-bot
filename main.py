@@ -236,7 +236,7 @@ def send_order(symbol: str, side: str, quantity: float, precision: int, price: f
         notify_telegram(msg)
 
 def send_buy_order(symbol: str, usdt: float):
-    """Invia un ordine MARKET di acquisto sul mercato Spot con USDT fisso (quoteOrderQty)."""
+    """Invia un ordine MARKET di acquisto su Spot specificando solo la quantità in USDT."""
     if not BYBIT_API_KEY or not BYBIT_API_SECRET:
         log("Chiavi Bybit mancanti: ordine non inviato")
         return
@@ -254,21 +254,23 @@ def send_buy_order(symbol: str, usdt: float):
         "type": "MARKET",
         "quoteOrderQty": f"{usdt:.2f}",
         "timestamp": timestamp,
+        "recvWindow": 5000,
     }
 
-    query = "&".join(f"{k}={v}" for k, v in body.items())
+    query = "&".join(f"{k}={v}" for k, v in sorted(body.items()))
     signature = hmac.new(
         BYBIT_API_SECRET.encode(), query.encode(), hashlib.sha256
     ).hexdigest()
 
+    body["sign"] = signature
+
     headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
         "X-BAPI-API-KEY": BYBIT_API_KEY,
     }
 
     try:
-        resp = requests.post(
-            f"{endpoint}?{query}&sign={signature}", headers=headers, timeout=10
-        )
+        resp = requests.post(endpoint, headers=headers, data=body, timeout=10)
         data = resp.json()
         if data.get("ret_code") == 0:
             log(f"✅ Ordine BUY {symbol} inviato con {usdt:.2f} USDT")
