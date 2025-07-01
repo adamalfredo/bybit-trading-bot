@@ -1,9 +1,10 @@
-
 import os, time, hmac, hashlib, json, requests, yfinance as yf, pandas as pd
 from dotenv import load_dotenv
 from ta.trend import SMAIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import BollingerBands
+
+SYMBOLS = ["BTC-USD", "DOGE-USD"]
 
 load_dotenv()
 KEY = os.getenv("BYBIT_API_KEY")
