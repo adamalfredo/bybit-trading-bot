@@ -258,11 +258,7 @@ def send_order(symbol: str, side: str, quantity: float, precision: int, price: f
         if data.get("retCode") != 0:
             code = data.get("retCode")
             if code == 170140:
-                msg = (
-                    f"Ordine troppo piccolo per {symbol}. "
-                    f"minQty={min_qty}, minAmt={min_amt}, qtyStep={qty_step}. "
-                    "Aumenta ORDER_USDT."
-                )
+                msg = f"Ordine troppo piccolo per {symbol}. Aumenta ORDER_USDT."
             elif code == 170131:
                 msg = f"Saldo insufficiente per {symbol}."
             elif code == 170137:
@@ -271,6 +267,7 @@ def send_order(symbol: str, side: str, quantity: float, precision: int, price: f
                 msg = f"Errore ordine {symbol}: {data}"
             log(msg)
             notify_telegram(msg)
+
         else:
             msg = f"✅ Ordine {side} {symbol} inviato: {qty_str} ({actual_usdt:.2f} USDT)"
             log(msg)
