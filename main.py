@@ -127,3 +127,8 @@ def send_order(symbol: str, side: str, quantity: float, precision: int, price: f
         msg = f"Errore invio ordine {symbol}: {e}"
         log(msg)
         notify_telegram(msg)
+
+if __name__ == "__main__":
+    print("🔄 Avvio sistema di acquisto iniziale (DOGE + BTC)")
+    market_buy("DOGEUSDT", 10.00)
+    market_buy("BTCUSDT", 10.00)
