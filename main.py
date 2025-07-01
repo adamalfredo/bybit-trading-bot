@@ -27,7 +27,7 @@ BYBIT_BASE_URL = (
 )
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
-MIN_ORDER_USDT = 70
+MIN_ORDER_USDT = 52
 ORDER_USDT = max(MIN_ORDER_USDT, float(os.getenv("ORDER_USDT", str(MIN_ORDER_USDT))))
 
 ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "DOGE-USD"]
@@ -181,27 +181,30 @@ def calculate_quantity(
     if price <= 0 or usdt <= 0:
         return 0.0, 0.0, precision
 
-    # Applica margine di sicurezza -1.5% per evitare minAmt error
-    usdt_safe = usdt * 0.985
+    target_qty = usdt / price
 
-    target_qty = usdt_safe / price
+    # Arrotonda in giù
+    step = Decimal(str(qty_step))
+    qty_down = (
+        Decimal(str(target_qty)) / step
+    ).to_integral_value(rounding=ROUND_DOWN) * step
 
-    if qty_step:
-        step = Decimal(str(qty_step))
-        qty = (
-            Decimal(str(target_qty)) / step
-        ).to_integral_value(rounding=ROUND_DOWN) * step
-    else:
-        step = Decimal("1").scaleb(-precision)
-        qty = Decimal(str(target_qty)).quantize(step, rounding=ROUND_DOWN)
+    # Se non basta, prova ad arrotondare in su (ma entro budget)
+    actual_usdt_down = float(qty_down) * price
+    if actual_usdt_down >= min_amt:
+        return float(qty_down), actual_usdt_down, precision
 
-    qty = float(qty)
-    actual_usdt = qty * price
+    # Prova ad arrotondare in su
+    qty_up = (
+        Decimal(str(target_qty)) / step
+    ).to_integral_value(rounding=ROUND_UP) * step
+    actual_usdt_up = float(qty_up) * price
 
-    if qty < min_qty or actual_usdt < min_amt:
-        return 0.0, 0.0, precision
+    if actual_usdt_up <= usdt and float(qty_up) >= min_qty and actual_usdt_up >= min_amt:
+        return float(qty_up), actual_usdt_up, precision
 
-    return qty, actual_usdt, precision
+    # Nessuna delle due va bene
+    return 0.0, 0.0, precision
 
 def _format_quantity(quantity: float, precision: int) -> str:
     """Restituisce la quantità con la precisione corretta."""
