@@ -11,7 +11,7 @@ SECRET = os.getenv("BYBIT_API_SECRET")
 BASE = "https://api.bybit.com"
 ORDER_USDT = float(os.getenv("ORDER_USDT", "10"))
 
-SYMBOLS = ["BTCUSDT", "DOGEUSDT"]
+symbols = ["BTC-USD", "DOGE-USD"]
 
 def market_buy(symbol: str, usdt: float):
     endpoint = f"{BASE}/v5/order/create"
