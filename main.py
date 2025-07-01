@@ -35,6 +35,31 @@ INTERVAL_MINUTES = 15
 DOWNLOAD_RETRIES = 3
 INSTRUMENT_CACHE = {}
 
+def market_buy(symbol: str, usdt: float):
+    endpoint = "https://api.bybit.com/v5/order/create"
+    ts = str(int(time.time() * 1000))
+    body = {
+        "category": "spot",
+        "symbol": symbol,
+        "side": "Buy",
+        "orderType": "Market",
+        "qty": f"{usdt:.2f}"
+    }
+    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+    payload = f"{ts}{BYBIT_API_KEY}5000{body_json}"
+    sign = hmac.new(BYBIT_API_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": BYBIT_API_KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json"
+    }
+    resp = requests.post(endpoint, headers=headers, data=body_json)
+    print("BODY:", body_json)
+    print("RESPONSE:", resp.status_code, resp.json())
+
 def log(msg):
     timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
     print(f"{timestamp} {msg}")
