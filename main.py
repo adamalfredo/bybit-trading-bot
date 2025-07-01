@@ -165,8 +165,8 @@ if __name__ == "__main__":
     notify_telegram("✅ Connessione a Bybit riuscita")
     notify_telegram("🧪 Test: bot avviato correttamente")
 
-    market_buy("DOGEUSDT", ORDER_USDT)
-    market_buy("BTCUSDT", ORDER_USDT)
+    # market_buy("DOGEUSDT", ORDER_USDT)
+    # market_buy("BTCUSDT", ORDER_USDT)
 
     while True:
         for symbol in ASSETS:
