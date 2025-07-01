@@ -181,17 +181,33 @@ def calculate_quantity(
     if price <= 0:
         return 0.0, 0.0, precision
 
+    # Quantità iniziale basata sull'importo richiesto
     target_qty = max(usdt / price, min_qty, min_amt / price)
 
     if qty_step:
         qty = _round_up_step(target_qty, qty_step)
     else:
         step = Decimal('1').scaleb(-precision)
-        qty = float(
-            Decimal(str(target_qty)).quantize(step, rounding=ROUND_UP)
-        )
+        qty = float(Decimal(str(target_qty)).quantize(step, rounding=ROUND_UP))
 
     actual_usdt = qty * price
+
+    # Se sfora il budget usdt, ridimensiona correttamente
+    if actual_usdt > usdt:
+        max_qty = usdt / price
+        if qty_step:
+            qty = float(
+                Decimal(str(max_qty)).quantize(Decimal(str(qty_step)), rounding=ROUND_DOWN)
+            )
+        else:
+            step = Decimal('1').scaleb(-precision)
+            qty = float(Decimal(str(max_qty)).quantize(step, rounding=ROUND_DOWN))
+        actual_usdt = qty * price
+
+    # Verifica che rispetti i minimi di Bybit
+    if qty < min_qty or actual_usdt < min_amt:
+        return 0.0, 0.0, precision
+
     return qty, actual_usdt, precision
 
 def _format_quantity(quantity: float, precision: int) -> str:
@@ -205,7 +221,7 @@ def _format_quantity(quantity: float, precision: int) -> str:
     return format(q, f'.{precision}f')
 
 
-def send_order(symbol: str, side: str, quantity: float, precision: int) -> None:
+def send_order(symbol: str, side: str, quantity: float, precision: int, price: float):
     """Invia un ordine di mercato su Bybit."""
     if not BYBIT_API_KEY or not BYBIT_API_SECRET:
         log("Chiavi Bybit mancanti: ordine non inviato")
@@ -260,7 +276,7 @@ def send_order(symbol: str, side: str, quantity: float, precision: int) -> None:
             log(msg)
             notify_telegram(msg)
         else:
-            msg = f"✅ Ordine {side} {symbol} inviato ({qty_str})"
+            msg = f"✅ Ordine {side} {symbol} inviato: {qty_str} ({qty * price:.2f} USDT)"
             log(msg)
             notify_telegram(msg)
     except Exception as e:
@@ -423,7 +439,7 @@ def initial_btc_purchase() -> None:
         log("Saldo USDT insufficiente per acquisto iniziale BTC")
         return
     log(f"Acquisto iniziale BTC: {used_usdt:.2f} USDT al prezzo {price}")
-    send_order("BTCUSDT", "Buy", qty, prec)
+    send_order("BTCUSDT", "Buy", qty, prec, price)
 
 def find_close_column(df: pd.DataFrame) -> Optional[str]:
     """Trova il nome della colonna di chiusura, se esiste."""
@@ -559,7 +575,7 @@ Strategia: {sig['strategy']}"""
                 log(
                     f"Invio ordine da {used_usdt:.2f} USDT su {result['symbol']}"
                 )
-                send_order(result["symbol"], "Buy", qty, prec)
+                send_order(result["symbol"], "Buy", qty, prec, result["price"])
             else:
                 coin = result["symbol"].replace("USDT", "")
                 bal = get_balance(coin)
@@ -579,7 +595,7 @@ Strategia: {sig['strategy']}"""
                 log(
                     f"Vendo tutto {coin}: {qty} (~{qty * result['price']:.2f} USDT)"
                 )
-                send_order(result["symbol"], "Sell", qty, prec)
+                send_order(result["symbol"], "Sell", qty, prec, result["price"])
 if __name__ == "__main__":
     log("🔄 Avvio sistema di monitoraggio segnali reali")
     # Testa la connessione alle API e poi esegue un acquisto iniziale di BTC
