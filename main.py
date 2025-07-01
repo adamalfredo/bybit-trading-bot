@@ -1,159 +1,178 @@
-import os
-import time
-import hmac
-import json
-import hashlib
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
-import requests
+import os, time, hmac, hashlib, json, requests
 import yfinance as yf
 import pandas as pd
-from ta.volatility import BollingerBands
-from ta.momentum import RSIIndicator
 from ta.trend import SMAIndicator
+from ta.momentum import RSIIndicator
+from ta.volatility import BollingerBands
 from dotenv import load_dotenv
-from typing import Optional
 
-# Carica variabili da .env
+# Carica le variabili d'ambiente
 load_dotenv()
-
+KEY = os.getenv("BYBIT_API_KEY")
+SECRET = os.getenv("BYBIT_API_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
-BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
-BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
-BYBIT_BASE_URL = (
-    "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
-)
-BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
-
-MIN_ORDER_USDT = 52
-ORDER_USDT = max(MIN_ORDER_USDT, float(os.getenv("ORDER_USDT", str(MIN_ORDER_USDT))))
-
-ASSET_LIST = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "DOGE-USD"]
+# Costanti
+BASE = "https://api.bybit.com"
+ORDER_USDT = 10
+ASSETS = ["DOGEUSDT", "BTCUSDT"]
 INTERVAL_MINUTES = 15
-DOWNLOAD_RETRIES = 3
-INSTRUMENT_CACHE = {}
 
-def market_buy(symbol: str, usdt: float):
-    endpoint = "https://api.bybit.com/v5/order/create"
+
+def log(msg):
+    print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
+
+
+def notify_telegram(message: str):
+    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+        try:
+            requests.post(url, data=data, timeout=10)
+        except:
+            pass
+
+
+def market_buy(symbol: str, qty: float):
+    endpoint = f"{BASE}/v5/order/create"
     ts = str(int(time.time() * 1000))
     body = {
         "category": "spot",
         "symbol": symbol,
         "side": "Buy",
         "orderType": "Market",
-        "qty": f"{usdt:.2f}"
+        "qty": f"{qty:.2f}"
     }
     body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
-    payload = f"{ts}{BYBIT_API_KEY}5000{body_json}"
-    sign = hmac.new(BYBIT_API_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
     headers = {
-        "X-BAPI-API-KEY": BYBIT_API_KEY,
+        "X-BAPI-API-KEY": KEY,
         "X-BAPI-SIGN": sign,
         "X-BAPI-TIMESTAMP": ts,
         "X-BAPI-RECV-WINDOW": "5000",
         "X-BAPI-SIGN-TYPE": "2",
         "Content-Type": "application/json"
     }
-    resp = requests.post(endpoint, headers=headers, data=body_json)
-    print("BODY:", body_json)
-    print("RESPONSE:", resp.status_code, resp.json())
-
-def log(msg):
-    timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
-    print(f"{timestamp} {msg}")
-
-def notify_telegram(message: str):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
     try:
-        requests.post(url, data=data, timeout=10)
+        resp = requests.post(endpoint, headers=headers, data=body_json)
+        log(f"BODY: {body_json}")
+        log(f"RESPONSE: {resp.status_code} {resp.json()}")
     except Exception as e:
-        log(f"Errore Telegram: {e}")
+        log(f"Errore invio ordine: {e}")
 
-def _sign(payload: str) -> str:
-    if not BYBIT_API_SECRET:
-        return ""
-    return hmac.new(BYBIT_API_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
-def send_order(symbol: str, side: str, quantity: float, precision: int, price: float):
-    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
-        log("Chiavi Bybit mancanti: ordine non inviato")
-        return
+def analyze(symbol: str):
+    try:
+        df = yf.download(tickers=symbol.replace("USDT", "-USD"), period="7d", interval="15m", progress=False, auto_adjust=True)
+        if df is None or df.empty or len(df) < 60:
+            return None
 
-    if quantity <= 0:
-        log(f"Quantità non valida per l'ordine {symbol}")
-        return
+        df.dropna(inplace=True)
+        close = df["Close"]
+        bb = BollingerBands(close=close)
+        df["bb_upper"] = bb.bollinger_hband()
+        df["bb_lower"] = bb.bollinger_lband()
+        df["rsi"] = RSIIndicator(close=close).rsi()
+        df["sma20"] = SMAIndicator(close=close, window=20).sma_indicator()
+        df["sma50"] = SMAIndicator(close=close, window=50).sma_indicator()
 
-    endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
-    timestamp = str(int(time.time() * 1000))
+        df.dropna(inplace=True)
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        if last["Close"] > last["bb_upper"] and last["rsi"] < 70:
+            return "entry"
+        elif prev["sma20"] < prev["sma50"] and last["sma20"] > last["sma50"]:
+            return "entry"
+        elif last["Close"] < last["bb_lower"] and last["rsi"] > 30:
+            return "exit"
+        return None
+    except Exception as e:
+        log(f"Errore analisi {symbol}: {e}")
+        return None
+
+
+def get_balance(coin: str):
+    endpoint = f"{BASE}/v5/account/wallet-balance"
+    ts = str(int(time.time() * 1000))
     recv_window = "5000"
+    query = f"accountType=UNIFIED&coin={coin}"
+    payload = f"{ts}{KEY}{recv_window}{query}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN-TYPE": "2"
+    }
+    try:
+        url = f"{endpoint}?{query}"
+        resp = requests.get(url, headers=headers, timeout=10)
+        data = resp.json()
+        if data.get("retCode") == 0:
+            balances = data.get("result", {}).get("list", [])
+            for entry in balances:
+                for coin_data in entry.get("coin", []):
+                    if coin_data.get("coin") == coin:
+                        return float(coin_data.get("availableToWithdraw", 0))
+        return 0
+    except:
+        return 0
 
+
+def sell_all(symbol: str):
+    coin = symbol.replace("USDT", "")
+    balance = get_balance(coin)
+    if balance > 0:
+        market_sell(symbol, balance)
+
+
+def market_sell(symbol: str, qty: float):
+    endpoint = f"{BASE}/v5/order/create"
+    ts = str(int(time.time() * 1000))
     body = {
         "category": "spot",
         "symbol": symbol,
-        "side": side,
-        "orderType": "MARKET",
-        "timeInForce": "IOC"
+        "side": "Sell",
+        "orderType": "Market",
+        "qty": f"{qty:.6f}"
     }
-
-    if side.upper() == "BUY":
-        # Logica testata: usare qty + marketUnit=quoteCoin per quantità in USDT
-        body["qty"] = f"{quantity:.2f}"
-        body["marketUnit"] = "quoteCoin"
-        usdt_display = quantity
-    else:
-        qty_str = _format_quantity(quantity, precision)
-        body["qty"] = qty_str
-        usdt_display = float(qty_str) * price
-
     body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
-    signature_payload = f"{timestamp}{BYBIT_API_KEY}{recv_window}{body_json}"
-    signature = _sign(signature_payload)
-
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
     headers = {
-        "X-BAPI-API-KEY": BYBIT_API_KEY,
-        "X-BAPI-SIGN": signature,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000",
         "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
     }
-
     try:
-        debug_body = "&".join(f"{k}={v}" for k, v in body.items())
-        log(f"[DEBUG] Endpoint: {endpoint}")
-        log(f"[DEBUG] Headers: {headers}")
-        log(f"[DEBUG] Body: {debug_body}")
-        resp = requests.post(endpoint, headers=headers, data=body_json, timeout=10)
-        data = resp.json()
-        if data.get("retCode") != 0:
-            code = data.get("retCode")
-            if code == 170140:
-                msg = f"Ordine troppo piccolo per {symbol}. Aumenta ORDER_USDT."
-            elif code == 170131:
-                msg = f"Saldo insufficiente per {symbol}."
-            elif code == 170137:
-                msg = f"Decimali eccessivi per {symbol}."
-            elif code == 170003:
-                msg = f"❌ Errore parametri: {data.get('retMsg', '')} (probabile malformazione quoteQty)"
-            else:
-                msg = f"Errore ordine {symbol}: {data}"
-            log(msg)
-            notify_telegram(msg)
-        else:
-            msg = f"✅ Ordine {side} {symbol} inviato: ~{usdt_display:.2f} USDT"
-            log(msg)
-            notify_telegram(msg)
+        resp = requests.post(endpoint, headers=headers, data=body_json)
+        log(f"SELL BODY: {body_json}")
+        log(f"SELL RESPONSE: {resp.status_code} {resp.json()}")
     except Exception as e:
-        msg = f"Errore invio ordine {symbol}: {e}"
-        log(msg)
-        notify_telegram(msg)
+        log(f"Errore invio ordine SELL: {e}")
+
 
 if __name__ == "__main__":
-    print("🔄 Avvio sistema di acquisto iniziale (DOGE + BTC)")
+    log("🔄 Avvio sistema di acquisto iniziale (DOGE + BTC)")
     market_buy("DOGEUSDT", 10.00)
     market_buy("BTCUSDT", 10.00)
+
+    while True:
+        for symbol in ASSETS:
+            signal = analyze(symbol)
+            if signal:
+                msg = f"📢 Segnale {signal.upper()} su {symbol}"
+                log(msg)
+                notify_telegram(msg)
+                if signal == "entry":
+                    market_buy(symbol, ORDER_USDT)
+                elif signal == "exit":
+                    sell_all(symbol)
+        time.sleep(INTERVAL_MINUTES * 60)
