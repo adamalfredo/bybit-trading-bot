@@ -266,7 +266,7 @@ def send_buy_order(symbol: str, usdt: float):
     }
 
     try:
-        resp = requests.post(endpoint, headers=headers, params=params, timeout=10)
+        resp = requests.post(endpoint, headers=headers, data=params, timeout=10)  # ✅ data, non params
         data = resp.json()
 
         if data.get("ret_code") == 0:
