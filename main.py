@@ -236,7 +236,7 @@ def send_order(symbol: str, side: str, quantity: float, precision: int, price: f
         notify_telegram(msg)
 
 def send_buy_order(symbol: str, usdt: float):
-    """Invia un ordine MARKET di acquisto specificando solo l'USDT da spendere."""
+    """Invia un ordine MARKET di acquisto usando quoteOrderQty su SPOT V3."""
     if not BYBIT_API_KEY or not BYBIT_API_SECRET:
         log("Chiavi Bybit mancanti: ordine non inviato")
         return
@@ -245,39 +245,35 @@ def send_buy_order(symbol: str, usdt: float):
         log(f"Importo troppo basso per {symbol}: {usdt} USDT")
         return
 
-    quote_qty = format(usdt, ".2f")  # stringa con 2 decimali obbligatori
-
-    endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
+    endpoint = f"{BYBIT_BASE_URL}/spot/v3/order"
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
 
-    body = {
-        "category": "spot",
+    params = {
         "symbol": symbol,
-        "side": "Buy",
-        "orderType": "MARKET",
-        "quoteQty": quote_qty
+        "side": "BUY",
+        "type": "MARKET",
+        "quoteOrderQty": f"{usdt:.2f}",
+        "timestamp": timestamp,
+        "recvWindow": recv_window,
     }
 
-    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
-    signature_payload = f"{timestamp}{BYBIT_API_KEY}{recv_window}{body_json}"
-    signature = _sign(signature_payload)
+    # Firma
+    query_string = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    signature = _sign(query_string)
+    signed_query = f"{query_string}&signature={signature}"
 
     headers = {
-        "X-BAPI-API-KEY": BYBIT_API_KEY,
-        "X-BAPI-SIGN": signature,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": recv_window,
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json",
+        "X-MBX-APIKEY": BYBIT_API_KEY,
+        "Content-Type": "application/x-www-form-urlencoded",
     }
 
     try:
-        resp = requests.post(endpoint, headers=headers, data=body_json, timeout=10)
+        resp = requests.post(endpoint, headers=headers, data=signed_query, timeout=10)
         data = resp.json()
         if data.get("retCode") == 0:
-            log(f"✅ Ordine BUY {symbol} inviato con {quote_qty} USDT")
-            notify_telegram(f"✅ Ordine BUY {symbol} inviato con {quote_qty} USDT")
+            log(f"✅ Ordine BUY {symbol} inviato con {usdt:.2f} USDT")
+            notify_telegram(f"✅ Ordine BUY {symbol} inviato con {usdt:.2f} USDT")
         else:
             msg = f"❌ Errore ordine {symbol}: {data.get('retMsg')} ({data.get('retCode')})"
             log(msg)
