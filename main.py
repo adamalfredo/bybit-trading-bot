@@ -236,7 +236,7 @@ def send_order(symbol: str, side: str, quantity: float, precision: int, price: f
         notify_telegram(msg)
 
 def send_buy_order(symbol: str, usdt: float):
-    """Invia un ordine MARKET di acquisto usando quoteOrderQty su SPOT V3."""
+    """Invia un ordine MARKET usando quoteOrderQty su Bybit SPOT V1."""
     if not BYBIT_API_KEY or not BYBIT_API_SECRET:
         log("Chiavi Bybit mancanti: ordine non inviato")
         return
@@ -245,9 +245,8 @@ def send_buy_order(symbol: str, usdt: float):
         log(f"Importo troppo basso per {symbol}: {usdt} USDT")
         return
 
-    endpoint = f"{BYBIT_BASE_URL}/spot/v3/order"
+    endpoint = f"{BYBIT_BASE_URL}/spot/v1/order"
     timestamp = str(int(time.time() * 1000))
-    recv_window = "5000"
 
     params = {
         "symbol": symbol,
@@ -255,7 +254,6 @@ def send_buy_order(symbol: str, usdt: float):
         "type": "MARKET",
         "quoteOrderQty": f"{usdt:.2f}",
         "timestamp": timestamp,
-        "recvWindow": recv_window,
     }
 
     # Firma
@@ -264,18 +262,23 @@ def send_buy_order(symbol: str, usdt: float):
     signed_query = f"{query_string}&signature={signature}"
 
     headers = {
-        "X-MBX-APIKEY": BYBIT_API_KEY,
+        "X-BAPI-API-KEY": BYBIT_API_KEY,
         "Content-Type": "application/x-www-form-urlencoded",
     }
 
     try:
         resp = requests.post(endpoint, headers=headers, data=signed_query, timeout=10)
+        if resp.status_code != 200:
+            log(f"❌ Errore HTTP: {resp.status_code} - {resp.text}")
+            notify_telegram(f"❌ Errore HTTP {resp.status_code} durante l'acquisto {symbol}")
+            return
+
         data = resp.json()
-        if data.get("retCode") == 0:
+        if data.get("ret_code") == 0:
             log(f"✅ Ordine BUY {symbol} inviato con {usdt:.2f} USDT")
             notify_telegram(f"✅ Ordine BUY {symbol} inviato con {usdt:.2f} USDT")
         else:
-            msg = f"❌ Errore ordine {symbol}: {data.get('retMsg')} ({data.get('retCode')})"
+            msg = f"❌ Errore ordine {symbol}: {data.get('ret_msg')} ({data.get('ret_code')})"
             log(msg)
             notify_telegram(msg)
     except Exception as e:
