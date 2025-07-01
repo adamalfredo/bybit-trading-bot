@@ -181,10 +181,11 @@ def calculate_quantity(
     if price <= 0 or usdt <= 0:
         return 0.0, 0.0, precision
 
-    # Calcola quantità target iniziale
-    target_qty = usdt / price
+    # Applica margine di sicurezza -1.5% per evitare minAmt error
+    usdt_safe = usdt * 0.985
 
-    # Applica arrotondamento in base a qty_step o precision
+    target_qty = usdt_safe / price
+
     if qty_step:
         step = Decimal(str(qty_step))
         qty = (
@@ -197,7 +198,6 @@ def calculate_quantity(
     qty = float(qty)
     actual_usdt = qty * price
 
-    # Verifica se rispetta i limiti minimi dopo arrotondamento
     if qty < min_qty or actual_usdt < min_amt:
         return 0.0, 0.0, precision
 
