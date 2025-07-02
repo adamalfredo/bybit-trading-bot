@@ -13,8 +13,8 @@ from ta.trend import SMAIndicator
 from typing import Optional
 
 # NON usare load_dotenv() su Railway!
-# from dotenv import load_dotenv
-# load_dotenv()
+from dotenv import load_dotenv
+load_dotenv()
 
 # Le variabili sono caricate automaticamente da Railway
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
