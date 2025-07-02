@@ -13,7 +13,8 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 BASE = "https://api.bybit.com"
 ORDER_USDT = 10
 ASSETS = [
-    "DOGEUSDT", "BTCUSDT", "AVAXUSDT", "SOLUSDT", "ETHUSDT", "LINKUSDT", "ARBUSDT", "OPUSDT", "LTCUSDT", "XRPUSDT"
+    "DOGEUSDT", "BTCUSDT", "AVAXUSDT", "SOLUSDT", "ETHUSDT", "LINKUSDT",
+    "MATICUSDT", "ARBUSDT", "OPUSDT", "LTCUSDT", "XRPUSDT"
 ]
 INTERVAL_MINUTES = 15
 
@@ -105,12 +106,12 @@ def analyze_asset(symbol: str):
     try:
         df = fetch_history(symbol)
         if df is None:
-            return None, None
+            return None, None, None
 
         df.dropna(inplace=True)
         close = find_close_column(df)
         if close is None:
-            return None, None
+            return None, None, None
 
         bb = BollingerBands(close=close)
         df["bb_upper"] = bb.bollinger_hband()
@@ -126,15 +127,15 @@ def analyze_asset(symbol: str):
         price = float(last["Close"])
 
         if last["Close"] > last["bb_upper"] and last["rsi"] < 70:
-            return "entry", f"Breakout Bollinger"
+            return "entry", "Breakout Bollinger", price
         elif prev["sma20"] < prev["sma50"] and last["sma20"] > last["sma50"]:
-            return "entry", f"Incrocio SMA 20/50"
+            return "entry", "Incrocio SMA 20/50", price
         elif last["Close"] < last["bb_lower"] and last["rsi"] > 30:
-            return "exit", f"Rimbalzo RSI + BB"
-        return None, None
+            return "exit", "Rimbalzo RSI + BB", price
+        return None, None, None
     except Exception as e:
         log(f"Errore analisi {symbol}: {e}")
-        return None, None
+        return None, None, None
 
 def get_free_qty(symbol: str):
     try:
@@ -153,7 +154,11 @@ def get_free_qty(symbol: str):
         resp = requests.get(endpoint, headers=headers)
         data = resp.json()
         coin = symbol.replace("USDT", "")
-        for item in data.get("result", {}).get("list", [])[0].get("coin", []):
+        wallets = data.get("result", {}).get("list", [])
+        if not wallets:
+            log("⚠️ Nessun wallet restituito dalla API Bybit.")
+            return 0
+        for item in wallets[0].get("coin", []):
             if item.get("coin") == coin:
                 return float(item.get("availableToWithdraw", 0))
     except Exception as e:
@@ -165,14 +170,13 @@ if __name__ == "__main__":
     notify_telegram("✅ Connessione a Bybit riuscita")
     notify_telegram("🧪 Test: bot avviato correttamente")
 
-    # market_buy("DOGEUSDT", ORDER_USDT)
-    # market_buy("BTCUSDT", ORDER_USDT)
+    market_buy("DOGEUSDT", ORDER_USDT)
+    market_buy("BTCUSDT", ORDER_USDT)
 
     while True:
         for symbol in ASSETS:
-            signal, strategy = analyze_asset(symbol)
+            signal, strategy, price = analyze_asset(symbol)
             if signal:
-                price = fetch_history(symbol).iloc[-1]["Close"]
                 if signal == "entry":
                     notify_telegram(f"\uD83D\uDCC8 Segnale di ENTRATA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
                     market_buy(symbol, ORDER_USDT)
