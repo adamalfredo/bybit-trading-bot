@@ -1,15 +1,31 @@
-import os, time, hmac, hashlib, json, requests, yfinance as yf, pandas as pd
-from ta.trend import SMAIndicator
-from ta.momentum import RSIIndicator
+import os
+import time
+import hmac
+import json
+import hashlib
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
+import requests
+import yfinance as yf
+import pandas as pd
 from ta.volatility import BollingerBands
+from ta.momentum import RSIIndicator
+from ta.trend import SMAIndicator
+from typing import Optional
+
+# NON usare load_dotenv() su Railway!
 # from dotenv import load_dotenv
 # load_dotenv()
-KEY = os.getenv("BYBIT_API_KEY")
-SECRET = os.getenv("BYBIT_API_SECRET")
+
+# Le variabili sono caricate automaticamente da Railway
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-BASE = "https://api.bybit.com"
+BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
+BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
+BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
+BYBIT_BASE_URL = (
+    "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
+)
+BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 ORDER_USDT = 10
 ASSETS = [
     "DOGEUSDT", "BTCUSDT", "AVAXUSDT", "SOLUSDT", "ETHUSDT", "LINKUSDT",
