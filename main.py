@@ -174,6 +174,14 @@ if __name__ == "__main__":
     # market_buy("BTCUSDT", ORDER_USDT)
 
     while True:
+        # ⚠️ TEST NOTIFICA TELEGRAM CON ORDINE FINTA ENTRATA (da rimuovere dopo il test)
+        test_symbol = "BTCUSDT"
+        test_price = 99999.99
+        test_strategy = "TEST - Finto Segnale"
+        notify_telegram(f"\uD83D\uDCC8 Segnale di ENTRATA\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
+        market_buy(test_symbol, ORDER_USDT)
+        log(f"✅ TEST completato per {test_symbol} con ordine finto e notifica Telegram.")
+        
         for symbol in ASSETS:
             signal, strategy, price = analyze_asset(symbol)
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
