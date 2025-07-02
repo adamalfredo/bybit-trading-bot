@@ -183,7 +183,7 @@ def get_free_qty(symbol: str):
     return 0
 
 if __name__ == "__main__":
-    log("🔄 Avvio sistema di acquisto iniziale (DOGE + BTC)")
+    log("🔄 Avvio sistema di acquisto")
     notify_telegram("✅ Connessione a Bybit riuscita")
     notify_telegram("🧪 Test: bot avviato correttamente")
 
