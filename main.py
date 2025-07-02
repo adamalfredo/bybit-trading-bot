@@ -13,7 +13,8 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 BASE = "https://api.bybit.com"
 ORDER_USDT = 10
 ASSETS = [
-    "DOGEUSDT", "BTCUSDT", "AVAXUSDT", "SOLUSDT", "ETHUSDT", "LINKUSDT", "ARBUSDT", "OPUSDT", "LTCUSDT", "XRPUSDT"
+    "DOGEUSDT", "BTCUSDT", "AVAXUSDT", "SOLUSDT", "ETHUSDT", "LINKUSDT",
+    "ARBUSDT", "OPUSDT", "LTCUSDT", "XRPUSDT"
 ]
 INTERVAL_MINUTES = 15
 
@@ -27,8 +28,8 @@ def notify_telegram(message: str):
         data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
         try:
             requests.post(url, data=data, timeout=10)
-        except:
-            pass
+        except Exception as e:
+            log(f"Errore invio Telegram: {e}")
 
 def market_buy(symbol: str, usdt: float):
     endpoint = f"{BASE}/v5/order/create"
@@ -175,6 +176,7 @@ if __name__ == "__main__":
     while True:
         for symbol in ASSETS:
             signal, strategy, price = analyze_asset(symbol)
+            log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
             if signal:
                 if signal == "entry":
                     notify_telegram(f"\uD83D\uDCC8 Segnale di ENTRATA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
