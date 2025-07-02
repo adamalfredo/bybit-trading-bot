@@ -28,7 +28,7 @@ BYBIT_BASE_URL = (
     "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
 )
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
-ORDER_USDT = 10
+ORDER_USDT = 50
 ASSETS = [
     "DOGEUSDT", "BTCUSDT", "AVAXUSDT", "SOLUSDT", "ETHUSDT", "LINKUSDT",
     "ARBUSDT", "OPUSDT", "LTCUSDT", "XRPUSDT"
