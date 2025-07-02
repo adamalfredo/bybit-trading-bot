@@ -21,6 +21,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
+KEY = BYBIT_API_KEY
+SECRET = BYBIT_API_SECRET
 BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
 BYBIT_BASE_URL = (
     "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
@@ -47,7 +49,7 @@ def notify_telegram(message: str):
             log(f"Errore invio Telegram: {e}")
 
 def market_buy(symbol: str, usdt: float):
-    endpoint = f"{BASE}/v5/order/create"
+    endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
     ts = str(int(time.time() * 1000))
     body = {
         "category": "spot",
@@ -75,7 +77,7 @@ def market_buy(symbol: str, usdt: float):
         log(f"Errore invio ordine BUY: {e}")
 
 def market_sell(symbol: str, qty: float):
-    endpoint = f"{BASE}/v5/order/create"
+    endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
     ts = str(int(time.time() * 1000))
     body = {
         "category": "spot",
@@ -154,7 +156,7 @@ def analyze_asset(symbol: str):
 
 def get_free_qty(symbol: str):
     try:
-        endpoint = f"{BASE}/v5/account/wallet-balance"
+        endpoint = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
         ts = str(int(time.time() * 1000))
         payload = f"{ts}{KEY}5000"
         sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
