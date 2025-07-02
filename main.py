@@ -2,9 +2,8 @@ import os, time, hmac, hashlib, json, requests, yfinance as yf, pandas as pd
 from ta.trend import SMAIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import BollingerBands
-from dotenv import load_dotenv
-
-load_dotenv()
+# from dotenv import load_dotenv
+# load_dotenv()
 KEY = os.getenv("BYBIT_API_KEY")
 SECRET = os.getenv("BYBIT_API_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -181,7 +180,7 @@ if __name__ == "__main__":
         notify_telegram(f"\uD83D\uDCC8 Segnale di ENTRATA\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
         market_buy(test_symbol, ORDER_USDT)
         log(f"✅ TEST completato per {test_symbol} con ordine finto e notifica Telegram.")
-        
+
         for symbol in ASSETS:
             signal, strategy, price = analyze_asset(symbol)
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
