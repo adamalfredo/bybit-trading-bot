@@ -195,7 +195,7 @@ if __name__ == "__main__":
         test_symbol = "BTCUSDT"
         test_price = 99999.99
         test_strategy = "TEST - Finto Segnale"
-        notify_telegram(f"\uD83D\uDCC8 Segnale di ENTRATA\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
+        notify_telegram(f"📈 Segnale di ENTRATA\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
         market_buy(test_symbol, ORDER_USDT)
         log(f"✅ TEST completato per {test_symbol} con ordine finto e notifica Telegram.")
 
@@ -204,10 +204,10 @@ if __name__ == "__main__":
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
             if signal:
                 if signal == "entry":
-                    notify_telegram(f"\uD83D\uDCC8 Segnale di ENTRATA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
+                    notify_telegram(f"📈 Segnale di ENTRATA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
                     market_buy(symbol, ORDER_USDT)
                 elif signal == "exit":
-                    notify_telegram(f"\uD83D\uDCC9 Segnale di USCITA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
+                    notify_telegram(f"📉 Segnale di USCITA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
                     qty = get_free_qty(symbol)
                     if qty > 0:
                         market_sell(symbol, qty)
