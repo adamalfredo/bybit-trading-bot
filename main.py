@@ -287,6 +287,7 @@ def get_free_qty(symbol: str) -> float:
 
 if __name__ == "__main__":
     log("🔄 Avvio sistema di acquisto")
+    notify_telegram("🔄 Avvio sistema di acquisto")
     notify_telegram("✅ Connessione a Bybit riuscita")
     notify_telegram("🧪 BOT avviato correttamente")
     # ⚠️ TEST REALE DI VENDITA BTC (rimuovere dopo il test)
@@ -306,27 +307,27 @@ if __name__ == "__main__":
     # market_buy("DOGEUSDT", ORDER_USDT)
     # market_buy("BTCUSDT", ORDER_USDT)
 
+    # ⚠️ TEST NOTIFICA TELEGRAM CON ORDINE FINTA ENTRATA (da rimuovere dopo il test)
+    # test_symbol = "BTCUSDT"
+    # test_price = 99999.99
+    # test_strategy = "TEST - Finto Segnale"
+    # notify_telegram(f"📈 Segnale di ENTRATA\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
+    # market_buy(test_symbol, ORDER_USDT)
+    # log(f"✅ TEST completato per {test_symbol} con ordine finto e notifica Telegram.")
+
+    # ⚠️ TEST NOTIFICA TELEGRAM CON ORDINE FINTA USCITA (da rimuovere dopo il test)
+    # test_symbol = "DOGEUSDT"
+    # test_price = 88888.88
+    # test_strategy = "TEST - Finto SELL"
+    # notify_telegram(f"📉 Segnale di USCITA\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
+    # qty = get_free_qty(test_symbol)
+    # qty_int = int(qty)  # 🧠 forza solo parte intera (es. 10.75 → 10)
+    # if qty_int > 0:
+    #     market_sell(test_symbol, qty_int)
+    # else:
+    #     log(f"❌ TEST vendita fallito: saldo insufficiente o troppo piccolo per {test_symbol}")
+
     while True:
-        # ⚠️ TEST NOTIFICA TELEGRAM CON ORDINE FINTA ENTRATA (da rimuovere dopo il test)
-        # test_symbol = "BTCUSDT"
-        # test_price = 99999.99
-        # test_strategy = "TEST - Finto Segnale"
-        # notify_telegram(f"📈 Segnale di ENTRATA\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
-        # market_buy(test_symbol, ORDER_USDT)
-        # log(f"✅ TEST completato per {test_symbol} con ordine finto e notifica Telegram.")
-
-        # ⚠️ TEST NOTIFICA TELEGRAM CON ORDINE FINTA USCITA (da rimuovere dopo il test)
-        # test_symbol = "DOGEUSDT"
-        # test_price = 88888.88
-        # test_strategy = "TEST - Finto SELL"
-        # notify_telegram(f"📉 Segnale di USCITA\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
-        # qty = get_free_qty(test_symbol)
-        # qty_int = int(qty)  # 🧠 forza solo parte intera (es. 10.75 → 10)
-        # if qty_int > 0:
-        #     market_sell(test_symbol, qty_int)
-        # else:
-        #     log(f"❌ TEST vendita fallito: saldo insufficiente o troppo piccolo per {test_symbol}")
-
         for symbol in ASSETS:
             signal, strategy, price = analyze_asset(symbol)
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
