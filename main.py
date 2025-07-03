@@ -97,7 +97,7 @@ def get_instrument_info(symbol: str):
 
                 base_precision_str = lot_filter.get("basePrecision")
                 if base_precision_str:
-                    precision = int(base_precision_str)
+                    precision = abs(Decimal(base_precision_str).as_tuple().exponent)
                     qty_step = 1 / (10 ** precision) if precision > 0 else 1
                     return qty_step, precision
 
