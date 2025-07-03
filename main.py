@@ -76,17 +76,91 @@ def market_buy(symbol: str, usdt: float):
     except Exception as e:
         log(f"Errore invio ordine BUY: {e}")
 
-def market_sell(symbol: str, qty: float):
-    qty_step, precision = get_instrument_info(symbol)
+def get_instrument_info(symbol: str):
+    endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
     try:
-        dec_qty = Decimal(str(qty))
-        step = Decimal(str(qty_step))
-        rounded_qty = (dec_qty // step) * step
+        params = {"category": "spot", "symbol": symbol}
+        resp = requests.get(endpoint, params=params, timeout=10)
+        data = resp.json()
 
+        if data.get("retCode") == 0:
+            instruments = data.get("result", {}).get("list", [])
+            if instruments:
+                info = instruments[0]
+                lot_filter = info.get("lotSizeFilter", {})
+
+                # Priorità: qtyStep → basePrecision → fallback
+                qty_step_str = lot_filter.get("qtyStep")
+                if qty_step_str:
+                    qty_step = float(qty_step_str)
+                    precision = abs(Decimal(qty_step_str).as_tuple().exponent)
+                    return qty_step, precision
+
+                base_precision_str = lot_filter.get("basePrecision")
+                if base_precision_str:
+                    precision = int(base_precision_str)
+                    qty_step = 1 / (10 ** precision) if precision > 0 else 1
+                    return qty_step, precision
+
+        log(f"⚠️ Errore get_instrument_info per {symbol}: {data}")
+    except Exception as e:
+        log(f"⚠️ Errore richiesta get_instrument_info: {e}")
+
+    # Fallback se tutto fallisce
+    return 0.0001, 4
+
+def get_last_price(symbol: str) -> Optional[float]:
+    url = f"{BYBIT_BASE_URL}/v5/market/tickers"
+    params = {"category": "spot", "symbol": symbol}
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        if data.get("retCode") == 0:
+            lst = data.get("result", {}).get("list")
+            if lst and "lastPrice" in lst[0]:
+                return float(lst[0]["lastPrice"])
+    except Exception as e:
+        log(f"Errore ottenimento prezzo {symbol}: {e}")
+    return None
+
+def round_quantity(symbol: str, quantity: float, price: float) -> tuple[float, int]:
+    """Arrotonda la quantità secondo lo step e verifica i minimi di Bybit."""
+    qty_step, precision = get_instrument_info(symbol)
+
+    if qty_step:
+        step = Decimal(str(qty_step))
+        quantity = (
+            Decimal(str(quantity)) / step
+        ).to_integral_value(rounding=ROUND_DOWN) * step
+    else:
+        quantity = Decimal(str(quantity)).quantize(
+            Decimal(1) if precision == 0 else Decimal("1").scaleb(-precision),
+            rounding=ROUND_DOWN,
+        )
+
+    qty_f = float(quantity)
+    # Filtro per evitare ordini troppo piccoli (meno di 1 centesimo in valore)
+    if qty_f * price < 0.01:
+        return 0.0, precision
+
+    return qty_f, precision
+
+def market_sell(symbol: str, qty: float):
+    price = get_last_price(symbol)
+    if not price:
+        log(f"❌ Prezzo non disponibile per {symbol}, impossibile vendere")
+        return
+
+    qty, precision = round_quantity(symbol, qty, price)
+    if qty <= 0:
+        log(f"❌ Quantità insufficiente per vendita {symbol}")
+        return
+
+    try:
         if precision == 0:
-            qty_str = str(int(rounded_qty))
+            qty_str = str(int(qty))
         else:
-            qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+            qty_str = f"{qty:.{precision}f}".rstrip('0').rstrip('.')
 
         body = {
             "category": "spot",
@@ -111,7 +185,11 @@ def market_sell(symbol: str, qty: float):
 
         resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"SELL BODY: {body_json}")
-        log(f"RESPONSE: {resp.status_code} {resp.json()}")
+        data = resp.json()
+        log(f"RESPONSE: {resp.status_code} {data}")
+        if data.get("retCode") != 0:
+            notify_telegram(f"❌ Errore ordine SELL {symbol}: {data.get('retMsg')} ({data.get('retCode')})")
+
     except Exception as e:
         log(f"Errore invio ordine SELL: {e}")
 
@@ -221,39 +299,6 @@ def get_free_qty(symbol: str) -> float:
     except Exception as e:
         log(f"Errore ottenimento saldo {coin}: {e}")
     return 0.0
-
-def get_instrument_info(symbol: str):
-    endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
-    try:
-        params = {"category": "spot", "symbol": symbol}
-        resp = requests.get(endpoint, params=params, timeout=10)
-        data = resp.json()
-
-        if data.get("retCode") == 0:
-            instruments = data.get("result", {}).get("list", [])
-            if instruments:
-                info = instruments[0]
-                lot_filter = info.get("lotSizeFilter", {})
-
-                # Priorità: qtyStep → basePrecision → fallback
-                qty_step_str = lot_filter.get("qtyStep")
-                if qty_step_str:
-                    qty_step = float(qty_step_str)
-                    precision = abs(Decimal(qty_step_str).as_tuple().exponent)
-                    return qty_step, precision
-
-                base_precision_str = lot_filter.get("basePrecision")
-                if base_precision_str:
-                    precision = int(base_precision_str)
-                    qty_step = 1 / (10 ** precision) if precision > 0 else 1
-                    return qty_step, precision
-
-        log(f"⚠️ Errore get_instrument_info per {symbol}: {data}")
-    except Exception as e:
-        log(f"⚠️ Errore richiesta get_instrument_info: {e}")
-
-    # Fallback se tutto fallisce
-    return 0.0001, 4
 
 if __name__ == "__main__":
     log("🔄 Avvio sistema di acquisto")
