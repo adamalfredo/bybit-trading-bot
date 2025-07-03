@@ -154,43 +154,62 @@ def analyze_asset(symbol: str):
         log(f"Errore analisi {symbol}: {e}")
         return None, None, None
 
-def get_free_qty(symbol: str):
-    try:
-        endpoint = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
-        ts = str(int(time.time() * 1000))
-        coin = symbol.replace("USDT", "")
-        param_str = f"accountType={BYBIT_ACCOUNT_TYPE}&coin={coin}"
-        payload = f"{ts}{KEY}5000{param_str}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN-TYPE": "2",
-        }
-        url = f"{endpoint}?{param_str}"
-        resp = requests.get(url, headers=headers, timeout=10)
-        data = resp.json()
+def get_free_qty(symbol: str) -> float:
+    """Restituisce il saldo disponibile per la coin indicata (come nel vecchio main)."""
+    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
+        return 0.0
 
+    endpoint = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
+    timestamp = str(int(time.time() * 1000))
+    recv_window = "5000"
+    coin = symbol.replace("USDT", "")
+    params = {"accountType": BYBIT_ACCOUNT_TYPE, "coin": coin}
+    param_str = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    signature_payload = f"{timestamp}{BYBIT_API_KEY}{recv_window}{param_str}"
+    sign = hmac.new(SECRET.encode(), signature_payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": BYBIT_API_KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN-TYPE": "2",
+    }
+    try:
+        resp = requests.get(f"{endpoint}?{param_str}", headers=headers, timeout=10)
+        data = resp.json()
         if data.get("retCode") == 0:
             result = data.get("result", {})
-            lists = result.get("list", [])
+            lists = result.get("list") or result.get("balances")
             if isinstance(lists, list):
                 for item in lists:
-                    coins = item.get("coin") or []
-                    if isinstance(coins, list):
-                        for c in coins:
-                            if c.get("coin") == coin:
-                                return float(c.get("availableToWithdraw", 0))
-                    elif isinstance(coins, dict):
-                        if coins.get("coin") == coin:
-                            return float(coins.get("availableToWithdraw", 0))
+                    coins = (
+                        item.get("coin")
+                        or item.get("coins")
+                        or item.get("balances")
+                        or []
+                    )
+                    for c in coins:
+                        if c.get("coin") == coin:
+                            for key in (
+                                "availableToWithdraw",
+                                "availableBalance",
+                                "walletBalance",
+                                "free",
+                                "transferBalance",
+                                "equity",
+                                "total",
+                            ):
+                                if key in c and c[key] is not None:
+                                    try:
+                                        return float(c[key])
+                                    except (TypeError, ValueError):
+                                        continue
+            log(f"Coin {coin} non trovata nella risposta saldo: {data.get('result')!r}")
         else:
             log(f"Errore saldo {coin}: {data}")
     except Exception as e:
-        log(f"Errore lettura balance: {e}")
-    return 0
+        log(f"Errore ottenimento saldo {coin}: {e}")
+    return 0.0
 
 if __name__ == "__main__":
     log("🔄 Avvio sistema di acquisto")
@@ -211,13 +230,13 @@ if __name__ == "__main__":
 
         # ⚠️ TEST NOTIFICA TELEGRAM CON ORDINE FINTA USCITA (da rimuovere dopo il test)
         test_symbol = "DOGEUSDT"
-        test_price = 99999.99
-        test_strategy = "TEST - Finto Segnale di USCITA"
-        test_qty = get_free_qty(test_symbol)
-        if test_qty > 0:
-            notify_telegram(f"📉 Segnale di USCITA\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
-            market_sell(test_symbol, test_qty)
-            log(f"✅ TEST completato per {test_symbol} con ordine finto di vendita e notifica Telegram.")
+        test_price = 88888.88
+        test_strategy = "TEST - Finto SELL"
+        notify_telegram(f"📉 Segnale di USCITA\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
+        qty = get_free_qty(test_symbol)
+        if qty > 0:
+            market_sell(test_symbol, qty)
+            log(f"✅ TEST SELL completato per {test_symbol} con notifica Telegram.")
         else:
             log(f"❌ TEST vendita fallito: saldo insufficiente per {test_symbol}")
 
