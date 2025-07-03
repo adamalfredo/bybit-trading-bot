@@ -82,7 +82,10 @@ def market_sell(symbol: str, qty: float):
         dec_qty = Decimal(str(qty))
         step = Decimal(str(qty_step))
         rounded_qty = (dec_qty // step) * step
-        qty_str = f"{rounded_qty:.{precision}f}"
+        if precision == 0:
+            qty_str = str(int(rounded_qty))
+        else:
+            qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
 
         body = {
             "category": "spot",
