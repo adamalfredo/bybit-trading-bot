@@ -3,7 +3,7 @@ import time
 import hmac
 import json
 import hashlib
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from decimal import Decimal
 import requests
 import yfinance as yf
 import pandas as pd
@@ -34,7 +34,6 @@ ASSETS = [
     "ARBUSDT", "OPUSDT", "LTCUSDT", "XRPUSDT"
 ]
 INTERVAL_MINUTES = 15
-
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
@@ -122,28 +121,6 @@ def get_last_price(symbol: str) -> Optional[float]:
     except Exception as e:
         log(f"Errore ottenimento prezzo {symbol}: {e}")
     return None
-
-def round_quantity(symbol: str, quantity: float, price: float) -> tuple[float, int]:
-    """Arrotonda la quantità secondo lo step e verifica i minimi di Bybit."""
-    qty_step, precision = get_instrument_info(symbol)
-
-    if qty_step:
-        step = Decimal(str(qty_step))
-        quantity = (
-            Decimal(str(quantity)) / step
-        ).to_integral_value(rounding=ROUND_DOWN) * step
-    else:
-        quantity = Decimal(str(quantity)).quantize(
-            Decimal(1) if precision == 0 else Decimal("1").scaleb(-precision),
-            rounding=ROUND_DOWN,
-        )
-
-    qty_f = float(quantity)
-    # Filtro per evitare ordini troppo piccoli (meno di 1 centesimo in valore)
-    if qty_f * price < 0.01:
-        return 0.0, precision
-
-    return qty_f, precision
 
 def market_sell(symbol: str, qty: float):
     price = get_last_price(symbol)
@@ -315,16 +292,16 @@ if __name__ == "__main__":
         # log(f"✅ TEST completato per {test_symbol} con ordine finto e notifica Telegram.")
 
         # ⚠️ TEST NOTIFICA TELEGRAM CON ORDINE FINTA USCITA (da rimuovere dopo il test)
-        test_symbol = "DOGEUSDT"
-        test_price = 88888.88
-        test_strategy = "TEST - Finto SELL"
-        notify_telegram(f"📉 Segnale di USCITA\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
-        qty = get_free_qty(test_symbol)
-        qty_int = int(qty)  # 🧠 forza solo parte intera (es. 10.75 → 10)
-        if qty_int > 0:
-            market_sell(test_symbol, qty_int)
-        else:
-            log(f"❌ TEST vendita fallito: saldo insufficiente o troppo piccolo per {test_symbol}")
+        # test_symbol = "DOGEUSDT"
+        # test_price = 88888.88
+        # test_strategy = "TEST - Finto SELL"
+        # notify_telegram(f"📉 Segnale di USCITA\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
+        # qty = get_free_qty(test_symbol)
+        # qty_int = int(qty)  # 🧠 forza solo parte intera (es. 10.75 → 10)
+        # if qty_int > 0:
+        #     market_sell(test_symbol, qty_int)
+        # else:
+        #     log(f"❌ TEST vendita fallito: saldo insufficiente o troppo piccolo per {test_symbol}")
 
         for symbol in ASSETS:
             signal, strategy, price = analyze_asset(symbol)
@@ -333,9 +310,14 @@ if __name__ == "__main__":
                 if signal == "entry":
                     notify_telegram(f"📈 Segnale di ENTRATA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
                     market_buy(symbol, ORDER_USDT)
+                    log(f"✅ Acquisto completato per {symbol}")
                 elif signal == "exit":
                     notify_telegram(f"📉 Segnale di USCITA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
                     qty = get_free_qty(symbol)
-                    if qty > 0:
-                        market_sell(symbol, qty)
+                    qty_int = int(qty)  # 👉 forza quantità intera
+                    if qty_int > 0:
+                        market_sell(symbol, qty_int)
+                        log(f"✅ Vendita completata per {symbol}")
+                    else:
+                        log(f"❌ Vendita ignorata per {symbol}: saldo insufficiente o troppo piccolo")
         time.sleep(INTERVAL_MINUTES * 60)
