@@ -158,7 +158,9 @@ def get_free_qty(symbol: str):
     try:
         endpoint = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
         ts = str(int(time.time() * 1000))
-        payload = f"{ts}{KEY}5000"
+        coin = symbol.replace("USDT", "")
+        param_str = f"accountType={BYBIT_ACCOUNT_TYPE}&coin={coin}"
+        payload = f"{ts}{KEY}5000{param_str}"
         sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
         headers = {
             "X-BAPI-API-KEY": KEY,
@@ -166,18 +168,26 @@ def get_free_qty(symbol: str):
             "X-BAPI-TIMESTAMP": ts,
             "X-BAPI-RECV-WINDOW": "5000",
             "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json"
         }
-        resp = requests.get(endpoint, headers=headers)
+        url = f"{endpoint}?{param_str}"
+        resp = requests.get(url, headers=headers, timeout=10)
         data = resp.json()
-        coin = symbol.replace("USDT", "")
-        wallets = data.get("result", {}).get("list", [])
-        if not wallets:
-            log("⚠️ Nessun wallet restituito dalla API Bybit.")
-            return 0
-        for item in wallets[0].get("coin", []):
-            if item.get("coin") == coin:
-                return float(item.get("availableToWithdraw", 0))
+
+        if data.get("retCode") == 0:
+            result = data.get("result", {})
+            lists = result.get("list", [])
+            if isinstance(lists, list):
+                for item in lists:
+                    coins = item.get("coin") or []
+                    if isinstance(coins, list):
+                        for c in coins:
+                            if c.get("coin") == coin:
+                                return float(c.get("availableToWithdraw", 0))
+                    elif isinstance(coins, dict):
+                        if coins.get("coin") == coin:
+                            return float(coins.get("availableToWithdraw", 0))
+        else:
+            log(f"Errore saldo {coin}: {data}")
     except Exception as e:
         log(f"Errore lettura balance: {e}")
     return 0
@@ -198,6 +208,18 @@ if __name__ == "__main__":
         # notify_telegram(f"📈 Segnale di ENTRATA\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
         # market_buy(test_symbol, ORDER_USDT)
         # log(f"✅ TEST completato per {test_symbol} con ordine finto e notifica Telegram.")
+
+        # ⚠️ TEST NOTIFICA TELEGRAM CON ORDINE FINTA USCITA (da rimuovere dopo il test)
+        test_symbol = "DOGEUSDT"
+        test_price = 99999.99
+        test_strategy = "TEST - Finto Segnale di USCITA"
+        test_qty = get_free_qty(test_symbol)
+        if test_qty > 0:
+            notify_telegram(f"📉 Segnale di USCITA\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
+            market_sell(test_symbol, test_qty)
+            log(f"✅ TEST completato per {test_symbol} con ordine finto di vendita e notifica Telegram.")
+        else:
+            log(f"❌ TEST vendita fallito: saldo insufficiente per {test_symbol}")
 
         for symbol in ASSETS:
             signal, strategy, price = analyze_asset(symbol)
