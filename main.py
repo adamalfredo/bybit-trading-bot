@@ -82,8 +82,7 @@ def market_sell(symbol: str, qty: float):
         dec_qty = Decimal(str(qty))
         step = Decimal(str(qty_step))
         rounded_qty = (dec_qty // step) * step
-        rounded_qty = rounded_qty.quantize(step, rounding=ROUND_DOWN)
-        qty_str = format(rounded_qty, 'f')
+        qty_str = f"{rounded_qty:.{precision}f}"
 
         body = {
             "category": "spot",
@@ -224,17 +223,15 @@ def get_instrument_info(symbol: str):
         resp = requests.get(endpoint, params=params, timeout=10)
         data = resp.json()
         if data.get("retCode") == 0:
-            result = data.get("result", {}).get("list", [])[0]
-            filters = result.get("lotSizeFilter", {})
-            qty_step = float(filters.get("qtyStep", "0.0001"))
+            result = data["result"]["list"][0]
+            qty_step = float(result["lotSizeFilter"]["qtyStep"])
             precision = abs(Decimal(str(qty_step)).as_tuple().exponent)
             return qty_step, precision
         else:
             log(f"⚠️ Errore get_instrument_info per {symbol}: {data}")
     except Exception as e:
         log(f"⚠️ Errore richiesta get_instrument_info: {e}")
-    # Fallback di sicurezza
-    return 0.0001, 4
+    return 0.0001, 4  # fallback
 
 if __name__ == "__main__":
     log("🔄 Avvio sistema di acquisto")
