@@ -10,6 +10,7 @@ import pandas as pd
 from ta.volatility import BollingerBands
 from ta.momentum import RSIIndicator
 from ta.trend import SMAIndicator
+from ta.trend import EMAIndicator, MACD, ADXIndicator
 from typing import Optional
 
 # NON usare load_dotenv() su Railway!
@@ -198,6 +199,7 @@ def analyze_asset(symbol: str):
     try:
         df = fetch_history(symbol)
         if df is None:
+            log(f"[!] Dati non disponibili per {symbol} → analisi saltata")
             return None, None, None
 
         df.dropna(inplace=True)
@@ -205,6 +207,7 @@ def analyze_asset(symbol: str):
         if close is None:
             return None, None, None
 
+        # Indicatori esistenti
         bb = BollingerBands(close=close)
         df["bb_upper"] = bb.bollinger_hband()
         df["bb_lower"] = bb.bollinger_lband()
@@ -212,22 +215,45 @@ def analyze_asset(symbol: str):
         df["sma20"] = SMAIndicator(close=close, window=20).sma_indicator()
         df["sma50"] = SMAIndicator(close=close, window=50).sma_indicator()
 
+        # Nuovi indicatori
+        df["ema20"] = EMAIndicator(close=close, window=20).ema_indicator()
+        df["ema50"] = EMAIndicator(close=close, window=50).ema_indicator()
+        macd = MACD(close=close)
+        df["macd"] = macd.macd()
+        df["macd_signal"] = macd.macd_signal()
+        df["adx"] = ADXIndicator(high=df["High"], low=df["Low"], close=close).adx()
+
         df.dropna(inplace=True)
         last = df.iloc[-1]
         prev = df.iloc[-2]
 
         price = float(last["Close"])
 
+        # Logica esistente + nuove regole
         if last["Close"] > last["bb_upper"] and last["rsi"] < 70:
             return "entry", "Breakout Bollinger", price
         elif prev["sma20"] < prev["sma50"] and last["sma20"] > last["sma50"]:
             return "entry", "Incrocio SMA 20/50", price
+        elif last["macd"] > last["macd_signal"] and last["adx"] > 20:
+            return "entry", "MACD bullish + ADX", price
         elif last["Close"] < last["bb_lower"] and last["rsi"] > 30:
             return "exit", "Rimbalzo RSI + BB", price
+        elif last["macd"] < last["macd_signal"] and last["adx"] > 20:
+            return "exit", "MACD bearish + ADX", price
+
         return None, None, None
     except Exception as e:
         log(f"Errore analisi {symbol}: {e}")
         return None, None, None
+
+# 3️⃣ Migliora le notifiche Telegram con gain/loss stimato (approssimato)
+def notify_trade_result(symbol, signal, price, strategy):
+    msg = ""
+    if signal == "entry":
+        msg += f"✅ Acquisto completato per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}"
+    elif signal == "exit":
+        msg += f"✅ Vendita completata per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}"
+    notify_telegram(msg)
 
 def get_free_qty(symbol: str) -> float:
     """Restituisce il saldo disponibile per la coin indicata (come nel vecchio main)."""
@@ -291,43 +317,7 @@ if __name__ == "__main__":
     notify_telegram("🔄 Avvio sistema di acquisto")
     notify_telegram("✅ Connessione a Bybit riuscita")
     notify_telegram("🧪 BOT avviato correttamente")
-    # ⚠️ TEST REALE DI VENDITA BTC (rimuovere dopo il test)
-    # test_symbol = "BTCUSDT"
-    # test_price = 88888.88
-    # test_strategy = "TEST REALE - VENDITA BTC"
-    # notify_telegram(f"📉 TEST DI VENDITA REALE\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
-    # qty = get_free_qty(test_symbol)
-    # if qty > 0:
-    #     market_sell(test_symbol, qty)
-    #     log(f"✅ TEST vendita BTC completata")
-    #     notify_telegram(f"✅ TEST vendita BTC completata")
-    # else:
-    #     log(f"❌ TEST vendita BTC fallita: saldo insufficiente o troppo piccolo")
-    #     notify_telegram(f"❌ TEST vendita BTC fallita: saldo insufficiente o troppo piccolo")
-
-    # market_buy("DOGEUSDT", ORDER_USDT)
-    # market_buy("BTCUSDT", ORDER_USDT)
-
-    # ⚠️ TEST NOTIFICA TELEGRAM CON ORDINE FINTA ENTRATA (da rimuovere dopo il test)
-    # test_symbol = "BTCUSDT"
-    # test_price = 99999.99
-    # test_strategy = "TEST - Finto Segnale"
-    # notify_telegram(f"📈 Segnale di ENTRATA\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
-    # market_buy(test_symbol, ORDER_USDT)
-    # log(f"✅ TEST completato per {test_symbol} con ordine finto e notifica Telegram.")
-
-    # ⚠️ TEST NOTIFICA TELEGRAM CON ORDINE FINTA USCITA (da rimuovere dopo il test)
-    # test_symbol = "DOGEUSDT"
-    # test_price = 88888.88
-    # test_strategy = "TEST - Finto SELL"
-    # notify_telegram(f"📉 Segnale di USCITA\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
-    # qty = get_free_qty(test_symbol)
-    # qty_int = int(qty)  # 🧠 forza solo parte intera (es. 10.75 → 10)
-    # if qty_int > 0:
-    #     market_sell(test_symbol, qty_int)
-    # else:
-    #     log(f"❌ TEST vendita fallito: saldo insufficiente o troppo piccolo per {test_symbol}")
-
+    
     while True:
         for symbol in ASSETS:
             signal, strategy, price = analyze_asset(symbol)
@@ -337,16 +327,15 @@ if __name__ == "__main__":
                     notify_telegram(f"📈 Segnale di ENTRATA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
                     market_buy(symbol, ORDER_USDT)
                     log(f"✅ Acquisto completato per {symbol}")
-                    notify_telegram(f"✅ Acquisto completato per {symbol}")
+                    notify_trade_result(symbol, "entry", price, strategy)
                 elif signal == "exit":
                     notify_telegram(f"📉 Segnale di USCITA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
                     qty = get_free_qty(symbol)
                     if qty > 0:
                         market_sell(symbol, qty)
                         log(f"✅ Vendita completata per {symbol}")
-                        notify_telegram(f"✅ Vendita completata per {symbol}")
+                        notify_trade_result(symbol, "exit", price, strategy)
                     else:
                         log(f"❌ Vendita ignorata per {symbol}: saldo insufficiente o troppo piccolo")
                         notify_telegram(f"❌ Vendita ignorata per {symbol}: saldo insufficiente o troppo piccolo")
         time.sleep(INTERVAL_MINUTES * 60)
-
