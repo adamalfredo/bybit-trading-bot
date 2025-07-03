@@ -77,23 +77,26 @@ def market_buy(symbol: str, usdt: float):
         log(f"Errore invio ordine BUY: {e}")
 
 def market_sell(symbol: str, qty: float):
-    # Usa 2 decimali per DOGE, 3 per le altre
-    decimals = 2 if symbol.startswith("DOGE") else 3
-    quantize_format = f"0.{''.join(['0' for _ in range(decimals)])}"
-    qty = Decimal(str(qty)).quantize(Decimal(quantize_format), rounding=ROUND_DOWN)
-
     endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
     ts = str(int(time.time() * 1000))
+
+    # 🔒 Quantità arrotondata come nel vecchio main (es: DOGE → 0.001 step)
+    coin = symbol.replace("USDT", "")
+    precision = 3 if coin == "DOGE" else 6
+    adjusted_qty = Decimal(qty).quantize(Decimal(f"1e-{precision}"), rounding=ROUND_DOWN)
+
     body = {
         "category": "spot",
         "symbol": symbol,
         "side": "Sell",
         "orderType": "Market",
-        "qty": str(qty)
+        "qty": str(adjusted_qty)
     }
+
     body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
     payload = f"{ts}{KEY}5000{body_json}"
     sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
     headers = {
         "X-BAPI-API-KEY": KEY,
         "X-BAPI-SIGN": sign,
@@ -102,6 +105,7 @@ def market_sell(symbol: str, qty: float):
         "X-BAPI-SIGN-TYPE": "2",
         "Content-Type": "application/json"
     }
+
     try:
         resp = requests.post(endpoint, headers=headers, data=body_json)
         log(f"SELL BODY: {body_json}")
