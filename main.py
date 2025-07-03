@@ -128,13 +128,24 @@ def market_sell(symbol: str, qty: float):
         log(f"❌ Prezzo non disponibile per {symbol}, impossibile vendere")
         return
 
-    # 👉 Vendiamo solo la parte intera (es. da 10.75 → 10)
-    qty = int(qty)  # forza il valore intero
-    if qty <= 0:
-        log(f"❌ Quantità insufficiente per vendita {symbol}")
-        return
+    qty_step, precision = get_instrument_info(symbol)
+    try:
+        dec_qty = Decimal(str(qty))
+        step = Decimal(str(qty_step))
+        rounded_qty = (dec_qty // step) * step
 
-    qty_str = str(qty)
+        if rounded_qty <= 0:
+            log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
+            return
+
+        if precision == 0:
+            qty_str = str(int(rounded_qty))
+        else:
+            qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+
+    except Exception as e:
+        log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
+        return
 
     body = {
         "category": "spot",
@@ -278,6 +289,19 @@ if __name__ == "__main__":
     log("🔄 Avvio sistema di acquisto")
     notify_telegram("✅ Connessione a Bybit riuscita")
     notify_telegram("🧪 BOT avviato correttamente")
+    # ⚠️ TEST REALE DI VENDITA BTC (rimuovere dopo il test)
+    test_symbol = "BTCUSDT"
+    test_price = 88888.88
+    test_strategy = "TEST REALE - VENDITA BTC"
+    notify_telegram(f"📉 TEST DI VENDITA REALE\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
+    qty = get_free_qty(test_symbol)
+    if qty > 0:
+        market_sell(test_symbol, qty)
+        log(f"✅ TEST vendita BTC completata")
+        notify_telegram(f"✅ TEST vendita BTC completata")
+    else:
+        log(f"❌ TEST vendita BTC fallita: saldo insufficiente o troppo piccolo")
+        notify_telegram(f"❌ TEST vendita BTC fallita: saldo insufficiente o troppo piccolo")
 
     # market_buy("DOGEUSDT", ORDER_USDT)
     # market_buy("BTCUSDT", ORDER_USDT)
@@ -315,12 +339,12 @@ if __name__ == "__main__":
                 elif signal == "exit":
                     notify_telegram(f"📉 Segnale di USCITA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
                     qty = get_free_qty(symbol)
-                    qty_int = int(qty)  # 👉 forza quantità intera
-                    if qty_int > 0:
-                        market_sell(symbol, qty_int)
+                    if qty > 0:
+                        market_sell(symbol, qty)
                         log(f"✅ Vendita completata per {symbol}")
                         notify_telegram(f"✅ Vendita completata per {symbol}")
                     else:
                         log(f"❌ Vendita ignorata per {symbol}: saldo insufficiente o troppo piccolo")
                         notify_telegram(f"❌ Vendita ignorata per {symbol}: saldo insufficiente o troppo piccolo")
         time.sleep(INTERVAL_MINUTES * 60)
+
