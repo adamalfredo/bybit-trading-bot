@@ -277,7 +277,7 @@ def get_free_qty(symbol: str) -> float:
 if __name__ == "__main__":
     log("🔄 Avvio sistema di acquisto")
     notify_telegram("✅ Connessione a Bybit riuscita")
-    notify_telegram("🧪 Test: bot avviato correttamente")
+    notify_telegram("🧪 BOT avviato correttamente")
 
     # market_buy("DOGEUSDT", ORDER_USDT)
     # market_buy("BTCUSDT", ORDER_USDT)
