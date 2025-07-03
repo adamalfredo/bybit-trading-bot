@@ -77,37 +77,34 @@ def market_buy(symbol: str, usdt: float):
         log(f"Errore invio ordine BUY: {e}")
 
 def market_sell(symbol: str, qty: float):
-    endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
-    ts = str(int(time.time() * 1000))
-
-    # 🔒 Quantità arrotondata come nel vecchio main (es: DOGE → 0.001 step)
-    coin = symbol.replace("USDT", "")
-    precision = 3 if coin == "DOGE" else 6
-    adjusted_qty = Decimal(qty).quantize(Decimal(f"1e-{precision}"), rounding=ROUND_DOWN)
-
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Sell",
-        "orderType": "Market",
-        "qty": str(adjusted_qty)
-    }
-
-    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
-
+    qty_step, precision = get_instrument_info(symbol)
     try:
-        resp = requests.post(endpoint, headers=headers, data=body_json)
+        # Arrotonda qty in base a qty_step o precisione
+        dec_qty = Decimal(str(qty))
+        step = Decimal(str(qty_step))
+        rounded_qty = (dec_qty // step) * step
+        qty_str = f"{rounded_qty:.{precision}f}"
+
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": "Sell",
+            "orderType": "Market",
+            "qty": qty_str
+        }
+        ts = str(int(time.time() * 1000))
+        body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+        payload = f"{ts}{KEY}5000{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-SIGN-TYPE": "2",
+            "Content-Type": "application/json"
+        }
+        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"SELL BODY: {body_json}")
         log(f"RESPONSE: {resp.status_code} {resp.json()}")
     except Exception as e:
@@ -219,6 +216,23 @@ def get_free_qty(symbol: str) -> float:
     except Exception as e:
         log(f"Errore ottenimento saldo {coin}: {e}")
     return 0.0
+
+def get_instrument_info(symbol: str):
+    endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
+    try:
+        params = {"category": "spot", "symbol": symbol}
+        resp = requests.get(endpoint, params=params, timeout=10)
+        data = resp.json()
+        if data.get("retCode") == 0:
+            result = data.get("result", {}).get("list", [])[0]
+            filters = result.get("lotSizeFilter", {})
+            qty_step = float(filters.get("qtyStep", "0.0001"))
+            return {"qtyStep": qty_step}
+        else:
+            log(f"⚠️ Errore get_instrument_info per {symbol}: {data}")
+    except Exception as e:
+        log(f"⚠️ Errore richiesta get_instrument_info: {e}")
+    return {"qtyStep": 0.0001}  # fallback sicuro
 
 if __name__ == "__main__":
     log("🔄 Avvio sistema di acquisto")
