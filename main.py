@@ -228,18 +228,25 @@ def get_instrument_info(symbol: str):
             if instruments:
                 info = instruments[0]
                 lot_filter = info.get("lotSizeFilter", {})
-                qty_step_str = lot_filter.get("qtyStep")
 
-                if qty_step_str is not None:
+                # Priorità: qtyStep → basePrecision → fallback
+                qty_step_str = lot_filter.get("qtyStep")
+                if qty_step_str:
                     qty_step = float(qty_step_str)
                     precision = abs(Decimal(qty_step_str).as_tuple().exponent)
+                    return qty_step, precision
+
+                base_precision_str = lot_filter.get("basePrecision")
+                if base_precision_str:
+                    precision = int(base_precision_str)
+                    qty_step = 1 / (10 ** precision) if precision > 0 else 1
                     return qty_step, precision
 
         log(f"⚠️ Errore get_instrument_info per {symbol}: {data}")
     except Exception as e:
         log(f"⚠️ Errore richiesta get_instrument_info: {e}")
 
-    # Fallback
+    # Fallback se tutto fallisce
     return 0.0001, 4
 
 if __name__ == "__main__":
