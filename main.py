@@ -151,45 +151,42 @@ def market_sell(symbol: str, qty: float):
         log(f"❌ Prezzo non disponibile per {symbol}, impossibile vendere")
         return
 
-    qty, precision = round_quantity(symbol, qty, price)
+    # 👉 Vendiamo solo la parte intera (es. da 10.75 → 10)
+    qty = int(qty)  # forza il valore intero
     if qty <= 0:
         log(f"❌ Quantità insufficiente per vendita {symbol}")
         return
 
+    qty_str = str(qty)
+
+    body = {
+        "category": "spot",
+        "symbol": symbol,
+        "side": "Sell",
+        "orderType": "Market",
+        "qty": qty_str
+    }
+
+    ts = str(int(time.time() * 1000))
+    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json"
+    }
+
     try:
-        if precision == 0:
-            qty_str = str(int(qty))
-        else:
-            qty_str = f"{qty:.{precision}f}".rstrip('0').rstrip('.')
-
-        body = {
-            "category": "spot",
-            "symbol": symbol,
-            "side": "Sell",
-            "orderType": "Market",
-            "qty": qty_str
-        }
-
-        ts = str(int(time.time() * 1000))
-        body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
-        payload = f"{ts}{KEY}5000{body_json}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json"
-        }
-
         resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"SELL BODY: {body_json}")
         data = resp.json()
+        log(f"SELL BODY: {body_json}")
         log(f"RESPONSE: {resp.status_code} {data}")
         if data.get("retCode") != 0:
             notify_telegram(f"❌ Errore ordine SELL {symbol}: {data.get('retMsg')} ({data.get('retCode')})")
-
     except Exception as e:
         log(f"Errore invio ordine SELL: {e}")
 
@@ -323,11 +320,11 @@ if __name__ == "__main__":
         test_strategy = "TEST - Finto SELL"
         notify_telegram(f"📉 Segnale di USCITA\nAsset: {test_symbol}\nPrezzo: {test_price}\nStrategia: {test_strategy}")
         qty = get_free_qty(test_symbol)
-        if qty > 0:
-            market_sell(test_symbol, qty)
-            log(f"✅ TEST SELL completato per {test_symbol} con notifica Telegram.")
+        qty_int = int(qty)  # 🧠 forza solo parte intera (es. 10.75 → 10)
+        if qty_int > 0:
+            market_sell(test_symbol, qty_int)
         else:
-            log(f"❌ TEST vendita fallito: saldo insufficiente per {test_symbol}")
+            log(f"❌ TEST vendita fallito: saldo insufficiente o troppo piccolo per {test_symbol}")
 
         for symbol in ASSETS:
             signal, strategy, price = analyze_asset(symbol)
