@@ -12,7 +12,6 @@ from ta.momentum import RSIIndicator
 from ta.trend import SMAIndicator
 from ta.trend import EMAIndicator, MACD, ADXIndicator
 from typing import Optional
-import sqlite3
 
 # NON usare load_dotenv() su Railway!
 # from dotenv import load_dotenv
@@ -37,19 +36,6 @@ ASSETS = [
     "TONUSDT", "MATICUSDT", "MNTUSDT"
 ]
 INTERVAL_MINUTES = 15
-conn = sqlite3.connect("/mnt/data/trade_history.db", check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS trades (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp TEXT,
-    symbol TEXT,
-    signal TEXT,
-    price REAL,
-    strategy TEXT
-)
-""")
-conn.commit()
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
@@ -342,12 +328,6 @@ if __name__ == "__main__":
                     market_buy(symbol, ORDER_USDT)
                     log(f"✅ Acquisto completato per {symbol}")
                     notify_trade_result(symbol, "entry", price, strategy)
-                    cursor.execute(
-                        "INSERT INTO trades (timestamp, symbol, signal, price, strategy) VALUES (?, ?, ?, ?, ?)",
-                        (time.strftime("%Y-%m-%d %H:%M:%S"), symbol, signal, price, strategy)
-                    )
-                    conn.commit()
-
                 elif signal == "exit":
                     notify_telegram(f"📉 Segnale di USCITA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
                     qty = get_free_qty(symbol)
@@ -355,11 +335,6 @@ if __name__ == "__main__":
                         market_sell(symbol, qty)
                         log(f"✅ Vendita completata per {symbol}")
                         notify_trade_result(symbol, "exit", price, strategy)
-                        cursor.execute(
-                            "INSERT INTO trades (timestamp, symbol, signal, price, strategy) VALUES (?, ?, ?, ?, ?)",
-                            (time.strftime("%Y-%m-%d %H:%M:%S"), symbol, signal, price, strategy)
-                        )
-                        conn.commit()
                     else:
                         log(f"❌ Vendita ignorata per {symbol}: saldo insufficiente o troppo piccolo")
                         notify_telegram(f"❌ Vendita ignorata per {symbol}: saldo insufficiente o troppo piccolo")
