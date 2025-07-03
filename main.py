@@ -79,11 +79,11 @@ def market_buy(symbol: str, usdt: float):
 def market_sell(symbol: str, qty: float):
     qty_step, precision = get_instrument_info(symbol)
     try:
-        # Arrotonda qty in base a qty_step o precisione
         dec_qty = Decimal(str(qty))
         step = Decimal(str(qty_step))
         rounded_qty = (dec_qty // step) * step
-        qty_str = f"{rounded_qty:.{precision}f}"
+        rounded_qty = rounded_qty.quantize(step, rounding=ROUND_DOWN)
+        qty_str = format(rounded_qty, 'f')
 
         body = {
             "category": "spot",
