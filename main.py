@@ -311,6 +311,7 @@ if __name__ == "__main__":
                     notify_telegram(f"📈 Segnale di ENTRATA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
                     market_buy(symbol, ORDER_USDT)
                     log(f"✅ Acquisto completato per {symbol}")
+                    notify_telegram(f"✅ Acquisto completato per {symbol}")
                 elif signal == "exit":
                     notify_telegram(f"📉 Segnale di USCITA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
                     qty = get_free_qty(symbol)
@@ -318,6 +319,8 @@ if __name__ == "__main__":
                     if qty_int > 0:
                         market_sell(symbol, qty_int)
                         log(f"✅ Vendita completata per {symbol}")
+                        notify_telegram(f"✅ Vendita completata per {symbol}")
                     else:
                         log(f"❌ Vendita ignorata per {symbol}: saldo insufficiente o troppo piccolo")
+                        notify_telegram(f"❌ Vendita ignorata per {symbol}: saldo insufficiente o troppo piccolo")
         time.sleep(INTERVAL_MINUTES * 60)
