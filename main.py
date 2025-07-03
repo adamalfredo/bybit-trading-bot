@@ -77,11 +77,15 @@ def market_buy(symbol: str, usdt: float):
         log(f"Errore invio ordine BUY: {e}")
 
 def market_sell(symbol: str, qty: float):
-    qty_step, precision = get_instrument_info(symbol)
+    instrument = get_instrument_info(symbol)
+    qty_step = Decimal(str(instrument["qtyStep"]))
+    precision = -qty_step.as_tuple().exponent if qty_step != 0 else 0
+
     try:
         dec_qty = Decimal(str(qty))
-        step = Decimal(str(qty_step))
-        rounded_qty = (dec_qty // step) * step
+        rounded_qty = (dec_qty // qty_step) * qty_step
+
+        # ✅ Format corretto in base alla precisione
         if precision == 0:
             qty_str = str(int(rounded_qty))
         else:
@@ -94,6 +98,7 @@ def market_sell(symbol: str, qty: float):
             "orderType": "Market",
             "qty": qty_str
         }
+
         ts = str(int(time.time() * 1000))
         body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
         payload = f"{ts}{KEY}5000{body_json}"
@@ -106,6 +111,7 @@ def market_sell(symbol: str, qty: float):
             "X-BAPI-SIGN-TYPE": "2",
             "Content-Type": "application/json"
         }
+
         resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"SELL BODY: {body_json}")
         log(f"RESPONSE: {resp.status_code} {resp.json()}")
