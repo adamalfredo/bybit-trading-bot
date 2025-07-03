@@ -227,12 +227,14 @@ def get_instrument_info(symbol: str):
             result = data.get("result", {}).get("list", [])[0]
             filters = result.get("lotSizeFilter", {})
             qty_step = float(filters.get("qtyStep", "0.0001"))
-            return {"qtyStep": qty_step}
+            precision = abs(Decimal(str(qty_step)).as_tuple().exponent)
+            return qty_step, precision
         else:
             log(f"⚠️ Errore get_instrument_info per {symbol}: {data}")
     except Exception as e:
         log(f"⚠️ Errore richiesta get_instrument_info: {e}")
-    return {"qtyStep": 0.0001}  # fallback sicuro
+    # Fallback di sicurezza
+    return 0.0001, 4
 
 if __name__ == "__main__":
     log("🔄 Avvio sistema di acquisto")
