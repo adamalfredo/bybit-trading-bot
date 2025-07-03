@@ -77,6 +77,17 @@ def market_buy(symbol: str, usdt: float):
         log(f"Errore invio ordine BUY: {e}")
 
 def market_sell(symbol: str, qty: float):
+    from decimal import Decimal, ROUND_DOWN
+
+    # 🔧 Arrotonda la quantità in base al tipo di coin
+    coin = symbol.replace("USDT", "")
+    if coin == "DOGE":
+        rounded_qty = Decimal(qty).quantize(Decimal("0.01"), rounding=ROUND_DOWN)  # 2 decimali
+    elif coin in ["BTC", "ETH"]:
+        rounded_qty = Decimal(qty).quantize(Decimal("0.000001"), rounding=ROUND_DOWN)  # 6 decimali
+    else:
+        rounded_qty = Decimal(qty).quantize(Decimal("0.0001"), rounding=ROUND_DOWN)  # default: 4 decimali
+
     endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
     ts = str(int(time.time() * 1000))
     body = {
@@ -84,7 +95,7 @@ def market_sell(symbol: str, qty: float):
         "symbol": symbol,
         "side": "Sell",
         "orderType": "Market",
-        "qty": f"{qty:.6f}"
+        "qty": str(rounded_qty)
     }
     body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
     payload = f"{ts}{KEY}5000{body_json}"
