@@ -77,15 +77,12 @@ def market_buy(symbol: str, usdt: float):
         log(f"Errore invio ordine BUY: {e}")
 
 def market_sell(symbol: str, qty: float):
-    instrument = get_instrument_info(symbol)
-    qty_step = Decimal(str(instrument["qtyStep"]))
-    precision = -qty_step.as_tuple().exponent if qty_step != 0 else 0
-
+    qty_step, precision = get_instrument_info(symbol)
     try:
         dec_qty = Decimal(str(qty))
-        rounded_qty = (dec_qty // qty_step) * qty_step
+        step = Decimal(str(qty_step))
+        rounded_qty = (dec_qty // step) * step
 
-        # ✅ Format corretto in base alla precisione
         if precision == 0:
             qty_str = str(int(rounded_qty))
         else:
