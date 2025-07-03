@@ -77,7 +77,11 @@ def market_buy(symbol: str, usdt: float):
         log(f"Errore invio ordine BUY: {e}")
 
 def market_sell(symbol: str, qty: float):
-    qty = Decimal(str(qty)).quantize(Decimal("0.001"), rounding=ROUND_DOWN)
+    # Usa 2 decimali per DOGE, 3 per le altre
+    decimals = 2 if symbol.startswith("DOGE") else 3
+    quantize_format = f"0.{''.join(['0' for _ in range(decimals)])}"
+    qty = Decimal(str(qty)).quantize(Decimal(quantize_format), rounding=ROUND_DOWN)
+
     endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
     ts = str(int(time.time() * 1000))
     body = {
