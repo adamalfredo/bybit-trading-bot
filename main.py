@@ -222,16 +222,25 @@ def get_instrument_info(symbol: str):
         params = {"category": "spot", "symbol": symbol}
         resp = requests.get(endpoint, params=params, timeout=10)
         data = resp.json()
+
         if data.get("retCode") == 0:
-            result = data["result"]["list"][0]
-            qty_step = float(result["lotSizeFilter"]["qtyStep"])
-            precision = abs(Decimal(str(qty_step)).as_tuple().exponent)
-            return qty_step, precision
-        else:
-            log(f"⚠️ Errore get_instrument_info per {symbol}: {data}")
+            instruments = data.get("result", {}).get("list", [])
+            if instruments:
+                info = instruments[0]
+                lot_filter = info.get("lotSizeFilter", {})
+                qty_step_str = lot_filter.get("qtyStep")
+
+                if qty_step_str is not None:
+                    qty_step = float(qty_step_str)
+                    precision = abs(Decimal(qty_step_str).as_tuple().exponent)
+                    return qty_step, precision
+
+        log(f"⚠️ Errore get_instrument_info per {symbol}: {data}")
     except Exception as e:
         log(f"⚠️ Errore richiesta get_instrument_info: {e}")
-    return 0.0001, 4  # fallback
+
+    # Fallback
+    return 0.0001, 4
 
 if __name__ == "__main__":
     log("🔄 Avvio sistema di acquisto")
