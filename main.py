@@ -275,7 +275,7 @@ def get_free_qty(symbol: str) -> float:
     endpoint = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
-    coin = symbol.replace("USDT", "")
+    coin = symbol.replace("USDT", "") if symbol != "USDT" else "USDT"
     params = {"accountType": BYBIT_ACCOUNT_TYPE, "coin": coin}
     param_str = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
     signature_payload = f"{timestamp}{BYBIT_API_KEY}{recv_window}{param_str}"
