@@ -252,9 +252,9 @@ def analyze_asset(symbol: str):
 def notify_trade_result(symbol, signal, price, strategy):
     msg = ""
     if signal == "entry":
-        msg += f"✅ Acquisto completato per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}"
+        msg += f"🟢📈 Acquisto completato per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}"
     elif signal == "exit":
-        msg += f"✅ Vendita completata per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}"
+        msg += f"🔴📉 Vendita completata per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}"
     notify_telegram(msg)
 
 def get_free_qty(symbol: str) -> float:
