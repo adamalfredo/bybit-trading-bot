@@ -74,8 +74,10 @@ def market_buy(symbol: str, usdt: float):
         resp = requests.post(endpoint, headers=headers, data=body_json)
         log(f"BODY: {body_json}")
         log(f"RESPONSE: {resp.status_code} {resp.json()}")
+        return resp
     except Exception as e:
         log(f"Errore invio ordine BUY: {e}")
+        return None
 
 def get_instrument_info(symbol: str):
     endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
@@ -175,10 +177,10 @@ def market_sell(symbol: str, qty: float):
         data = resp.json()
         log(f"SELL BODY: {body_json}")
         log(f"RESPONSE: {resp.status_code} {data}")
-        if data.get("retCode") != 0:
-            notify_telegram(f"❌ Errore ordine SELL {symbol}: {data.get('retMsg')} ({data.get('retCode')})")
+        return resp
     except Exception as e:
         log(f"Errore invio ordine SELL: {e}")
+        return None
 
 def fetch_history(symbol: str):
     ticker = symbol.replace("USDT", "-USD")
@@ -322,20 +324,23 @@ if __name__ == "__main__":
         for symbol in ASSETS:
             signal, strategy, price = analyze_asset(symbol)
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
-            if signal:
-                if signal == "entry":
-                    notify_telegram(f"📈 Segnale di ENTRATA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
-                    market_buy(symbol, ORDER_USDT)
+            if signal == "entry":
+                resp = market_buy(symbol, ORDER_USDT)
+                if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                     log(f"✅ Acquisto completato per {symbol}")
                     notify_trade_result(symbol, "entry", price, strategy)
-                elif signal == "exit":
-                    notify_telegram(f"📉 Segnale di USCITA\nAsset: {symbol}\nPrezzo: {price:.2f}\nStrategia: {strategy}")
-                    qty = get_free_qty(symbol)
-                    if qty > 0:
-                        market_sell(symbol, qty)
+                else:
+                    log(f"❌ Acquisto fallito per {symbol}, nessuna notifica inviata")
+            elif signal == "exit":
+                qty = get_free_qty(symbol)
+                if qty > 0:
+                    resp = market_sell(symbol, qty)
+                    if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                         log(f"✅ Vendita completata per {symbol}")
                         notify_trade_result(symbol, "exit", price, strategy)
                     else:
-                        log(f"❌ Vendita ignorata per {symbol}: saldo insufficiente o troppo piccolo")
-                        notify_telegram(f"❌ Vendita ignorata per {symbol}: saldo insufficiente o troppo piccolo")
+                        log(f"❌ Vendita fallita per {symbol}, nessuna notifica inviata")
+                else:
+                    log(f"❌ Vendita ignorata per {symbol}: saldo insufficiente o troppo piccolo")
+
         time.sleep(INTERVAL_MINUTES * 60)
