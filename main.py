@@ -261,10 +261,13 @@ def notify_trade_result(symbol, signal, price, strategy):
             f"Saldo attuale: {balance:.6f} {symbol.replace('USDT', '')} (~{value_usdt:.2f} USDT)"
         )
     elif signal == "exit":
+        balance = get_free_qty(symbol)
+        value_usdt = balance * price if balance and price else 0
         msg += (
             f"🔴📉 Vendita completata per {symbol}\n"
             f"Prezzo: {price:.4f}\n"
-            f"Strategia: {strategy}"
+            f"Strategia: {strategy}\n"
+            f"Valore stimato venduto: ~{value_usdt:.2f} USDT"
         )
     notify_telegram(msg)
 
