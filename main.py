@@ -314,6 +314,7 @@ def get_free_qty(symbol: str) -> float:
         log(f"Errore ottenimento saldo {coin}: {e}")
     return 0.0
 
+open_positions = set()
 if __name__ == "__main__":
     log("🔄 Avvio sistema di acquisto")
     notify_telegram("🔄 Avvio sistema di acquisto")
@@ -325,18 +326,25 @@ if __name__ == "__main__":
             signal, strategy, price = analyze_asset(symbol)
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
             if signal == "entry":
+                if symbol in open_positions:
+                    log(f"⏩ Acquisto ignorato per {symbol}: già in posizione")
+                    continue
+
                 resp = market_buy(symbol, ORDER_USDT)
                 if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                     log(f"✅ Acquisto completato per {symbol}")
+                    open_positions.add(symbol)
                     notify_trade_result(symbol, "entry", price, strategy)
                 else:
                     log(f"❌ Acquisto fallito per {symbol}, nessuna notifica inviata")
+
             elif signal == "exit":
                 qty = get_free_qty(symbol)
                 if qty > 0:
                     resp = market_sell(symbol, qty)
                     if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                         log(f"✅ Vendita completata per {symbol}")
+                        open_positions.discard(symbol)
                         notify_trade_result(symbol, "exit", price, strategy)
                     else:
                         log(f"❌ Vendita fallita per {symbol}, nessuna notifica inviata")
