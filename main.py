@@ -497,4 +497,5 @@ if __name__ == "__main__":
                 else:
                     log(f"❌ Vendita fallita per {symbol}, nessuna notifica inviata")
 
+        log_trade_to_google("TEST", 1.0, 1.1, 10.0, "TestStrategy", "TestType")
         time.sleep(INTERVAL_MINUTES * 60)
