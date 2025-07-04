@@ -325,6 +325,8 @@ def get_free_qty(symbol: str) -> float:
     return 0.0
 
 open_positions = set()
+# Mappa delle posizioni aperte: salva entry, TP e SL
+position_data = {}  # es: { "BTCUSDT": {"entry_price": 60000, "tp": 61200, "sl": 59100} }
 if __name__ == "__main__":
     log("🔄 Avvio sistema di acquisto")
     notify_telegram("🔄 Avvio sistema di acquisto")
@@ -333,6 +335,39 @@ if __name__ == "__main__":
     
     while True:
         for symbol in ASSETS:
+            # Controlla se la posizione ha raggiunto TP o SL
+            if symbol in open_positions and symbol in position_data:
+                current_price = get_last_price(symbol)
+                if current_price:
+                    entry = position_data[symbol]
+                    if current_price >= entry["tp"]:
+                        log(f"🎯 Take Profit raggiunto per {symbol} → {current_price:.4f}")
+                        qty = get_free_qty(symbol)
+                        if qty > 0:
+                            resp = market_sell(symbol, qty)
+                            if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+                                log(f"✅ Vendita TP per {symbol}")
+                                pnl = (current_price - entry["entry_price"]) / entry["entry_price"] * 100
+                                log(f"📈 Profitto stimato per {symbol}: +{pnl:.2f}%")
+                                notify_telegram(
+                                    f"🎯 Take Profit raggiunto per {symbol} a {current_price:.4f}\nProfitto stimato: +{pnl:.2f}%"
+                                )
+                                open_positions.discard(symbol)
+                                position_data.pop(symbol, None)
+                    elif current_price <= entry["sl"]:
+                        log(f"🛑 Stop Loss attivato per {symbol} → {current_price:.4f}")
+                        qty = get_free_qty(symbol)
+                        if qty > 0:
+                            resp = market_sell(symbol, qty)
+                            if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+                                pnl = (current_price - entry["entry_price"]) / entry["entry_price"] * 100
+                                log(f"📉 Perdita stimata per {symbol}: {pnl:.2f}%")
+                                notify_telegram(
+                                    f"🛑 Stop Loss attivato per {symbol} a {current_price:.4f}\nPerdita stimata: {pnl:.2f}%"
+                                )
+                                open_positions.discard(symbol)
+                                position_data.pop(symbol, None)
+
             signal, strategy, price = analyze_asset(symbol)
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
             if signal == "entry":
@@ -344,9 +379,17 @@ if __name__ == "__main__":
                 if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                     log(f"✅ Acquisto completato per {symbol}")
                     open_positions.add(symbol)
+
+                    # Salva entry price, TP, SL
+                    entry_price = price
+                    tp = entry_price * 1.02  # +2%
+                    sl = entry_price * 0.985  # -1.5%
+                    position_data[symbol] = {"entry_price": entry_price, "tp": tp, "sl": sl}
+
                     notify_trade_result(symbol, "entry", price, strategy)
                 else:
                     log(f"❌ Acquisto fallito per {symbol}, nessuna notifica inviata")
+
 
             elif signal == "exit":
                 qty = get_free_qty(symbol)
@@ -355,6 +398,7 @@ if __name__ == "__main__":
                     if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                         log(f"✅ Vendita completata per {symbol}")
                         open_positions.discard(symbol)
+                        position_data.pop(symbol, None)  # Rimuove dati TP/SL se presenti
                         notify_trade_result(symbol, "exit", price, strategy)
                     else:
                         log(f"❌ Vendita fallita per {symbol}, nessuna notifica inviata")
