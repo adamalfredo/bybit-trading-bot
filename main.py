@@ -253,11 +253,12 @@ def notify_trade_result(symbol, signal, price, strategy):
     msg = ""
     if signal == "entry":
         balance = get_free_qty(symbol)
+        value_usdt = balance * price if balance and price else 0
         msg += (
             f"🟢📈 Acquisto completato per {symbol}\n"
             f"Prezzo: {price:.4f}\n"
             f"Strategia: {strategy}\n"
-            f"Saldo attuale: {balance:.6f} {symbol.replace('USDT', '')}"
+            f"Saldo attuale: {balance:.6f} {symbol.replace('USDT', '')} (~{value_usdt:.2f} USDT)"
         )
     elif signal == "exit":
         msg += (
