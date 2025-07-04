@@ -332,6 +332,10 @@ if __name__ == "__main__":
     notify_telegram("🔄 Avvio sistema di acquisto")
     notify_telegram("✅ Connessione a Bybit riuscita")
     notify_telegram("🧪 BOT avviato correttamente")
+
+    def get_usdt_balance() -> float:
+        """Restituisce il saldo disponibile in USDT."""
+        return get_free_qty("USDT")
     
     while True:
         for symbol in ASSETS:
@@ -375,6 +379,11 @@ if __name__ == "__main__":
                     log(f"⏩ Acquisto ignorato per {symbol}: già in posizione")
                     continue
 
+                usdt_balance = get_usdt_balance()
+                if usdt_balance < ORDER_USDT:
+                    log(f"⏩ Acquisto saltato per {symbol}: saldo USDT ({usdt_balance:.2f}) insufficiente")
+                    continue
+
                 resp = market_buy(symbol, ORDER_USDT)
                 if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                     log(f"✅ Acquisto completato per {symbol}")
@@ -390,19 +399,19 @@ if __name__ == "__main__":
                 else:
                     log(f"❌ Acquisto fallito per {symbol}, nessuna notifica inviata")
 
-
             elif signal == "exit":
                 qty = get_free_qty(symbol)
-                if qty > 0:
-                    resp = market_sell(symbol, qty)
-                    if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
-                        log(f"✅ Vendita completata per {symbol}")
-                        open_positions.discard(symbol)
-                        position_data.pop(symbol, None)  # Rimuove dati TP/SL se presenti
-                        notify_trade_result(symbol, "exit", price, strategy)
-                    else:
-                        log(f"❌ Vendita fallita per {symbol}, nessuna notifica inviata")
+                if qty <= 0:
+                    log(f"⏩ Vendita saltata per {symbol}: saldo nullo o insufficiente")
+                    continue
+
+                resp = market_sell(symbol, qty)
+                if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+                    log(f"✅ Vendita completata per {symbol}")
+                    open_positions.discard(symbol)
+                    position_data.pop(symbol, None)  # Rimuove dati TP/SL se presenti
+                    notify_trade_result(symbol, "exit", price, strategy)
                 else:
-                    log(f"❌ Vendita ignorata per {symbol}: saldo insufficiente o troppo piccolo")
+                    log(f"❌ Vendita fallita per {symbol}, nessuna notifica inviata")
 
         time.sleep(INTERVAL_MINUTES * 60)
