@@ -5,7 +5,7 @@ import json
 import hashlib
 from decimal import Decimal
 import requests
-import yfinance as yf
+# import yfinance as yf
 import pandas as pd
 from ta.volatility import BollingerBands
 from ta.momentum import RSIIndicator
@@ -183,13 +183,37 @@ def market_sell(symbol: str, qty: float):
         return None
 
 def fetch_history(symbol: str):
-    ticker = symbol.replace("USDT", "-USD")
-    df = yf.download(tickers=ticker, period="7d", interval="15m", progress=False, auto_adjust=True)
-    if df is None or df.empty or len(df) < 60:
+    endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
+    params = {
+        "category": "spot",
+        "symbol": symbol,
+        "interval": str(INTERVAL_MINUTES),  # es. "15"
+        "limit": 100  # ultimi 100 candle da 15 min (~1 giorno)
+    }
+    try:
+        resp = requests.get(endpoint, params=params, timeout=10)
+        data = resp.json()
+
+        if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
+            log(f"[!] Errore Kline per {symbol}: {data}")
+            return None
+
+        raw = data["result"]["list"]
+        df = pd.DataFrame(raw, columns=[
+            "timestamp", "Open", "High", "Low", "Close", "Volume", "turnover"
+        ])
+
+        # Converti i tipi e timestamp
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df.set_index("timestamp", inplace=True)
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        return df
+
+    except Exception as e:
+        log(f"[!] Errore richiesta Kline per {symbol}: {e}")
         return None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df
 
 def find_close_column(df: pd.DataFrame):
     for name in df.columns:
