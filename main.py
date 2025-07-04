@@ -295,6 +295,56 @@ def notify_trade_result(symbol, signal, price, strategy):
         )
     notify_telegram(msg)
 
+import gspread
+from google.oauth2.service_account import Credentials
+
+# Config
+SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"  # copia da URL: https://docs.google.com/spreadsheets/d/<QUESTO>/edit
+SHEET_NAME = "Foglio1"  # o quello che hai scelto
+
+# Setup una sola volta
+def setup_gspread():
+    scope = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_file("gspread-creds.json", scopes=scope)
+    client = gspread.authorize(creds)
+    return client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
+
+# Salva una riga nel foglio
+def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        import base64
+
+        SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"
+        SHEET_NAME = "Foglio1"
+
+        # Decodifica la variabile base64 in file temporaneo
+        encoded = os.getenv("GSPREAD_CREDS_B64")
+        if not encoded:
+            log("❌ Variabile GSPREAD_CREDS_B64 non trovata")
+            return
+
+        creds_path = "/tmp/gspread-creds.json"
+        with open(creds_path, "wb") as f:
+            f.write(base64.b64decode(encoded))
+
+        scope = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_file(creds_path, scopes=scope)
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
+        sheet.append_row([
+            time.strftime("%Y-%m-%d %H:%M:%S"),
+            symbol,
+            round(entry, 6),
+            round(exit, 6),
+            f"{pnl_pct:.2f}%",
+            strategy,
+            result_type
+        ])
+    except Exception as e:
+        log(f"Errore log su Google Sheets: {e}")
+
 def get_free_qty(symbol: str) -> float:
     """Restituisce il saldo disponibile per la coin indicata (come nel vecchio main)."""
     if not BYBIT_API_KEY or not BYBIT_API_SECRET:
@@ -384,6 +434,7 @@ if __name__ == "__main__":
                                 notify_telegram(
                                     f"🎯 Take Profit raggiunto per {symbol} a {current_price:.4f}\nProfitto stimato: +{pnl:.2f}%"
                                 )
+                                log_trade_to_google(symbol, entry["entry_price"], current_price, pnl, "TP", "Take Profit")
                                 open_positions.discard(symbol)
                                 position_data.pop(symbol, None)
                     elif current_price <= entry["sl"]:
@@ -397,6 +448,7 @@ if __name__ == "__main__":
                                 notify_telegram(
                                     f"🛑 Stop Loss attivato per {symbol} a {current_price:.4f}\nPerdita stimata: {pnl:.2f}%"
                                 )
+                                log_trade_to_google(symbol, entry["entry_price"], current_price, pnl, "SL", "Stop Loss")
                                 open_positions.discard(symbol)
                                 position_data.pop(symbol, None)
 
@@ -436,9 +488,12 @@ if __name__ == "__main__":
                 resp = market_sell(symbol, qty)
                 if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                     log(f"✅ Vendita completata per {symbol}")
-                    open_positions.discard(symbol)
-                    position_data.pop(symbol, None)  # Rimuove dati TP/SL se presenti
                     notify_trade_result(symbol, "exit", price, strategy)
+                    entry_price = position_data.get(symbol, {}).get("entry_price", price)
+                    pnl = (price - entry_price) / entry_price * 100
+                    log_trade_to_google(symbol, entry_price, price, pnl, strategy, "Exit Signal")
+                    open_positions.discard(symbol)
+                    position_data.pop(symbol, None)
                 else:
                     log(f"❌ Vendita fallita per {symbol}, nessuna notifica inviata")
 

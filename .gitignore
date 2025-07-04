@@ -1,2 +1,5 @@
 .env
 __pycache__/
+gspread-creds.json
+main_step_1.py
+main_step_2.py
