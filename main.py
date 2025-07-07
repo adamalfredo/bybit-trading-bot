@@ -354,7 +354,7 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
         log(f"Errore log su Google Sheets: {e}")
 
 def get_free_qty(symbol: str) -> float:
-    """Restituisce il saldo disponibile per la coin indicata (come nel vecchio main)."""
+    """Restituisce il saldo disponibile per la coin indicata (robusto anche se i campi sono vuoti)."""
     if not BYBIT_API_KEY or not BYBIT_API_SECRET:
         return 0.0
 
@@ -373,6 +373,7 @@ def get_free_qty(symbol: str) -> float:
         "X-BAPI-RECV-WINDOW": recv_window,
         "X-BAPI-SIGN-TYPE": "2",
     }
+
     try:
         resp = requests.get(f"{endpoint}?{param_str}", headers=headers, timeout=10)
         data = resp.json()
@@ -381,12 +382,7 @@ def get_free_qty(symbol: str) -> float:
             lists = result.get("list") or result.get("balances")
             if isinstance(lists, list):
                 for item in lists:
-                    coins = (
-                        item.get("coin")
-                        or item.get("coins")
-                        or item.get("balances")
-                        or []
-                    )
+                    coins = item.get("coin") or item.get("coins") or item.get("balances") or []
                     for c in coins:
                         if c.get("coin") == coin:
                             for key in (
@@ -398,9 +394,10 @@ def get_free_qty(symbol: str) -> float:
                                 "equity",
                                 "total",
                             ):
-                                if key in c and c[key] is not None:
+                                val = c.get(key)
+                                if val not in [None, "", "null"]:
                                     try:
-                                        return float(c[key])
+                                        return float(val)
                                     except (TypeError, ValueError):
                                         continue
             log(f"Coin {coin} non trovata nella risposta saldo: {data.get('result')!r}")
