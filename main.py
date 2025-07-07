@@ -466,6 +466,7 @@ if __name__ == "__main__":
                 if symbol in last_exit_time and time.time() - last_exit_time[symbol] < cooldown_duration:
                     log(f"⏳ Cooldown attivo per {symbol}, nessun nuovo ingresso")
                     continue
+
                 # Verifica cooldown
                 last_exit = cooldown.get(symbol)
                 if last_exit and (time.time() - last_exit) < COOLDOWN_MINUTES * 60:
@@ -476,6 +477,30 @@ if __name__ == "__main__":
                     log(f"⏩ Acquisto ignorato per {symbol}: già in posizione")
                     continue
 
+                # FILTRI DI QUALITÀ
+                df = fetch_history(symbol)
+                if df is None:
+                    continue
+                df.dropna(inplace=True)
+                close = find_close_column(df)
+                if close is None:
+                    continue
+                df["rsi"] = RSIIndicator(close=close).rsi()
+                df["ema20"] = EMAIndicator(close=close, window=20).ema_indicator()
+                df["adx"] = ADXIndicator(high=df["High"], low=df["Low"], close=close).adx()
+                last = df.iloc[-1]
+
+                if last["adx"] < 25:
+                    log(f"❌ Segnale debole per {symbol} → ADX {last['adx']:.2f} < 25")
+                    continue
+                if last["rsi"] > 70:
+                    log(f"❌ RSI troppo alto per {symbol} → RSI {last['rsi']:.2f} > 70")
+                    continue
+                if price < last["ema20"]:
+                    log(f"❌ Prezzo sotto EMA20 per {symbol} → no acquisto")
+                    continue
+
+                # Saldo sufficiente?
                 usdt_balance = get_usdt_balance()
                 if usdt_balance < ORDER_USDT:
                     log(f"⏩ Acquisto saltato per {symbol}: saldo USDT ({usdt_balance:.2f}) insufficiente")
