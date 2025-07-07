@@ -406,6 +406,7 @@ def get_free_qty(symbol: str) -> float:
 open_positions = set()
 # Mappa delle posizioni aperte: salva entry, TP e SL
 position_data = {}  # es: { "BTCUSDT": {"entry_price": 60000, "tp": 61200, "sl": 59100} }
+last_exit_time = {}
 if __name__ == "__main__":
     log("🔄 Avvio sistema di acquisto")
     notify_telegram("🔄 Avvio sistema di acquisto")
@@ -437,6 +438,7 @@ if __name__ == "__main__":
                                 )
                                 log_trade_to_google(symbol, entry["entry_price"], current_price, pnl, "TP", "Take Profit")
                                 open_positions.discard(symbol)
+                                last_exit_time[symbol] = time.time()
                                 position_data.pop(symbol, None)
                                 cooldown[symbol] = time.time()
                     elif current_price <= entry["sl"]:
@@ -452,12 +454,18 @@ if __name__ == "__main__":
                                 )
                                 log_trade_to_google(symbol, entry["entry_price"], current_price, pnl, "SL", "Stop Loss")
                                 open_positions.discard(symbol)
+                                last_exit_time[symbol] = time.time()
                                 position_data.pop(symbol, None)
                                 cooldown[symbol] = time.time()
 
             signal, strategy, price = analyze_asset(symbol)
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
             if signal == "entry":
+                # Evita rientri troppo rapidi (cooldown)
+                cooldown_duration = 3600  # 1 ora
+                if symbol in last_exit_time and time.time() - last_exit_time[symbol] < cooldown_duration:
+                    log(f"⏳ Cooldown attivo per {symbol}, nessun nuovo ingresso")
+                    continue
                 # Verifica cooldown
                 last_exit = cooldown.get(symbol)
                 if last_exit and (time.time() - last_exit) < COOLDOWN_MINUTES * 60:
@@ -502,6 +510,7 @@ if __name__ == "__main__":
                     pnl = (price - entry_price) / entry_price * 100
                     log_trade_to_google(symbol, entry_price, price, pnl, strategy, "Exit Signal")
                     open_positions.discard(symbol)
+                    last_exit_time[symbol] = time.time()
                     position_data.pop(symbol, None)
                     cooldown[symbol] = time.time()
                 else:
