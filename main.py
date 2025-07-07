@@ -8,6 +8,7 @@ import requests
 # import yfinance as yf
 import pandas as pd
 from ta.volatility import BollingerBands
+from ta.volatility import AverageTrueRange
 from ta.momentum import RSIIndicator
 from ta.trend import SMAIndicator
 from ta.trend import EMAIndicator, MACD, ADXIndicator
@@ -38,6 +39,10 @@ ASSETS = [
 INTERVAL_MINUTES = 15
 cooldown = {}  # Dizionario che memorizza il timestamp dell'ultima uscita per ciascun simbolo
 COOLDOWN_MINUTES = 60  # Durata del cooldown in minuti (modificabile)
+
+ATR_WINDOW = 14
+TP_FACTOR = 2.0     # TP = entry + 2 * ATR
+SL_FACTOR = 1.5     # SL = entry - 1.5 * ATR
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
@@ -250,6 +255,8 @@ def analyze_asset(symbol: str):
         df["macd"] = macd.macd()
         df["macd_signal"] = macd.macd_signal()
         df["adx"] = ADXIndicator(high=df["High"], low=df["Low"], close=close).adx()
+        atr = AverageTrueRange(high=df["High"], low=df["Low"], close=close, window=ATR_WINDOW)
+        df["atr"] = atr.average_true_range()
 
         df.dropna(inplace=True)
         last = df.iloc[-1]
@@ -513,10 +520,11 @@ if __name__ == "__main__":
 
                     # Salva entry price, TP, SL
                     entry_price = price
-                    tp = entry_price * 1.02  # +2%
-                    sl = entry_price * 0.985  # -1.5%
+                    atr_value = df.iloc[-1]["atr"]
+                    tp = entry_price + (atr_value * TP_FACTOR)
+                    sl = entry_price - (atr_value * SL_FACTOR)
                     position_data[symbol] = {"entry_price": entry_price, "tp": tp, "sl": sl}
-
+                    log(f"📊 ATR per {symbol}: {atr_value:.6f} → TP: {tp:.4f}, SL: {sl:.4f}")
                     notify_trade_result(symbol, "entry", price, strategy)
                 else:
                     log(f"❌ Acquisto fallito per {symbol}, nessuna notifica inviata")
