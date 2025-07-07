@@ -36,6 +36,8 @@ ASSETS = [
     "TONUSDT", "MATICUSDT", "MNTUSDT"
 ]
 INTERVAL_MINUTES = 15
+cooldown = {}  # Dizionario che memorizza il timestamp dell'ultima uscita per ciascun simbolo
+COOLDOWN_MINUTES = 60  # Durata del cooldown in minuti (modificabile)
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
@@ -436,6 +438,7 @@ if __name__ == "__main__":
                                 log_trade_to_google(symbol, entry["entry_price"], current_price, pnl, "TP", "Take Profit")
                                 open_positions.discard(symbol)
                                 position_data.pop(symbol, None)
+                                cooldown[symbol] = time.time()
                     elif current_price <= entry["sl"]:
                         log(f"🛑 Stop Loss attivato per {symbol} → {current_price:.4f}")
                         qty = get_free_qty(symbol)
@@ -450,10 +453,17 @@ if __name__ == "__main__":
                                 log_trade_to_google(symbol, entry["entry_price"], current_price, pnl, "SL", "Stop Loss")
                                 open_positions.discard(symbol)
                                 position_data.pop(symbol, None)
+                                cooldown[symbol] = time.time()
 
             signal, strategy, price = analyze_asset(symbol)
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
             if signal == "entry":
+                # Verifica cooldown
+                last_exit = cooldown.get(symbol)
+                if last_exit and (time.time() - last_exit) < COOLDOWN_MINUTES * 60:
+                    log(f"⏳ Cooldown attivo per {symbol}, nessun nuovo ingresso")
+                    continue
+
                 if symbol in open_positions:
                     log(f"⏩ Acquisto ignorato per {symbol}: già in posizione")
                     continue
@@ -493,6 +503,7 @@ if __name__ == "__main__":
                     log_trade_to_google(symbol, entry_price, price, pnl, strategy, "Exit Signal")
                     open_positions.discard(symbol)
                     position_data.pop(symbol, None)
+                    cooldown[symbol] = time.time()
                 else:
                     log(f"❌ Vendita fallita per {symbol}, nessuna notifica inviata")
 
