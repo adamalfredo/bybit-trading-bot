@@ -56,6 +56,26 @@ def notify_telegram(message: str):
         except Exception as e:
             log(f"Errore invio Telegram: {e}")
 
+def is_bullish_breakout_confirmed(df: pd.DataFrame) -> bool:
+    if len(df) < 2:
+        return False
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    body = abs(last['close'] - last['open'])
+    full_range = last['high'] - last['low']
+
+    # Controlla corpo lungo, candela verde, chiusura sopra la chiusura precedente
+    if (
+        last['close'] > last['open'] and
+        full_range > 0 and
+        body > 0.6 * full_range and
+        last['close'] > prev['close']
+    ):
+        return True
+    return False
+
 def market_buy(symbol: str, usdt: float):
     endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
     ts = str(int(time.time() * 1000))
@@ -508,6 +528,17 @@ if __name__ == "__main__":
                 usdt_balance = get_usdt_balance()
                 if usdt_balance < ORDER_USDT:
                     log(f"⏩ Acquisto saltato per {symbol}: saldo USDT ({usdt_balance:.2f}) insufficiente")
+                    continue
+
+                # 🔍 Filtri aggiuntivi per confermare il segnale
+                # MACD deve essere sopra la linea signal
+                if last["macd"] <= last["macd_signal"]:
+                    log(f"❌ MACD non confermato per {symbol} → MACD {last['macd']:.4f} <= Signal {last['macd_signal']:.4f}")
+                    continue
+
+                # Conferma breakout: candela verde con corpo significativo
+                if not is_bullish_breakout_confirmed(df):
+                    log(f"❌ Breakout non confermato visivamente per {symbol}")
                     continue
 
                 resp = market_buy(symbol, ORDER_USDT)
