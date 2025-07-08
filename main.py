@@ -512,6 +512,13 @@ if __name__ == "__main__":
                 df["rsi"] = RSIIndicator(close=close).rsi()
                 df["ema20"] = EMAIndicator(close=close, window=20).ema_indicator()
                 df["adx"] = ADXIndicator(high=df["High"], low=df["Low"], close=close).adx()
+
+                # Aggiungi anche MACD per evitare KeyError
+                macd = MACD(close=close)
+                df["macd"] = macd.macd()
+                df["macd_signal"] = macd.macd_signal()
+
+                df.dropna(inplace=True)
                 last = df.iloc[-1]
 
                 if last["adx"] < 25:
