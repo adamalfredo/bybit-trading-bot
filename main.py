@@ -63,15 +63,14 @@ def is_bullish_breakout_confirmed(df: pd.DataFrame) -> bool:
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    body = abs(last['close'] - last['open'])
-    full_range = last['high'] - last['low']
+    body = abs(last["Close"] - last["Open"])
+    full_range = last["High"] - last["Low"]
 
-    # Controlla corpo lungo, candela verde, chiusura sopra la chiusura precedente
     if (
-        last['close'] > last['open'] and
+        last["Close"] > last["Open"] and
         full_range > 0 and
         body > 0.6 * full_range and
-        last['close'] > prev['close']
+        last["Close"] > prev["Close"]
     ):
         return True
     return False
@@ -260,7 +259,6 @@ def analyze_asset(symbol: str):
             log(f"[!] Dati non disponibili per {symbol} → analisi saltata")
             return None, None, None
 
-        df.dropna(inplace=True)
         close = find_close_column(df)
         if close is None:
             return None, None, None
@@ -283,7 +281,11 @@ def analyze_asset(symbol: str):
         atr = AverageTrueRange(high=df["High"], low=df["Low"], close=close, window=ATR_WINDOW)
         df["atr"] = atr.average_true_range()
 
-        df.dropna(inplace=True)
+        df.dropna(subset=[
+            "bb_upper", "bb_lower", "rsi", "sma20", "sma50",
+            "ema20", "ema50", "macd", "macd_signal", "adx", "atr"
+        ], inplace=True)
+
         last = df.iloc[-1]
         prev = df.iloc[-2]
 
@@ -510,9 +512,13 @@ if __name__ == "__main__":
                 df = fetch_history(symbol)
                 if df is None:
                     continue
-                df.dropna(inplace=True)
+                df.dropna(subset=[
+                    "rsi", "ema20", "adx", "macd", "macd_signal"
+                ], inplace=True)
+
                 close = find_close_column(df)
                 if close is None:
+                    log(f"[!] Colonna 'Close' non trovata per {symbol}")
                     continue
                 df["rsi"] = RSIIndicator(close=close).rsi()
                 df["ema20"] = EMAIndicator(close=close, window=20).ema_indicator()
@@ -523,7 +529,10 @@ if __name__ == "__main__":
                 df["macd"] = macd.macd()
                 df["macd_signal"] = macd.macd_signal()
 
-                df.dropna(inplace=True)
+                df.dropna(subset=[
+                    "rsi", "ema20", "adx", "macd", "macd_signal"
+                ], inplace=True)
+
                 last = df.iloc[-1]
 
                 if last["adx"] < 25:
