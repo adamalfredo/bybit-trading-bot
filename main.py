@@ -547,7 +547,7 @@ if __name__ == "__main__":
 
                 last = df.iloc[-1]
 
-                adx_threshold = 20 if symbol in VOLATILE_ASSETS else 25
+                adx_threshold = 18 if symbol in VOLATILE_ASSETS else 22
 
                 if last["adx"] < adx_threshold:
                     log(f"❌ Segnale debole per {symbol} → ADX {last['adx']:.2f} < {adx_threshold}")
@@ -584,7 +584,19 @@ if __name__ == "__main__":
 
                     # Salva entry price, TP, SL
                     entry_price = price
+                    # Calcola indicatori
+                    atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=14)
+                    df["atr"] = atr.average_true_range()
+
+                    # Elimina solo righe con valori NaN *dopo* il calcolo
+                    df.dropna(subset=["atr", "RSI", "macd", ...], inplace=True)
+
+                    # Poi prendi l'ultima
+                    last = df.iloc[-1]
+
+                    # E solo ora accedi a:
                     atr_value = last["atr"]
+
                     tp = entry_price + (atr_value * TP_FACTOR)
                     sl = entry_price - (atr_value * SL_FACTOR)
                     position_data[symbol] = {"entry_price": entry_price, "tp": tp, "sl": sl}
