@@ -512,10 +512,7 @@ if __name__ == "__main__":
                 df = fetch_history(symbol)
                 if df is None:
                     continue
-                df.dropna(subset=[
-                    "rsi", "ema20", "adx", "macd", "macd_signal"
-                ], inplace=True)
-
+                
                 close = find_close_column(df)
                 if close is None:
                     log(f"[!] Colonna 'Close' non trovata per {symbol}")
