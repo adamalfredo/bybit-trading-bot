@@ -566,6 +566,8 @@ if __name__ == "__main__":
 
                     # Salva entry price, TP, SL
                     entry_price = price
+                    atr = AverageTrueRange(high=df["High"], low=df["Low"], close=close, window=ATR_WINDOW)
+                    df["atr"] = atr.average_true_range()
                     atr_value = df.iloc[-1]["atr"]
                     tp = entry_price + (atr_value * TP_FACTOR)
                     sl = entry_price - (atr_value * SL_FACTOR)
