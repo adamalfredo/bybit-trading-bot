@@ -158,6 +158,11 @@ def market_sell(symbol: str, qty: float):
     if not price:
         log(f"❌ Prezzo non disponibile per {symbol}, impossibile vendere")
         return
+    
+    order_value = qty * price
+    if order_value < 5:
+        log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
+        return
 
     qty_step, precision = get_instrument_info(symbol)
     try:
