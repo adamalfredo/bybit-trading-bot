@@ -45,6 +45,12 @@ ASSETS = [
     # 🔵 Stabili / Blue-chip (trend affidabili, più liquidi)
     "BTCUSDT", "ETHUSDT", "LTCUSDT", "XRPUSDT", "LINKUSDT", "AVAXUSDT", "SOLUSDT"
 ]
+# Soglia ADX dinamica per asset volatili
+VOLATILE_ASSETS = [
+    "BONKUSDT", "PEPEUSDT", "WIFUSDT", "RNDRUSDT", "INJUSDT", "SUIUSDT",
+    "SEIUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "TONUSDT", "DOGEUSDT", "MATICUSDT"
+]
+
 INTERVAL_MINUTES = 15
 cooldown = {}  # Dizionario che memorizza il timestamp dell'ultima uscita per ciascun simbolo
 COOLDOWN_MINUTES = 60  # Durata del cooldown in minuti (modificabile)
@@ -541,9 +547,12 @@ if __name__ == "__main__":
 
                 last = df.iloc[-1]
 
-                if last["adx"] < 25:
-                    log(f"❌ Segnale debole per {symbol} → ADX {last['adx']:.2f} < 25")
+                adx_threshold = 20 if symbol in VOLATILE_ASSETS else 25
+
+                if last["adx"] < adx_threshold:
+                    log(f"❌ Segnale debole per {symbol} → ADX {last['adx']:.2f} < {adx_threshold}")
                     continue
+
                 if last["rsi"] > 70:
                     log(f"❌ RSI troppo alto per {symbol} → RSI {last['rsi']:.2f} > 70")
                     continue
@@ -575,9 +584,7 @@ if __name__ == "__main__":
 
                     # Salva entry price, TP, SL
                     entry_price = price
-                    atr = AverageTrueRange(high=df["High"], low=df["Low"], close=close, window=ATR_WINDOW)
-                    df["atr"] = atr.average_true_range()
-                    atr_value = df.iloc[-1]["atr"]
+                    atr_value = last["atr"]
                     tp = entry_price + (atr_value * TP_FACTOR)
                     sl = entry_price - (atr_value * SL_FACTOR)
                     position_data[symbol] = {"entry_price": entry_price, "tp": tp, "sl": sl}
