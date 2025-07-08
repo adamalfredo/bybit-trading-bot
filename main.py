@@ -31,10 +31,19 @@ BYBIT_BASE_URL = (
 )
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 ORDER_USDT = 50
+# ASSETS = [
+#     "DOGEUSDT", "BTCUSDT", "AVAXUSDT", "SOLUSDT", "ETHUSDT", "LINKUSDT",
+#     "ARBUSDT", "OPUSDT", "LTCUSDT", "XRPUSDT",
+#     "TONUSDT", "MATICUSDT", "MNTUSDT"
+# ]
 ASSETS = [
-    "DOGEUSDT", "BTCUSDT", "AVAXUSDT", "SOLUSDT", "ETHUSDT", "LINKUSDT",
-    "ARBUSDT", "OPUSDT", "LTCUSDT", "XRPUSDT",
-    "TONUSDT", "MATICUSDT", "MNTUSDT"
+    # ⚡️ Aggressive (alta volatilità, pump, meme, narrativa)
+    "WIFUSDT", "PEPEUSDT", "1000SATSUSDT",
+    "INJUSDT", "RNDRUSDT", "SUIUSDT", "SEIUSDT",
+    "APTUSDT", "ARBUSDT", "OPUSDT", "TONUSDT", "DOGEUSDT", "MATICUSDT",
+
+    # 🔵 Stabili / Blue-chip (trend affidabili, più liquidi)
+    "BTCUSDT", "ETHUSDT", "LTCUSDT", "XRPUSDT", "LINKUSDT", "AVAXUSDT", "SOLUSDT"
 ]
 INTERVAL_MINUTES = 15
 cooldown = {}  # Dizionario che memorizza il timestamp dell'ultima uscita per ciascun simbolo
