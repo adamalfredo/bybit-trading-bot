@@ -38,7 +38,7 @@ ORDER_USDT = 50
 # ]
 ASSETS = [
     # ⚡️ Aggressive (alta volatilità, pump, meme, narrativa)
-    "WIFUSDT", "PEPEUSDT", "1000SATSUSDT",
+    "WIFUSDT", "PEPEUSDT", "BONKUSDT",
     "INJUSDT", "RNDRUSDT", "SUIUSDT", "SEIUSDT",
     "APTUSDT", "ARBUSDT", "OPUSDT", "TONUSDT", "DOGEUSDT", "MATICUSDT",
 
