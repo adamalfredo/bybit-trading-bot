@@ -396,7 +396,7 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
         log(f"Errore log su Google Sheets: {e}")
 
 def get_free_qty(symbol: str) -> float:
-    coin = symbol.replace("USDT", "")
+    coin = symbol[:-4] if symbol.endswith("USDT") else symbol
     url = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
     params = {"accountType": BYBIT_ACCOUNT_TYPE}
 
