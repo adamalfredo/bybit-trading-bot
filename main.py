@@ -410,6 +410,7 @@ def get_free_qty(symbol: str) -> float:
 
     try:
         resp = requests.get(url, headers=headers)
+        log(f"❗ Risposta grezza da Bybit per {symbol}: {resp.text}")
         data = resp.json()
 
         # Controllo difensivo
