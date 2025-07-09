@@ -396,58 +396,43 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
         log(f"Errore log su Google Sheets: {e}")
 
 def get_free_qty(symbol: str) -> float:
-    """Restituisce il saldo disponibile per la coin indicata (robusto anche se i campi sono vuoti)."""
-    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
-        return 0.0
-
-    endpoint = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
+    coin = symbol.replace("USDT", "")  # esempio: MATICUSDT → MATIC
+    url = "https://api.bybit.com/v5/account/wallet-balance"
+    headers = {"X-BAPI-API-KEY": KEY}
     timestamp = str(int(time.time() * 1000))
-    recv_window = "5000"
-    coin = symbol.replace("USDT", "") if symbol != "USDT" else "USDT"
-    params = {"accountType": BYBIT_ACCOUNT_TYPE, "coin": coin}
-    param_str = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
-    signature_payload = f"{timestamp}{BYBIT_API_KEY}{recv_window}{param_str}"
-    sign = hmac.new(SECRET.encode(), signature_payload.encode(), hashlib.sha256).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY": BYBIT_API_KEY,
+    sign_payload = f"{timestamp}{KEY}5000"
+    sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
+    headers.update({
         "X-BAPI-SIGN": sign,
         "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": recv_window,
-        "X-BAPI-SIGN-TYPE": "2",
-    }
+        "X-BAPI-RECV-WINDOW": "5000"
+    })
 
     try:
-        resp = requests.get(f"{endpoint}?{param_str}", headers=headers, timeout=10)
+        resp = requests.get(url, headers=headers)
         data = resp.json()
-        if data.get("retCode") == 0:
-            result = data.get("result", {})
-            lists = result.get("list") or result.get("balances")
-            if isinstance(lists, list):
-                for item in lists:
-                    coins = item.get("coin") or item.get("coins") or item.get("balances") or []
-                    for c in coins:
-                        if c.get("coin") == coin:
-                            for key in (
-                                "availableToWithdraw",
-                                "availableBalance",
-                                "walletBalance",
-                                "free",
-                                "transferBalance",
-                                "equity",
-                                "total",
-                            ):
-                                val = c.get(key)
-                                if val not in [None, "", "null"]:
-                                    try:
-                                        return float(val)
-                                    except (TypeError, ValueError):
-                                        continue
-            log(f"Coin {coin} non trovata nella risposta saldo: {data.get('result')!r}")
-        else:
-            log(f"Errore saldo {coin}: {data}")
+        coin_list = data["result"]["list"][0]["coin"]
+
+        for c in coin_list:
+            if c["coin"] == coin:
+                raw = c.get("walletBalance", "0")
+                try:
+                    qty = float(raw) if raw else 0.0
+                    if qty > 0:
+                        log(f"📦 Saldo trovato per {symbol}: {qty}")
+                    else:
+                        log(f"🟡 Nessun saldo disponibile per {symbol}")
+                    return qty
+                except Exception as e:
+                    log(f"⚠️ Errore conversione quantità {coin}: {e}")
+                    return 0.0
+
+        log(f"🔍 Coin {coin} non trovata nel saldo.")
+        return 0.0
+
     except Exception as e:
-        log(f"Errore ottenimento saldo {coin}: {e}")
-    return 0.0
+        log(f"❌ Errore nel recupero saldo per {symbol}: {str(e)}")
+        return 0.0
 
 open_positions = set()
 # Mappa delle posizioni aperte: salva entry, TP e SL
