@@ -410,34 +410,30 @@ def get_free_qty(symbol: str) -> float:
 
     try:
         resp = requests.get(url, headers=headers)
-        log(f"❗ Risposta grezza da Bybit per {symbol}: {resp.text}")
         data = resp.json()
 
-        # Controllo difensivo
+        # DEBUG temporaneo per capire la struttura
         if "result" not in data or "list" not in data["result"]:
-            raise KeyError("'list' mancante nella risposta API")
+            print(f"❗ ERRORE struttura API per {symbol} → Risposta: {data}")
+            return 0.0
 
         coin_list = data["result"]["list"][0].get("coin", [])
 
         for c in coin_list:
             if c["coin"] == coin:
                 raw = c.get("walletBalance", "0")
-                try:
-                    qty = float(raw) if raw else 0.0
-                    if qty > 0:
-                        log(f"📦 Saldo trovato per {symbol}: {qty}")
-                    else:
-                        log(f"🟡 Nessun saldo disponibile per {symbol}")
-                    return qty
-                except Exception as e:
-                    log(f"⚠️ Errore conversione quantità {coin}: {e}")
-                    return 0.0
+                qty = float(raw) if raw else 0.0
+                if qty > 0:
+                    print(f"📦 Saldo trovato per {symbol}: {qty}")
+                else:
+                    print(f"🟡 Nessun saldo disponibile per {symbol}")
+                return qty
 
-        log(f"🔍 Coin {coin} non trovata nel saldo.")
+        print(f"🔍 Coin {coin} non trovata nel saldo.")
         return 0.0
 
     except Exception as e:
-        log(f"❌ Errore nel recupero saldo per {symbol}: {e}")
+        print(f"❌ Errore nel recupero saldo per {symbol}: {e}")
         return 0.0
 
 open_positions = set()
