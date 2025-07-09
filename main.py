@@ -577,6 +577,13 @@ if __name__ == "__main__":
                     log(f"❌ Breakout non confermato visivamente per {symbol}")
                     continue
 
+                # ✅ BLOCCO ANTI-OVERTRADING
+                balance = get_free_qty(symbol)
+                if balance and price and (balance * price) > (ORDER_USDT * 2.0):
+                    log(f"⛔️ Hai già una posizione rilevante su {symbol} → {balance:.4f} ≈ {balance * price:.2f} USDT → acquisto evitato")
+                    continue
+
+                # Ordine effettivo
                 resp = market_buy(symbol, ORDER_USDT)
                 if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                     log(f"✅ Acquisto completato per {symbol}")
