@@ -396,8 +396,8 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
         log(f"Errore log su Google Sheets: {e}")
 
 def get_free_qty(symbol: str) -> float:
-    coin = symbol.replace("USDT", "")  # esempio: MATICUSDT → MATIC
-    url = "https://api.bybit.com/v5/account/wallet-balance"
+    coin = symbol.replace("USDT", "")
+    url = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
     headers = {"X-BAPI-API-KEY": KEY}
     timestamp = str(int(time.time() * 1000))
     sign_payload = f"{timestamp}{KEY}5000"
@@ -408,11 +408,12 @@ def get_free_qty(symbol: str) -> float:
         "X-BAPI-RECV-WINDOW": "5000"
     })
 
+    params = {"accountType": BYBIT_ACCOUNT_TYPE}  # ✅ qui usiamo la tua variabile
+
     try:
-        resp = requests.get(url, headers=headers)
+        resp = requests.get(url, headers=headers, params=params)
         data = resp.json()
 
-        # DEBUG temporaneo per capire la struttura
         if "result" not in data or "list" not in data["result"]:
             print(f"❗ ERRORE struttura API per {symbol} → Risposta: {data}")
             return 0.0
