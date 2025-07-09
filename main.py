@@ -396,11 +396,18 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
         log(f"Errore log su Google Sheets: {e}")
 
 def get_free_qty(symbol: str) -> float:
-    coin = symbol[:-4] if symbol.endswith("USDT") else symbol
+    # Ricava la coin corretta da symbol (es. INJUSDT → INJ)
+    if symbol.endswith("USDT") and len(symbol) > 4:
+        coin = symbol.replace("USDT", "")
+    elif symbol == "USDT":
+        coin = "USDT"
+    else:
+        coin = symbol
+
     url = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
     params = {"accountType": BYBIT_ACCOUNT_TYPE}
 
-    # Firma corretta con query string
+    # Firma della richiesta
     from urllib.parse import urlencode
     query_string = urlencode(params)
     timestamp = str(int(time.time() * 1000))
@@ -430,9 +437,9 @@ def get_free_qty(symbol: str) -> float:
                 try:
                     qty = float(raw) if raw else 0.0
                     if qty > 0:
-                        log(f"📦 Saldo trovato per {symbol}: {qty}")
+                        log(f"📦 Saldo trovato per {coin}: {qty}")
                     else:
-                        log(f"🟡 Nessun saldo disponibile per {symbol}")
+                        log(f"🟡 Nessun saldo disponibile per {coin}")
                     return qty
                 except Exception as e:
                     log(f"⚠️ Errore conversione quantità {coin}: {e}")
