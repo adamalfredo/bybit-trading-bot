@@ -411,7 +411,12 @@ def get_free_qty(symbol: str) -> float:
     try:
         resp = requests.get(url, headers=headers)
         data = resp.json()
-        coin_list = data["result"]["list"][0]["coin"]
+
+        # Controllo difensivo
+        if "result" not in data or "list" not in data["result"]:
+            raise KeyError("'list' mancante nella risposta API")
+
+        coin_list = data["result"]["list"][0].get("coin", [])
 
         for c in coin_list:
             if c["coin"] == coin:
@@ -431,7 +436,7 @@ def get_free_qty(symbol: str) -> float:
         return 0.0
 
     except Exception as e:
-        log(f"❌ Errore nel recupero saldo per {symbol}: {str(e)}")
+        log(f"❌ Errore nel recupero saldo per {symbol}: {e}")
         return 0.0
 
 open_positions = set()
