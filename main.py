@@ -589,7 +589,7 @@ if __name__ == "__main__":
                     df["atr"] = atr.average_true_range()
 
                     # Elimina solo righe con valori NaN *dopo* il calcolo
-                    df.dropna(subset=["atr", "RSI", "macd", ...], inplace=True)
+                    df.dropna(subset=["atr", "rsi", "macd", "macd_signal", "ema20", "adx"], inplace=True)
 
                     # Poi prendi l'ultima
                     last = df.iloc[-1]
@@ -624,5 +624,8 @@ if __name__ == "__main__":
                     cooldown[symbol] = time.time()
                 else:
                     log(f"❌ Vendita fallita per {symbol}, nessuna notifica inviata")
+
+        # Aggiungi pausa di sicurezza per evitare ciclo troppo veloce se tutto salta
+        time.sleep(1)
 
         time.sleep(INTERVAL_MINUTES * 60)
