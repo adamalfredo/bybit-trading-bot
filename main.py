@@ -398,43 +398,51 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
 def get_free_qty(symbol: str) -> float:
     coin = symbol.replace("USDT", "")
     url = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
-    headers = {"X-BAPI-API-KEY": KEY}
+    params = {"accountType": BYBIT_ACCOUNT_TYPE}
+
+    # Firma corretta con query string
+    from urllib.parse import urlencode
+    query_string = urlencode(params)
     timestamp = str(int(time.time() * 1000))
-    sign_payload = f"{timestamp}{KEY}5000"
+    sign_payload = f"{timestamp}{KEY}5000{query_string}"
     sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
-    headers.update({
+
+    headers = {
+        "X-BAPI-API-KEY": KEY,
         "X-BAPI-SIGN": sign,
         "X-BAPI-TIMESTAMP": timestamp,
         "X-BAPI-RECV-WINDOW": "5000"
-    })
-
-    params = {"accountType": BYBIT_ACCOUNT_TYPE}  # ✅ qui usiamo la tua variabile
+    }
 
     try:
         resp = requests.get(url, headers=headers, params=params)
+        log(f"❗ Risposta grezza da Bybit per {symbol}: {resp.text}")
         data = resp.json()
 
         if "result" not in data or "list" not in data["result"]:
-            print(f"❗ ERRORE struttura API per {symbol} → Risposta: {data}")
-            return 0.0
+            raise KeyError("'list' mancante nella risposta API")
 
         coin_list = data["result"]["list"][0].get("coin", [])
 
         for c in coin_list:
             if c["coin"] == coin:
                 raw = c.get("walletBalance", "0")
-                qty = float(raw) if raw else 0.0
-                if qty > 0:
-                    print(f"📦 Saldo trovato per {symbol}: {qty}")
-                else:
-                    print(f"🟡 Nessun saldo disponibile per {symbol}")
-                return qty
+                try:
+                    qty = float(raw) if raw else 0.0
+                    if qty > 0:
+                        log(f"📦 Saldo trovato per {symbol}: {qty}")
+                    else:
+                        log(f"🟡 Nessun saldo disponibile per {symbol}")
+                    return qty
+                except Exception as e:
+                    log(f"⚠️ Errore conversione quantità {coin}: {e}")
+                    return 0.0
 
-        print(f"🔍 Coin {coin} non trovata nel saldo.")
+        log(f"🔍 Coin {coin} non trovata nel saldo.")
         return 0.0
 
     except Exception as e:
-        print(f"❌ Errore nel recupero saldo per {symbol}: {e}")
+        log(f"❌ Errore nel recupero saldo per {symbol}: {e}")
         return 0.0
 
 open_positions = set()
