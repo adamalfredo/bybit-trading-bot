@@ -483,19 +483,21 @@ if __name__ == "__main__":
                                 notify_telegram(
                                     f"🎯 Take Profit raggiunto per {symbol} a {current_price:.4f}\nProfitto stimato: +{pnl:.2f}%"
                                 )
+                                usdt_after = get_usdt_balance()
+                                log(f"💰 Saldo USDT dopo la vendita di {symbol}: {usdt_after:.2f}")
+                                delta = usdt_after - entry["entry_price"] * qty
+                                log(f"📊 Guadagno reale stimato per {symbol}: {delta:.2f} USDT (Saldo diff.)")
                                 log_trade_to_google(symbol, entry["entry_price"], current_price, pnl, "TP", "Take Profit", usdt_before, usdt_after, delta)
                                 open_positions.discard(symbol)
                                 last_exit_time[symbol] = time.time()
                                 position_data.pop(symbol, None)
                                 cooldown[symbol] = time.time()
-                                usdt_after = get_usdt_balance()
-                                log(f"💰 Saldo USDT dopo la vendita di {symbol}: {usdt_after:.2f}")
-                                delta = usdt_after - entry["entry_price"] * qty
-                                log(f"📊 Guadagno reale stimato per {symbol}: {delta:.2f} USDT (Saldo diff.)")
+
                     elif current_price <= entry["sl"]:
                         log(f"🛑 Stop Loss attivato per {symbol} → {current_price:.4f}")
                         qty = get_free_qty(symbol)
                         if qty > 0:
+                            usdt_before = get_usdt_balance()  # ✅ AGGIUNGI QUESTA RIGA
                             resp = market_sell(symbol, qty)
                             if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                                 pnl = (current_price - entry["entry_price"]) / entry["entry_price"] * 100
@@ -503,15 +505,15 @@ if __name__ == "__main__":
                                 notify_telegram(
                                     f"🛑 Stop Loss attivato per {symbol} a {current_price:.4f}\nPerdita stimata: {pnl:.2f}%"
                                 )
+                                usdt_after = get_usdt_balance()
+                                log(f"💰 Saldo USDT dopo la vendita di {symbol}: {usdt_after:.2f}")
+                                delta = usdt_after - entry["entry_price"] * qty
+                                log(f"📊 Guadagno reale stimato per {symbol}: {delta:.2f} USDT (Saldo diff.)")
                                 log_trade_to_google(symbol, entry["entry_price"], current_price, pnl, "SL", "Stop Loss", usdt_before, usdt_after, delta)
                                 open_positions.discard(symbol)
                                 last_exit_time[symbol] = time.time()
                                 position_data.pop(symbol, None)
                                 cooldown[symbol] = time.time()
-                                usdt_after = get_usdt_balance()
-                                log(f"💰 Saldo USDT dopo la vendita di {symbol}: {usdt_after:.2f}")
-                                delta = usdt_after - entry["entry_price"] * qty
-                                log(f"📊 Guadagno reale stimato per {symbol}: {delta:.2f} USDT (Saldo diff.)")
 
             signal, strategy, price = analyze_asset(symbol)
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
@@ -654,11 +656,14 @@ if __name__ == "__main__":
 
                 resp = market_sell(symbol, qty)
                 if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+                    usdt_before = get_usdt_balance()
                     log(f"✅ Vendita completata per {symbol}")
                     notify_trade_result(symbol, "exit", price, strategy)
                     entry_price = position_data.get(symbol, {}).get("entry_price", price)
                     pnl = (price - entry_price) / entry_price * 100
-                    log_trade_to_google(symbol, entry_price, price, pnl, strategy, "Exit Signal")
+                    usdt_after = get_usdt_balance()
+                    delta = usdt_after - entry_price * qty
+                    log_trade_to_google(symbol, entry_price, price, pnl, strategy, "Exit Signal", usdt_before, usdt_after, delta)
                     open_positions.discard(symbol)
                     last_exit_time[symbol] = time.time()
                     position_data.pop(symbol, None)
