@@ -592,25 +592,47 @@ if __name__ == "__main__":
                     log(f"✅ Acquisto completato per {symbol}")
                     open_positions.add(symbol)
 
-                    # Salva entry price, TP, SL
+                    # Salva entry price
                     entry_price = price
-                    # Calcola indicatori
+
+                    # Calcola ATR
                     atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=14)
                     df["atr"] = atr.average_true_range()
-
-                    # Elimina solo righe con valori NaN *dopo* il calcolo
                     df.dropna(subset=["atr", "rsi", "macd", "macd_signal", "ema20", "adx"], inplace=True)
-
-                    # Poi prendi l'ultima
                     last = df.iloc[-1]
-
-                    # E solo ora accedi a:
                     atr_value = last["atr"]
 
-                    tp = entry_price + (atr_value * TP_FACTOR)
-                    sl = entry_price - (atr_value * SL_FACTOR)
-                    position_data[symbol] = {"entry_price": entry_price, "tp": tp, "sl": sl}
-                    log(f"📊 ATR per {symbol}: {atr_value:.6f} → TP: {tp:.4f}, SL: {sl:.4f}")
+                    # 🔧 TP/SL dinamico in base a RSI
+                    if last["rsi"] > 65:
+                        tp_factor = 1.5
+                        sl_factor = 1.0
+                    elif last["rsi"] > 55:
+                        tp_factor = 2.0
+                        sl_factor = 1.2
+                    else:
+                        tp_factor = 2.5
+                        sl_factor = 1.5
+
+                    # 📉 Aggiusta TP e SL per asset volatili (coin esplosive = SL più stretto)
+                    if symbol in VOLATILE_ASSETS:
+                        tp_factor += 0.5       # Lascia correre i profitti
+                        sl_factor -= 0.2       # Taglia prima le perdite
+                        if sl_factor < 0.8:    # SL troppo stretto non va bene
+                            sl_factor = 0.8
+
+                    # Calcola i target
+                    tp = entry_price + (atr_value * tp_factor)
+                    sl = entry_price - (atr_value * sl_factor)
+
+                    # Salva i dati
+                    position_data[symbol] = {
+                        "entry_price": entry_price,
+                        "tp": tp,
+                        "sl": sl,
+                        "entry_time": time.time()  # (se vorrai anche un hold-time minimo in futuro)
+                    }
+
+                    log(f"📊 ATR per {symbol}: {atr_value:.6f} → TP: {tp:.4f}, SL: {sl:.4f} (TPx: {tp_factor}, SLx: {sl_factor})")
                     notify_trade_result(symbol, "entry", price, strategy)
                 else:
                     log(f"❌ Acquisto fallito per {symbol}, nessuna notifica inviata")
