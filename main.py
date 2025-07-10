@@ -14,10 +14,6 @@ from ta.trend import SMAIndicator
 from ta.trend import EMAIndicator, MACD, ADXIndicator
 from typing import Optional
 
-# NON usare load_dotenv() su Railway!
-# from dotenv import load_dotenv
-# load_dotenv()
-
 # Le variabili sono caricate automaticamente da Railway
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -31,11 +27,7 @@ BYBIT_BASE_URL = (
 )
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 ORDER_USDT = 50
-# ASSETS = [
-#     "DOGEUSDT", "BTCUSDT", "AVAXUSDT", "SOLUSDT", "ETHUSDT", "LINKUSDT",
-#     "ARBUSDT", "OPUSDT", "LTCUSDT", "XRPUSDT",
-#     "TONUSDT", "MATICUSDT", "MNTUSDT"
-# ]
+
 ASSETS = [
     # ⚡️ Aggressive (alta volatilità, pump, meme, narrativa)
     "WIFUSDT", "PEPEUSDT", "BONKUSDT",
@@ -278,15 +270,13 @@ def analyze_asset(symbol: str):
         if close is None:
             return None, None, None
 
-        # Indicatori esistenti
+        # Indicatori
         bb = BollingerBands(close=close)
         df["bb_upper"] = bb.bollinger_hband()
         df["bb_lower"] = bb.bollinger_lband()
         df["rsi"] = RSIIndicator(close=close).rsi()
         df["sma20"] = SMAIndicator(close=close, window=20).sma_indicator()
         df["sma50"] = SMAIndicator(close=close, window=50).sma_indicator()
-
-        # Nuovi indicatori
         df["ema20"] = EMAIndicator(close=close, window=20).ema_indicator()
         df["ema50"] = EMAIndicator(close=close, window=50).ema_indicator()
         macd = MACD(close=close)
@@ -350,7 +340,7 @@ from google.oauth2.service_account import Credentials
 
 # Config
 SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"  # copia da URL: https://docs.google.com/spreadsheets/d/<QUESTO>/edit
-SHEET_NAME = "Foglio1"  # o quello che hai scelto
+SHEET_NAME = "Foglio1"
 
 # Setup una sola volta
 def setup_gspread():
@@ -360,7 +350,7 @@ def setup_gspread():
     return client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
 
 # Salva una riga nel foglio
-def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
+def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type, usdt_before=None, usdt_after=None, delta=None):
     try:
         import gspread
         from google.oauth2.service_account import Credentials
@@ -390,7 +380,10 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
             round(exit, 6),
             f"{pnl_pct:.2f}%",
             strategy,
-            result_type
+            result_type,
+            f"{usdt_before:.2f}" if usdt_before is not None else "",
+            f"{usdt_after:.2f}" if usdt_after is not None else "",
+            f"{delta:.2f}" if delta is not None else ""
         ])
     except Exception as e:
         log(f"Errore log su Google Sheets: {e}")
@@ -490,11 +483,15 @@ if __name__ == "__main__":
                                 notify_telegram(
                                     f"🎯 Take Profit raggiunto per {symbol} a {current_price:.4f}\nProfitto stimato: +{pnl:.2f}%"
                                 )
-                                log_trade_to_google(symbol, entry["entry_price"], current_price, pnl, "TP", "Take Profit")
+                                log_trade_to_google(symbol, entry["entry_price"], current_price, pnl, "TP", "Take Profit", usdt_before, usdt_after, delta)
                                 open_positions.discard(symbol)
                                 last_exit_time[symbol] = time.time()
                                 position_data.pop(symbol, None)
                                 cooldown[symbol] = time.time()
+                                usdt_after = get_usdt_balance()
+                                log(f"💰 Saldo USDT dopo la vendita di {symbol}: {usdt_after:.2f}")
+                                delta = usdt_after - entry["entry_price"] * qty
+                                log(f"📊 Guadagno reale stimato per {symbol}: {delta:.2f} USDT (Saldo diff.)")
                     elif current_price <= entry["sl"]:
                         log(f"🛑 Stop Loss attivato per {symbol} → {current_price:.4f}")
                         qty = get_free_qty(symbol)
@@ -506,11 +503,15 @@ if __name__ == "__main__":
                                 notify_telegram(
                                     f"🛑 Stop Loss attivato per {symbol} a {current_price:.4f}\nPerdita stimata: {pnl:.2f}%"
                                 )
-                                log_trade_to_google(symbol, entry["entry_price"], current_price, pnl, "SL", "Stop Loss")
+                                log_trade_to_google(symbol, entry["entry_price"], current_price, pnl, "SL", "Stop Loss", usdt_before, usdt_after, delta)
                                 open_positions.discard(symbol)
                                 last_exit_time[symbol] = time.time()
                                 position_data.pop(symbol, None)
                                 cooldown[symbol] = time.time()
+                                usdt_after = get_usdt_balance()
+                                log(f"💰 Saldo USDT dopo la vendita di {symbol}: {usdt_after:.2f}")
+                                delta = usdt_after - entry["entry_price"] * qty
+                                log(f"📊 Guadagno reale stimato per {symbol}: {delta:.2f} USDT (Saldo diff.)")
 
             signal, strategy, price = analyze_asset(symbol)
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
@@ -569,6 +570,9 @@ if __name__ == "__main__":
                     continue
 
                 # Saldo sufficiente?
+                usdt_before = get_usdt_balance()
+                log(f"💰 Saldo USDT prima dell’acquisto di {symbol}: {usdt_before:.2f}")
+
                 usdt_balance = get_usdt_balance()
                 if usdt_balance < ORDER_USDT:
                     log(f"⏩ Acquisto saltato per {symbol}: saldo USDT ({usdt_balance:.2f}) insufficiente")
@@ -662,7 +666,6 @@ if __name__ == "__main__":
                 else:
                     log(f"❌ Vendita fallita per {symbol}, nessuna notifica inviata")
 
-        # Aggiungi pausa di sicurezza per evitare ciclo troppo veloce se tutto salta
+        # pausa di sicurezza sleep(1) per evitare ciclo troppo veloce se tutto salta
         time.sleep(1)
-
         time.sleep(INTERVAL_MINUTES * 60)
