@@ -423,11 +423,16 @@ def get_free_qty(symbol: str) -> float:
 
     try:
         resp = requests.get(url, headers=headers, params=params)
-        log(f"❗ Risposta grezza da Bybit per {symbol}: {resp.text}")
-        data = resp.json()
+
+        try:
+            data = resp.json()
+        except ValueError:
+            log(f"❗ Errore: risposta non in formato JSON da Bybit per {symbol}: {resp.text}")
+            return []
 
         if "result" not in data or "list" not in data["result"]:
-            raise KeyError("'list' mancante nella risposta API")
+            log(f"❗ Warning: struttura inattesa da Bybit per {symbol}: {resp.text}")
+            return []
 
         coin_list = data["result"]["list"][0].get("coin", [])
 
