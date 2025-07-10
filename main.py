@@ -662,7 +662,7 @@ if __name__ == "__main__":
                     entry_price = position_data.get(symbol, {}).get("entry_price", price)
                     pnl = (price - entry_price) / entry_price * 100
                     usdt_after = get_usdt_balance()
-                    delta = usdt_after - entry_price * qty
+                    delta = usdt_after - usdt_before
                     log_trade_to_google(symbol, entry_price, price, pnl, strategy, "Exit Signal", usdt_before, usdt_after, delta)
                     open_positions.discard(symbol)
                     last_exit_time[symbol] = time.time()
