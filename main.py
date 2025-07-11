@@ -643,10 +643,10 @@ if __name__ == "__main__":
                     continue
 
                 # Ordine effettivo
+                open_positions.add(symbol)  # <-- protezione immediata contro doppio acquisto
                 resp = market_buy(symbol, ORDER_USDT)
                 if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                     log(f"✅ Acquisto completato per {symbol}")
-                    open_positions.add(symbol)
 
                     # Salva entry price
                     entry_price = price
@@ -694,7 +694,8 @@ if __name__ == "__main__":
                     log(f"📊 ATR per {symbol}: {atr_value:.6f} → TP: {tp:.4f}, SL: {sl:.4f} (TPx: {tp_factor}, SLx: {sl_factor})")
                     notify_trade_result(symbol, "entry", price, strategy)
                 else:
-                    log(f"❌ Acquisto fallito per {symbol}, nessuna notifica inviata")
+                    log(f"❌ Acquisto fallito per {symbol}, rimuovo da open_positions")
+                    open_positions.discard(symbol)  # <-- rimuovilo se l’ordine fallisce
 
             elif signal == "exit":
                 qty = get_free_qty(symbol)
