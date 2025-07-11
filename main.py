@@ -51,6 +51,10 @@ ATR_WINDOW = 14
 TP_FACTOR = 2.0     # TP = entry + 2 * ATR
 SL_FACTOR = 1.5     # SL = entry - 1.5 * ATR
 
+TRAILING_ACTIVATION_THRESHOLD = 0.02  # attiva il trailing SL sopra +2%
+TRAILING_DISTANCE = 0.02              # trailing SL = 2% sotto il massimo
+INITIAL_STOP_LOSS_PCT = 0.02          # SL iniziale = 2% sotto l’entry
+
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
 
@@ -450,6 +454,21 @@ def get_free_qty(symbol: str) -> float:
         log(f"❌ Errore nel recupero saldo per {symbol}: {e}")
         return 0.0
 
+# Nuova funzione per calcolare stop loss dinamico (da aggiungere nel file, sezione utility)
+def calculate_stop_loss(entry_price, current_price, p_max, trailing_active):
+    """
+    Ritorna il valore di stop loss da applicare:
+    - Stop Loss iniziale se il trailing non è ancora attivo
+    - Altrimenti trailing stop basato su P_max
+    """
+    if not trailing_active:
+        # SL iniziale: sotto il prezzo di ingresso
+        return entry_price * (1 - INITIAL_STOP_LOSS_PCT)
+    else:
+        # SL trailing: sotto il massimo raggiunto
+        return p_max * (1 - TRAILING_DISTANCE)
+
+
 open_positions = set()
 # Mappa delle posizioni aperte: salva entry, TP e SL
 position_data = {}  # es: { "BTCUSDT": {"entry_price": 60000, "tp": 61200, "sl": 59100} }
@@ -693,6 +712,14 @@ if __name__ == "__main__":
 
                     log(f"📊 ATR per {symbol}: {atr_value:.6f} → TP: {tp:.4f}, SL: {sl:.4f} (TPx: {tp_factor}, SLx: {sl_factor})")
                     notify_trade_result(symbol, "entry", price, strategy)
+
+                    # Salva i dati per trailing stop
+                    position_data[symbol] = {
+                        "entry_price": price,
+                        "trailing_active": False,
+                        "p_max": price
+                    }
+
                 else:
                     log(f"❌ Acquisto fallito per {symbol}, rimuovo da open_positions")
                     open_positions.discard(symbol)  # <-- rimuovilo se l’ordine fallisce
@@ -743,6 +770,7 @@ if __name__ == "__main__":
                     cooldown[symbol] = time.time()
                 else:
                     log(f"❌ Vendita fallita per {symbol}, nessuna notifica inviata")
+
 
         # pausa di sicurezza sleep(1) per evitare ciclo troppo veloce se tutto salta
         time.sleep(1)
