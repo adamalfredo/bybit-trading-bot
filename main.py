@@ -605,7 +605,7 @@ if __name__ == "__main__":
 
                 adx_threshold = 18 if symbol in VOLATILE_ASSETS else 22
 
-                if last["adx"] < adx_threshold:
+                if last["adx"] <= adx_threshold:
                     log(f"❌ Segnale debole per {symbol} → ADX {last['adx']:.2f} < {adx_threshold}")
                     continue
 
