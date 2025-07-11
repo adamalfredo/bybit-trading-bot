@@ -468,7 +468,6 @@ def calculate_stop_loss(entry_price, current_price, p_max, trailing_active):
         # SL trailing: sotto il massimo raggiunto
         return p_max * (1 - TRAILING_DISTANCE)
 
-
 open_positions = set()
 # Mappa delle posizioni aperte: salva entry, TP e SL
 position_data = {}  # es: { "BTCUSDT": {"entry_price": 60000, "tp": 61200, "sl": 59100} }
@@ -490,7 +489,7 @@ if __name__ == "__main__":
                 current_price = get_last_price(symbol)
                 if current_price:
                     entry = position_data[symbol]
-                    if current_price >= entry["tp"]:
+                    if "tp" in entry and current_price >= entry["tp"]:
                         log(f"🎯 Take Profit raggiunto per {symbol} → {current_price:.4f}")
                         qty = get_free_qty(symbol)
                         if qty > 0:
@@ -535,7 +534,7 @@ if __name__ == "__main__":
                                 position_data.pop(symbol, None)
                                 cooldown[symbol] = time.time()
 
-                    elif current_price <= entry["sl"]:
+                    elif "sl" in entry and current_price <= entry["sl"]:
                         log(f"🛑 Stop Loss attivato per {symbol} → {current_price:.4f}")
                         qty = get_free_qty(symbol)
                         if qty > 0:
@@ -770,7 +769,6 @@ if __name__ == "__main__":
                     cooldown[symbol] = time.time()
                 else:
                     log(f"❌ Vendita fallita per {symbol}, nessuna notifica inviata")
-
 
         # pausa di sicurezza sleep(1) per evitare ciclo troppo veloce se tutto salta
         time.sleep(1)
