@@ -485,7 +485,7 @@ if __name__ == "__main__":
                                 )
                                 usdt_after = get_usdt_balance()
                                 log(f"💰 Saldo USDT dopo la vendita di {symbol}: {usdt_after:.2f}")
-                                delta = usdt_after - entry["entry_price"] * qty
+                                delta = usdt_after - usdt_before
                                 log(f"📊 Guadagno reale stimato per {symbol}: {delta:.2f} USDT (Saldo diff.)")
                                 log_trade_to_google(symbol, entry["entry_price"], current_price, pnl, "TP", "Take Profit", usdt_before, usdt_after, delta)
                                 open_positions.discard(symbol)
@@ -507,7 +507,7 @@ if __name__ == "__main__":
                                 )
                                 usdt_after = get_usdt_balance()
                                 log(f"💰 Saldo USDT dopo la vendita di {symbol}: {usdt_after:.2f}")
-                                delta = usdt_after - entry["entry_price"] * qty
+                                delta = usdt_after - usdt_before
                                 log(f"📊 Guadagno reale stimato per {symbol}: {delta:.2f} USDT (Saldo diff.)")
                                 log_trade_to_google(symbol, entry["entry_price"], current_price, pnl, "SL", "Stop Loss", usdt_before, usdt_after, delta)
                                 open_positions.discard(symbol)
