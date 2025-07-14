@@ -52,7 +52,10 @@ TP_FACTOR = 2.0     # TP = entry + 2 * ATR
 SL_FACTOR = 1.5     # SL = entry - 1.5 * ATR
 
 # TRAILING_ACTIVATION_THRESHOLD = 0.02  # attiva il trailing SL sopra +2%
-TRAILING_ACTIVATION_THRESHOLD = 0.001  # attiva il trailing SL sopra +2%
+
+TRAILING_ACTIVATION_THRESHOLD = 0.001
+TRAILING_SL_BUFFER = 0.007
+
 TRAILING_DISTANCE = 0.02              # trailing SL = 2% sotto il massimo
 INITIAL_STOP_LOSS_PCT = 0.02          # SL iniziale = 2% sotto l’entry
 
@@ -643,6 +646,34 @@ if __name__ == "__main__":
 
             signal, strategy, price = analyze_asset(symbol)
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
+            # 🔄 Controllo trailing per le posizioni aperte
+            for symbol in list(open_positions):
+                if symbol not in position_data:
+                    continue
+
+                entry = position_data[symbol]
+                current_price = get_current_price(symbol)
+                if not current_price:
+                    continue
+
+                log(f"💡 Controllo trailing per {symbol} → Prezzo attuale: {current_price:.6f} | Entry: {entry['entry_price']:.6f}")
+                log(f"🧪 Condizione trailing: attivo={entry['trailing_active']} | threshold hit: {current_price >= entry['entry_price'] * (1 + TRAILING_ACTIVATION_THRESHOLD)}")
+
+                # ✅ Attiva trailing se superata soglia
+                if not entry.get("trailing_active") and current_price >= entry["entry_price"] * (1 + TRAILING_ACTIVATION_THRESHOLD):
+                    entry["trailing_active"] = True
+                    log(f"🔛 Trailing Stop attivato per {symbol} → Prezzo: {current_price:.6f}")
+
+                # 🔁 Aggiorna SL se trailing attivo e prezzo cresce
+                if entry.get("trailing_active"):
+                    old_pmax = entry["p_max"]
+                    if current_price > old_pmax:
+                        entry["p_max"] = current_price
+                        new_sl = current_price * (1 - TRAILING_SL_BUFFER)
+                        if new_sl > entry["sl"]:
+                            log(f"📉 SL aggiornato per {symbol}: nuovo SL: {new_sl:.6f} (da precedente: {entry['sl']:.6f})")
+                            entry["sl"] = new_sl
+
             if signal == "entry":
                 # Cooldown post-uscita
                 cooldown_duration = 3600
