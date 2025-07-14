@@ -84,33 +84,51 @@ def get_last_price(symbol: str) -> Optional[float]:
     return None
 
 def market_buy(symbol: str, usdt: float):
-    endpoint = f"{BYBIT_BASE_URL}/v5/order/create"
-    ts = str(int(time.time() * 1000))
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Buy",
-        "orderType": "Market",
-        "quoteQty": f"{usdt:.2f}"
-    }
-    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
+    price = get_last_price(symbol)
+    if not price:
+        log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
+        return None
+
+    qty_step, precision = get_instrument_info(symbol)
     try:
-        resp = requests.post(endpoint, headers=headers, data=body_json)
+        # Calcolo quantità in coin basata su USDT disponibile
+        dec_usdt = Decimal(str(usdt))
+        dec_price = Decimal(str(price))
+        qty = (dec_usdt / dec_price).quantize(Decimal(str(qty_step)), rounding=ROUND_DOWN)
+
+        if qty <= 0:
+            log(f"❌ Quantità calcolata nulla per {symbol}")
+            return None
+
+        qty_str = str(int(qty)) if precision == 0 else f"{qty:.{precision}f}".rstrip('0').rstrip('.')
+
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": "Buy",
+            "orderType": "Market",
+            "qty": qty_str
+        }
+
+        ts = str(int(time.time() * 1000))
+        body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+        payload = f"{ts}{KEY}5000{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-SIGN-TYPE": "2",
+            "Content-Type": "application/json"
+        }
+
+        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"BUY BODY: {body_json}")
         log(f"RESPONSE: {resp.status_code} {resp.json()}")
         return resp
     except Exception as e:
-        log(f"Errore invio ordine BUY: {e}")
+        log(f"❌ Errore invio ordine BUY per {symbol}: {e}")
         return None
 
 def get_instrument_info(symbol: str):
