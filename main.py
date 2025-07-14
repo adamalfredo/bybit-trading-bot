@@ -490,6 +490,11 @@ if __name__ == "__main__":
                 if current_price:
                     entry = position_data[symbol]
 
+                    # 🔛 Attiva il trailing stop se superata la soglia del +2%
+                    if not entry.get("trailing_active") and current_price >= entry["entry_price"] * (1 + TRAILING_ACTIVATION_THRESHOLD):
+                        entry["trailing_active"] = True
+                        log(f"🔛 Trailing Stop attivato per {symbol} → Prezzo: {current_price:.4f}")
+
                     # 🎯 TAKE PROFIT
                     if "tp" in entry and current_price >= entry["tp"]:
                         log(f"🎯 Take Profit raggiunto per {symbol} → {current_price:.4f}")
@@ -587,8 +592,14 @@ if __name__ == "__main__":
 
                         if current_price > p_max:
                             entry["p_max"] = current_price
-                            entry["sl"] = calculate_stop_loss(entry["entry_price"], current_price)
+                            entry["sl"] = calculate_stop_loss(
+                                entry["entry_price"],
+                                current_price,
+                                entry["p_max"],
+                                entry["trailing_active"]
+                            )
                             log(f"📈 Nuovo massimo per {symbol}: {current_price:.4f} → SL aggiornato a {entry['sl']:.4f}")
+                            notify_telegram(f"🔛 Trailing Stop attivato per {symbol} sopra +2% — Prezzo: {current_price:.4f}")
 
                         elif current_price <= entry["sl"]:
                             log(f"🔁 Trailing Stop attivato per {symbol} → {current_price:.4f}")
@@ -757,19 +768,13 @@ if __name__ == "__main__":
                         "sl": sl,
                         "qty": qty_acquistata,
                         "entry_cost": ORDER_USDT,
-                        "entry_time": time.time()
+                        "entry_time": time.time(),
+                        "trailing_active": False,
+                        "p_max": entry_price
                     }
 
                     log(f"📊 ATR per {symbol}: {atr_value:.6f} → TP: {tp:.4f}, SL: {sl:.4f} (TPx: {tp_factor}, SLx: {sl_factor})")
                     notify_trade_result(symbol, "entry", price, strategy)
-
-                    # Salva i dati per trailing stop
-                    position_data[symbol] = {
-                        "entry_price": price,
-                        "trailing_active": False,
-                        "p_max": price
-                    }
-
                 else:
                     log(f"❌ Acquisto fallito per {symbol}, rimuovo da open_positions")
                     open_positions.discard(symbol)  # <-- rimuovilo se l’ordine fallisce
