@@ -489,6 +489,8 @@ if __name__ == "__main__":
                 current_price = get_last_price(symbol)
                 if current_price:
                     entry = position_data[symbol]
+
+                    # 🎯 TAKE PROFIT
                     if "tp" in entry and current_price >= entry["tp"]:
                         log(f"🎯 Take Profit raggiunto per {symbol} → {current_price:.4f}")
                         qty = get_free_qty(symbol)
@@ -534,7 +536,8 @@ if __name__ == "__main__":
                                 position_data.pop(symbol, None)
                                 cooldown[symbol] = time.time()
 
-                    elif "sl" in entry and current_price <= entry["sl"]:
+                    # 🛑 STOP LOSS
+                    if "sl" in entry and current_price <= entry["sl"]:
                         log(f"🛑 Stop Loss attivato per {symbol} → {current_price:.4f}")
                         qty = get_free_qty(symbol)
                         if qty > 0:
@@ -577,6 +580,54 @@ if __name__ == "__main__":
                                 last_exit_time[symbol] = time.time()
                                 position_data.pop(symbol, None)
                                 cooldown[symbol] = time.time()
+
+                    # 🔁 TRAILING STOP DINAMICO
+                    if entry.get("trailing_active"):
+                        p_max = entry.get("p_max", entry["entry_price"])
+
+                        if current_price > p_max:
+                            entry["p_max"] = current_price
+                            entry["sl"] = calculate_stop_loss(entry["entry_price"], current_price)
+                            log(f"📈 Nuovo massimo per {symbol}: {current_price:.4f} → SL aggiornato a {entry['sl']:.4f}")
+
+                        elif current_price <= entry["sl"]:
+                            log(f"🔁 Trailing Stop attivato per {symbol} → {current_price:.4f}")
+                            qty = get_free_qty(symbol)
+                            if qty > 0:
+                                usdt_before = get_usdt_balance()
+                                resp = market_sell(symbol, qty)
+                                if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+                                    entry_price = entry["entry_price"]
+                                    entry_cost = entry.get("entry_cost", ORDER_USDT)
+                                    qty = entry.get("qty", get_free_qty(symbol))
+
+                                    current_price = round(current_price, 6)
+                                    exit_value = current_price * qty
+                                    delta = exit_value - entry_cost
+                                    pnl = (delta / entry_cost) * 100
+
+                                    log(f"📉 Vendita per trailing stop: {symbol} → SL: {entry['sl']:.4f}, Prezzo attuale: {current_price:.4f}")
+                                    notify_telegram(
+                                        f"🔁 Trailing Stop attivato per {symbol} a {current_price:.4f}\nProfitto stimato: {pnl:.2f}%"
+                                    )
+                                    log(f"💰 Incassato: {exit_value:.2f} USDT | Investito: {entry_cost:.2f} | Delta: {delta:.2f}")
+
+                                    log_trade_to_google(
+                                        symbol,
+                                        entry_price,
+                                        current_price,
+                                        pnl,
+                                        "TSL",
+                                        "Trailing Stop",
+                                        entry_cost,
+                                        exit_value,
+                                        delta
+                                    )
+
+                                    open_positions.discard(symbol)
+                                    last_exit_time[symbol] = time.time()
+                                    position_data.pop(symbol, None)
+                                    cooldown[symbol] = time.time()
 
             signal, strategy, price = analyze_asset(symbol)
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
