@@ -11,6 +11,11 @@ from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD, ADXIndicator, SMAIndicator
 from typing import Optional
 
+# ✅ Logger
+
+def log(msg):
+    print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
+
 # ✅ ENV VARS
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -160,6 +165,5 @@ if __name__ == "__main__":
                     signal = "exit"
                     strategy = "Stop Loss"
 
-        # ✅ Pausa di sicurezza prima della prossima iterazione
         time.sleep(1)
         time.sleep(INTERVAL_MINUTES * 60)
