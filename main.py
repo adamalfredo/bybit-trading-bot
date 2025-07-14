@@ -3,7 +3,7 @@ import time
 import hmac
 import json
 import hashlib
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 import requests
 import pandas as pd
 from ta.volatility import BollingerBands, AverageTrueRange
