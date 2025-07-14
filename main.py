@@ -51,7 +51,8 @@ ATR_WINDOW = 14
 TP_FACTOR = 2.0     # TP = entry + 2 * ATR
 SL_FACTOR = 1.5     # SL = entry - 1.5 * ATR
 
-TRAILING_ACTIVATION_THRESHOLD = 0.02  # attiva il trailing SL sopra +2%
+# TRAILING_ACTIVATION_THRESHOLD = 0.02  # attiva il trailing SL sopra +2%
+TRAILING_ACTIVATION_THRESHOLD = 0.001  # attiva il trailing SL sopra +2%
 TRAILING_DISTANCE = 0.02              # trailing SL = 2% sotto il massimo
 INITIAL_STOP_LOSS_PCT = 0.02          # SL iniziale = 2% sotto l’entry
 
