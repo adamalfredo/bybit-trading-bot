@@ -14,6 +14,10 @@ from ta.trend import SMAIndicator
 from ta.trend import EMAIndicator, MACD, ADXIndicator
 from typing import Optional
 
+# NON usare load_dotenv() su Railway!
+# from dotenv import load_dotenv
+# load_dotenv()
+
 # Le variabili sono caricate automaticamente da Railway
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -27,7 +31,11 @@ BYBIT_BASE_URL = (
 )
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 ORDER_USDT = 50
-
+# ASSETS = [
+#     "DOGEUSDT", "BTCUSDT", "AVAXUSDT", "SOLUSDT", "ETHUSDT", "LINKUSDT",
+#     "ARBUSDT", "OPUSDT", "LTCUSDT", "XRPUSDT",
+#     "TONUSDT", "MATICUSDT", "MNTUSDT"
+# ]
 ASSETS = [
     # ⚡️ Aggressive (alta volatilità, pump, meme, narrativa)
     "WIFUSDT", "PEPEUSDT", "BONKUSDT",
@@ -50,13 +58,6 @@ COOLDOWN_MINUTES = 60  # Durata del cooldown in minuti (modificabile)
 ATR_WINDOW = 14
 TP_FACTOR = 2.0     # TP = entry + 2 * ATR
 SL_FACTOR = 1.5     # SL = entry - 1.5 * ATR
-
-# TRAILING_ACTIVATION_THRESHOLD = 0.02  # attiva il trailing SL sopra +2%
-TRAILING_ACTIVATION_THRESHOLD = 0.001
-TRAILING_SL_BUFFER = 0.007
-
-TRAILING_DISTANCE = 0.02              # trailing SL = 2% sotto il massimo
-INITIAL_STOP_LOSS_PCT = 0.02          # SL iniziale = 2% sotto l’entry
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
@@ -277,13 +278,15 @@ def analyze_asset(symbol: str):
         if close is None:
             return None, None, None
 
-        # Indicatori
+        # Indicatori esistenti
         bb = BollingerBands(close=close)
         df["bb_upper"] = bb.bollinger_hband()
         df["bb_lower"] = bb.bollinger_lband()
         df["rsi"] = RSIIndicator(close=close).rsi()
         df["sma20"] = SMAIndicator(close=close, window=20).sma_indicator()
         df["sma50"] = SMAIndicator(close=close, window=50).sma_indicator()
+
+        # Nuovi indicatori
         df["ema20"] = EMAIndicator(close=close, window=20).ema_indicator()
         df["ema50"] = EMAIndicator(close=close, window=50).ema_indicator()
         macd = MACD(close=close)
@@ -347,7 +350,7 @@ from google.oauth2.service_account import Credentials
 
 # Config
 SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"  # copia da URL: https://docs.google.com/spreadsheets/d/<QUESTO>/edit
-SHEET_NAME = "Foglio1"
+SHEET_NAME = "Foglio1"  # o quello che hai scelto
 
 # Setup una sola volta
 def setup_gspread():
@@ -357,7 +360,7 @@ def setup_gspread():
     return client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
 
 # Salva una riga nel foglio
-def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type, usdt_before=None, usdt_after=None, delta=None):
+def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
     try:
         import gspread
         from google.oauth2.service_account import Credentials
@@ -387,10 +390,7 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type, usd
             round(exit, 6),
             f"{pnl_pct:.2f}%",
             strategy,
-            result_type,
-            f"{usdt_before:.2f}" if usdt_before is not None else "",
-            f"{usdt_after:.2f}" if usdt_after is not None else "",
-            f"{delta:.2f}" if delta is not None else ""
+            result_type
         ])
     except Exception as e:
         log(f"Errore log su Google Sheets: {e}")
@@ -423,16 +423,11 @@ def get_free_qty(symbol: str) -> float:
 
     try:
         resp = requests.get(url, headers=headers, params=params)
-
-        try:
-            data = resp.json()
-        except ValueError:
-            log(f"❗ Errore: risposta non in formato JSON da Bybit per {symbol}: {resp.text}")
-            return []
+        log(f"❗ Risposta grezza da Bybit per {symbol}: {resp.text}")
+        data = resp.json()
 
         if "result" not in data or "list" not in data["result"]:
-            log(f"❗ Warning: struttura inattesa da Bybit per {symbol}: {resp.text}")
-            return []
+            raise KeyError("'list' mancante nella risposta API")
 
         coin_list = data["result"]["list"][0].get("coin", [])
 
@@ -457,20 +452,6 @@ def get_free_qty(symbol: str) -> float:
         log(f"❌ Errore nel recupero saldo per {symbol}: {e}")
         return 0.0
 
-# Nuova funzione per calcolare stop loss dinamico (da aggiungere nel file, sezione utility)
-def calculate_stop_loss(entry_price, current_price, p_max, trailing_active):
-    """
-    Ritorna il valore di stop loss da applicare:
-    - Stop Loss iniziale se il trailing non è ancora attivo
-    - Altrimenti trailing stop basato su P_max
-    """
-    if not trailing_active:
-        # SL iniziale: sotto il prezzo di ingresso
-        return entry_price * (1 - INITIAL_STOP_LOSS_PCT)
-    else:
-        # SL trailing: sotto il massimo raggiunto
-        return p_max * (1 - TRAILING_DISTANCE)
-
 open_positions = set()
 # Mappa delle posizioni aperte: salva entry, TP e SL
 position_data = {}  # es: { "BTCUSDT": {"entry_price": 60000, "tp": 61200, "sl": 59100} }
@@ -492,224 +473,52 @@ if __name__ == "__main__":
                 current_price = get_last_price(symbol)
                 if current_price:
                     entry = position_data[symbol]
-
-                    # 🔛 Attiva il trailing stop se superata la soglia del +2%
-                    if not entry.get("trailing_active") and current_price >= entry["entry_price"] * (1 + TRAILING_ACTIVATION_THRESHOLD):
-                        entry["trailing_active"] = True
-                        log(f"🔛 Trailing Stop attivato per {symbol} → Prezzo: {current_price:.4f}")
-
-                    # 🎯 TAKE PROFIT
-                    if "tp" in entry and current_price >= entry["tp"]:
+                    if current_price >= entry["tp"]:
                         log(f"🎯 Take Profit raggiunto per {symbol} → {current_price:.4f}")
                         qty = get_free_qty(symbol)
                         if qty > 0:
                             resp = market_sell(symbol, qty)
                             if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                                 log(f"✅ Vendita TP per {symbol}")
-
-                                # Recupera i dati salvati all'acquisto
-                                entry_price = entry["entry_price"]
-                                entry_cost = entry.get("entry_cost", ORDER_USDT)
-                                qty = entry.get("qty", get_free_qty(symbol))  # fallback nel caso qty non sia stato salvato
-
-                                # Calcoli realistici
-                                current_price = round(current_price, 6)
-                                exit_value = current_price * qty
-                                delta = exit_value - entry_cost
-                                pnl = (delta / entry_cost) * 100
-
-                                # Log e notifiche
+                                pnl = (current_price - entry["entry_price"]) / entry["entry_price"] * 100
                                 log(f"📈 Profitto stimato per {symbol}: +{pnl:.2f}%")
                                 notify_telegram(
                                     f"🎯 Take Profit raggiunto per {symbol} a {current_price:.4f}\nProfitto stimato: +{pnl:.2f}%"
                                 )
-                                log(f"💰 Incassato: {exit_value:.2f} USDT | Investito: {entry_cost:.2f} | Delta: {delta:.2f}")
-
-                                # Log su Google Sheet
-                                log_trade_to_google(
-                                    symbol,
-                                    entry_price,
-                                    current_price,
-                                    pnl,
-                                    "TP",
-                                    "Take Profit",
-                                    entry_cost,
-                                    exit_value,
-                                    delta
-                                )
-
-                                # Pulisci stato
+                                log_trade_to_google(symbol, entry["entry_price"], current_price, pnl, "TP", "Take Profit")
                                 open_positions.discard(symbol)
                                 last_exit_time[symbol] = time.time()
                                 position_data.pop(symbol, None)
                                 cooldown[symbol] = time.time()
-
-                    # 🛑 STOP LOSS
-                    if "sl" in entry and current_price <= entry["sl"]:
+                    elif current_price <= entry["sl"]:
                         log(f"🛑 Stop Loss attivato per {symbol} → {current_price:.4f}")
                         qty = get_free_qty(symbol)
                         if qty > 0:
-                            usdt_before = get_usdt_balance()  # ✅ AGGIUNGI QUESTA RIGA
                             resp = market_sell(symbol, qty)
                             if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
-                                # Recupera dati della posizione
-                                entry_price = entry["entry_price"]
-                                entry_cost = entry.get("entry_cost", ORDER_USDT)
-                                qty = entry.get("qty", get_free_qty(symbol))  # fallback se qty mancante
-
-                                # Calcoli realistici
-                                current_price = round(current_price, 6)
-                                exit_value = current_price * qty
-                                delta = exit_value - entry_cost
-                                pnl = (delta / entry_cost) * 100
-
-                                # Log e notifiche
+                                pnl = (current_price - entry["entry_price"]) / entry["entry_price"] * 100
                                 log(f"📉 Perdita stimata per {symbol}: {pnl:.2f}%")
                                 notify_telegram(
                                     f"🛑 Stop Loss attivato per {symbol} a {current_price:.4f}\nPerdita stimata: {pnl:.2f}%"
                                 )
-                                log(f"💰 Incassato: {exit_value:.2f} USDT | Investito: {entry_cost:.2f} | Delta: {delta:.2f}")
-
-                                # Log su Google Sheet
-                                log_trade_to_google(
-                                    symbol,
-                                    entry_price,
-                                    current_price,
-                                    pnl,
-                                    "SL",
-                                    "Stop Loss",
-                                    entry_cost,
-                                    exit_value,
-                                    delta
-                                )
-
-                                # Pulisci stato
+                                log_trade_to_google(symbol, entry["entry_price"], current_price, pnl, "SL", "Stop Loss")
                                 open_positions.discard(symbol)
                                 last_exit_time[symbol] = time.time()
                                 position_data.pop(symbol, None)
                                 cooldown[symbol] = time.time()
 
-                    # 🔁 TRAILING STOP DINAMICO
-                    if entry.get("trailing_active"):
-                        p_max = entry.get("p_max", entry["entry_price"])
-
-                        if current_price > p_max:
-                            entry["p_max"] = current_price
-                            entry["sl"] = calculate_stop_loss(
-                                entry["entry_price"],
-                                current_price,
-                                entry["p_max"],
-                                entry["trailing_active"]
-                            )
-                            log(f"📈 Nuovo massimo per {symbol}: {current_price:.4f} → SL aggiornato a {entry['sl']:.4f}")
-                            notify_telegram(f"🔛 Trailing Stop attivato per {symbol} sopra +2% — Prezzo: {current_price:.4f}")
-
-                        elif current_price <= entry["sl"]:
-                            log(f"🔁 Trailing Stop attivato per {symbol} → {current_price:.4f}")
-                            qty = get_free_qty(symbol)
-                            if qty > 0:
-                                usdt_before = get_usdt_balance()
-                                resp = market_sell(symbol, qty)
-                                if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
-                                    entry_price = entry["entry_price"]
-                                    entry_cost = entry.get("entry_cost", ORDER_USDT)
-                                    qty = entry.get("qty", get_free_qty(symbol))
-
-                                    current_price = round(current_price, 6)
-                                    exit_value = current_price * qty
-                                    delta = exit_value - entry_cost
-                                    pnl = (delta / entry_cost) * 100
-
-                                    log(f"📉 Vendita per trailing stop: {symbol} → SL: {entry['sl']:.4f}, Prezzo attuale: {current_price:.4f}")
-                                    notify_telegram(
-                                        f"🔁 Trailing Stop attivato per {symbol} a {current_price:.4f}\nProfitto stimato: {pnl:.2f}%"
-                                    )
-                                    log(f"💰 Incassato: {exit_value:.2f} USDT | Investito: {entry_cost:.2f} | Delta: {delta:.2f}")
-
-                                    log_trade_to_google(
-                                        symbol,
-                                        entry_price,
-                                        current_price,
-                                        pnl,
-                                        "TSL",
-                                        "Trailing Stop",
-                                        entry_cost,
-                                        exit_value,
-                                        delta
-                                    )
-
-                                    open_positions.discard(symbol)
-                                    last_exit_time[symbol] = time.time()
-                                    position_data.pop(symbol, None)
-                                    cooldown[symbol] = time.time()
-
             signal, strategy, price = analyze_asset(symbol)
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
-            # 🔄 Controllo trailing per le posizioni aperte
-            if symbol in open_positions and symbol in position_data:
-                entry = position_data[symbol]
-                current_price = price  # usa il prezzo appena analizzato
-                if not current_price:
-                    continue
-
-                log(f"💡 Controllo trailing per {symbol} → Prezzo attuale: {current_price:.6f} | Entry: {entry['entry_price']:.6f}")
-                log(f"🧪 Condizione trailing: attivo={entry['trailing_active']} | threshold hit: {current_price >= entry['entry_price'] * (1 + TRAILING_ACTIVATION_THRESHOLD)}")
-
-                # ✅ Attiva trailing se superata soglia
-                if not entry.get("trailing_active") and current_price >= entry["entry_price"] * (1 + TRAILING_ACTIVATION_THRESHOLD):
-                    entry["trailing_active"] = True
-                    log(f"🔛 Trailing Stop attivato per {symbol} → Prezzo: {current_price:.6f}")
-
-                # 🔁 Aggiorna SL se trailing attivo e prezzo cresce
-                if entry.get("trailing_active"):
-                    old_pmax = entry["p_max"]
-                    if current_price > old_pmax:
-                        entry["p_max"] = current_price
-                        new_sl = current_price * (1 - TRAILING_SL_BUFFER)
-                        if new_sl > entry["sl"]:
-                            log(f"📉 SL aggiornato per {symbol}: nuovo SL: {new_sl:.6f} (da precedente: {entry['sl']:.6f})")
-                            entry["sl"] = new_sl
-
-            # 🔄 Controllo trailing per le posizioni aperte
-            for symbol in list(open_positions):
-                if symbol not in position_data:
-                    continue
-
-                entry = position_data[symbol]
-                current_price = get_current_price(symbol)
-                if not current_price:
-                    continue
-
-                log(f"💡 Controllo trailing per {symbol} → Prezzo attuale: {current_price:.6f} | Entry: {entry['entry_price']:.6f}")
-                log(f"🧪 Condizione trailing: attivo={entry['trailing_active']} | threshold hit: {current_price >= entry['entry_price'] * (1 + TRAILING_ACTIVATION_THRESHOLD)}")
-
-                # ✅ Attiva trailing se superata soglia
-                if not entry.get("trailing_active") and current_price >= entry["entry_price"] * (1 + TRAILING_ACTIVATION_THRESHOLD):
-                    entry["trailing_active"] = True
-                    log(f"🔛 Trailing Stop attivato per {symbol} → Prezzo: {current_price:.6f}")
-
-                # 🔁 Aggiorna SL se trailing attivo e prezzo cresce
-                if entry.get("trailing_active"):
-                    old_pmax = entry["p_max"]
-                    if current_price > old_pmax:
-                        entry["p_max"] = current_price
-                        new_sl = current_price * (1 - TRAILING_SL_BUFFER)
-                        if new_sl > entry["sl"]:
-                            log(f"📉 SL aggiornato per {symbol}: nuovo SL: {new_sl:.6f} (da precedente: {entry['sl']:.6f})")
-                            entry["sl"] = new_sl
-
-            # 🟡 Controllo trailing SL dinamico
-            if symbol in open_positions and symbol in position_data:
-                entry = position_data[symbol]
-                if entry.get("trailing_active") and price < entry["sl"]:
-                    log(f"🚨 SL dinamico colpito per {symbol} → Prezzo attuale: {price:.6f} < SL: {entry['sl']:.6f}")
-                    signal = "exit"
-                    strategy = "Trailing Stop"
-
             if signal == "entry":
-                # Cooldown post-uscita
-                cooldown_duration = 3600
+                # Evita rientri troppo rapidi (cooldown)
+                cooldown_duration = 3600  # 1 ora
                 if symbol in last_exit_time and time.time() - last_exit_time[symbol] < cooldown_duration:
+                    log(f"⏳ Cooldown attivo per {symbol}, nessun nuovo ingresso")
+                    continue
+
+                # Verifica cooldown
+                last_exit = cooldown.get(symbol)
+                if last_exit and (time.time() - last_exit) < COOLDOWN_MINUTES * 60:
                     log(f"⏳ Cooldown attivo per {symbol}, nessun nuovo ingresso")
                     continue
 
@@ -717,27 +526,33 @@ if __name__ == "__main__":
                     log(f"⏩ Acquisto ignorato per {symbol}: già in posizione")
                     continue
 
-                # Filtri qualità
+                # FILTRI DI QUALITÀ
                 df = fetch_history(symbol)
                 if df is None:
                     continue
-
+                
                 close = find_close_column(df)
                 if close is None:
                     log(f"[!] Colonna 'Close' non trovata per {symbol}")
                     continue
-
                 df["rsi"] = RSIIndicator(close=close).rsi()
                 df["ema20"] = EMAIndicator(close=close, window=20).ema_indicator()
                 df["adx"] = ADXIndicator(high=df["High"], low=df["Low"], close=close).adx()
+
+                # Aggiungi anche MACD per evitare KeyError
                 macd = MACD(close=close)
                 df["macd"] = macd.macd()
                 df["macd_signal"] = macd.macd_signal()
-                df.dropna(subset=["rsi", "ema20", "adx", "macd", "macd_signal"], inplace=True)
+
+                df.dropna(subset=[
+                    "rsi", "ema20", "adx", "macd", "macd_signal"
+                ], inplace=True)
+
                 last = df.iloc[-1]
 
                 adx_threshold = 18 if symbol in VOLATILE_ASSETS else 22
-                if last["adx"] <= adx_threshold:
+
+                if last["adx"] < adx_threshold:
                     log(f"❌ Segnale debole per {symbol} → ADX {last['adx']:.2f} < {adx_threshold}")
                     continue
 
@@ -747,71 +562,58 @@ if __name__ == "__main__":
                 if price < last["ema20"]:
                     log(f"❌ Prezzo sotto EMA20 per {symbol} → no acquisto")
                     continue
-                if last["macd"] <= last["macd_signal"]:
-                    log(f"❌ MACD non confermato per {symbol} → MACD {last['macd']:.4f} <= Signal {last['macd_signal']:.4f}")
-                    continue
-                if not is_bullish_breakout_confirmed(df):
-                    log(f"❌ Breakout non confermato visivamente per {symbol}")
-                    continue
 
-                balance = get_free_qty(symbol)
-                if balance and price and (balance * price) > (ORDER_USDT * 2.0):
-                    log(f"⛔️ Hai già una posizione rilevante su {symbol} → {balance:.4f} ≈ {balance * price:.2f} USDT → acquisto evitato")
-                    continue
-
-                usdt_before = get_usdt_balance()
-                log(f"💰 Saldo USDT prima dell’acquisto di {symbol}: {usdt_before:.2f}")
+                # Saldo sufficiente?
                 usdt_balance = get_usdt_balance()
                 if usdt_balance < ORDER_USDT:
                     log(f"⏩ Acquisto saltato per {symbol}: saldo USDT ({usdt_balance:.2f}) insufficiente")
                     continue
 
-                open_positions.add(symbol)  # ⛓️ Protezione contro doppio acquisto
+                # 🔍 Filtri aggiuntivi per confermare il segnale
+                # MACD deve essere sopra la linea signal
+                if last["macd"] <= last["macd_signal"]:
+                    log(f"❌ MACD non confermato per {symbol} → MACD {last['macd']:.4f} <= Signal {last['macd_signal']:.4f}")
+                    continue
+
+                # Conferma breakout: candela verde con corpo significativo
+                if not is_bullish_breakout_confirmed(df):
+                    log(f"❌ Breakout non confermato visivamente per {symbol}")
+                    continue
+
+                # ✅ BLOCCO ANTI-OVERTRADING
+                balance = get_free_qty(symbol)
+                if balance and price and (balance * price) > (ORDER_USDT * 2.0):
+                    log(f"⛔️ Hai già una posizione rilevante su {symbol} → {balance:.4f} ≈ {balance * price:.2f} USDT → acquisto evitato")
+                    continue
+
+                # Ordine effettivo
                 resp = market_buy(symbol, ORDER_USDT)
                 if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                     log(f"✅ Acquisto completato per {symbol}")
-                    entry_price = price
+                    open_positions.add(symbol)
 
+                    # Salva entry price, TP, SL
+                    entry_price = price
+                    # Calcola indicatori
                     atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=14)
                     df["atr"] = atr.average_true_range()
+
+                    # Elimina solo righe con valori NaN *dopo* il calcolo
                     df.dropna(subset=["atr", "rsi", "macd", "macd_signal", "ema20", "adx"], inplace=True)
+
+                    # Poi prendi l'ultima
                     last = df.iloc[-1]
+
+                    # E solo ora accedi a:
                     atr_value = last["atr"]
 
-                    if last["rsi"] > 65:
-                        tp_factor = 1.5; sl_factor = 1.0
-                    elif last["rsi"] > 55:
-                        tp_factor = 2.0; sl_factor = 1.2
-                    else:
-                        tp_factor = 2.5; sl_factor = 1.5
-
-                    if symbol in VOLATILE_ASSETS:
-                        tp_factor += 0.5
-                        sl_factor = max(sl_factor - 0.2, 0.8)
-
-                    tp = entry_price + (atr_value * tp_factor)
-                    sl = entry_price - (atr_value * sl_factor)
-                    qty_acquistata = get_free_qty(symbol)
-
-                    position_data[symbol] = {
-                        "entry_price": entry_price,
-                        "tp": tp,
-                        "sl": sl,
-                        "qty": qty_acquistata,
-                        "entry_cost": ORDER_USDT,
-                        "entry_time": time.time(),
-                        "trailing_active": False,
-                        "p_max": entry_price
-                    }
-
-                    log(f"📌 Posizione attiva su {symbol}, entry: {entry_price:.6f}, TP: {tp:.6f}, SL: {sl:.6f}")
-                    log(f"📊 ATR per {symbol}: {atr_value:.6f} → TP: {tp:.4f}, SL: {sl:.4f} (TPx: {tp_factor}, SLx: {sl_factor})")
+                    tp = entry_price + (atr_value * TP_FACTOR)
+                    sl = entry_price - (atr_value * SL_FACTOR)
+                    position_data[symbol] = {"entry_price": entry_price, "tp": tp, "sl": sl}
+                    log(f"📊 ATR per {symbol}: {atr_value:.6f} → TP: {tp:.4f}, SL: {sl:.4f}")
                     notify_trade_result(symbol, "entry", price, strategy)
-
                 else:
-                    log(f"❌ Acquisto fallito per {symbol}, rimuovo da open_positions")
-                    open_positions.discard(symbol)
-
+                    log(f"❌ Acquisto fallito per {symbol}, nessuna notifica inviata")
 
             elif signal == "exit":
                 qty = get_free_qty(symbol)
@@ -819,40 +621,13 @@ if __name__ == "__main__":
                     log(f"⏩ Vendita saltata per {symbol}: saldo nullo o insufficiente")
                     continue
 
-                usdt_before = get_usdt_balance()
                 resp = market_sell(symbol, qty)
                 if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
-                    usdt_after = get_usdt_balance()
-
-                    # Recupera dati della posizione (fallback se mancano)
-                    entry = position_data.get(symbol, {})
-                    entry_price = entry.get("entry_price", price)
-                    entry_cost = entry.get("entry_cost", ORDER_USDT)
-                    qty = entry.get("qty", qty)
-
-                    # Calcoli realistici
-                    price = round(price, 6)
-                    exit_value = price * qty
-                    delta = exit_value - entry_cost
-                    pnl = (delta / entry_cost) * 100
-
                     log(f"✅ Vendita completata per {symbol}")
                     notify_trade_result(symbol, "exit", price, strategy)
-                    log(f"📊 Profitto netto stimato: {pnl:.2f}% | Delta: {delta:.2f} USDT")
-                    log(f"💰 Incassato: {exit_value:.2f} USDT | Investito: {entry_cost:.2f}")
-
-                    log_trade_to_google(
-                        symbol,
-                        entry_price,
-                        price,
-                        pnl,
-                        strategy,
-                        "Exit Signal",
-                        entry_cost,
-                        exit_value,
-                        delta
-                    )
-
+                    entry_price = position_data.get(symbol, {}).get("entry_price", price)
+                    pnl = (price - entry_price) / entry_price * 100
+                    log_trade_to_google(symbol, entry_price, price, pnl, strategy, "Exit Signal")
                     open_positions.discard(symbol)
                     last_exit_time[symbol] = time.time()
                     position_data.pop(symbol, None)
@@ -860,6 +635,7 @@ if __name__ == "__main__":
                 else:
                     log(f"❌ Vendita fallita per {symbol}, nessuna notifica inviata")
 
-        # pausa di sicurezza sleep(1) per evitare ciclo troppo veloce se tutto salta
+        # Aggiungi pausa di sicurezza per evitare ciclo troppo veloce se tutto salta
         time.sleep(1)
+
         time.sleep(INTERVAL_MINUTES * 60)
