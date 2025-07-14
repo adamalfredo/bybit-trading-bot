@@ -644,15 +644,9 @@ if __name__ == "__main__":
             signal, strategy, price = analyze_asset(symbol)
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
             if signal == "entry":
-                # Evita rientri troppo rapidi (cooldown)
-                cooldown_duration = 3600  # 1 ora
+                # Cooldown post-uscita
+                cooldown_duration = 3600
                 if symbol in last_exit_time and time.time() - last_exit_time[symbol] < cooldown_duration:
-                    log(f"⏳ Cooldown attivo per {symbol}, nessun nuovo ingresso")
-                    continue
-
-                # Verifica cooldown
-                last_exit = cooldown.get(symbol)
-                if last_exit and (time.time() - last_exit) < COOLDOWN_MINUTES * 60:
                     log(f"⏳ Cooldown attivo per {symbol}, nessun nuovo ingresso")
                     continue
 
@@ -660,32 +654,26 @@ if __name__ == "__main__":
                     log(f"⏩ Acquisto ignorato per {symbol}: già in posizione")
                     continue
 
-                # FILTRI DI QUALITÀ
+                # Filtri qualità
                 df = fetch_history(symbol)
                 if df is None:
                     continue
-                
+
                 close = find_close_column(df)
                 if close is None:
                     log(f"[!] Colonna 'Close' non trovata per {symbol}")
                     continue
+
                 df["rsi"] = RSIIndicator(close=close).rsi()
                 df["ema20"] = EMAIndicator(close=close, window=20).ema_indicator()
                 df["adx"] = ADXIndicator(high=df["High"], low=df["Low"], close=close).adx()
-
-                # Aggiungi anche MACD per evitare KeyError
                 macd = MACD(close=close)
                 df["macd"] = macd.macd()
                 df["macd_signal"] = macd.macd_signal()
-
-                df.dropna(subset=[
-                    "rsi", "ema20", "adx", "macd", "macd_signal"
-                ], inplace=True)
-
+                df.dropna(subset=["rsi", "ema20", "adx", "macd", "macd_signal"], inplace=True)
                 last = df.iloc[-1]
 
                 adx_threshold = 18 if symbol in VOLATILE_ASSETS else 22
-
                 if last["adx"] <= adx_threshold:
                     log(f"❌ Segnale debole per {symbol} → ADX {last['adx']:.2f} < {adx_threshold}")
                     continue
@@ -696,73 +684,52 @@ if __name__ == "__main__":
                 if price < last["ema20"]:
                     log(f"❌ Prezzo sotto EMA20 per {symbol} → no acquisto")
                     continue
-
-                # Saldo sufficiente?
-                usdt_before = get_usdt_balance()
-                log(f"💰 Saldo USDT prima dell’acquisto di {symbol}: {usdt_before:.2f}")
-
-                usdt_balance = get_usdt_balance()
-                if usdt_balance < ORDER_USDT:
-                    log(f"⏩ Acquisto saltato per {symbol}: saldo USDT ({usdt_balance:.2f}) insufficiente")
-                    continue
-
-                # 🔍 Filtri aggiuntivi per confermare il segnale
-                # MACD deve essere sopra la linea signal
                 if last["macd"] <= last["macd_signal"]:
                     log(f"❌ MACD non confermato per {symbol} → MACD {last['macd']:.4f} <= Signal {last['macd_signal']:.4f}")
                     continue
-
-                # Conferma breakout: candela verde con corpo significativo
                 if not is_bullish_breakout_confirmed(df):
                     log(f"❌ Breakout non confermato visivamente per {symbol}")
                     continue
 
-                # ✅ BLOCCO ANTI-OVERTRADING
                 balance = get_free_qty(symbol)
                 if balance and price and (balance * price) > (ORDER_USDT * 2.0):
                     log(f"⛔️ Hai già una posizione rilevante su {symbol} → {balance:.4f} ≈ {balance * price:.2f} USDT → acquisto evitato")
                     continue
 
-                # Ordine effettivo
-                open_positions.add(symbol)  # <-- protezione immediata contro doppio acquisto
+                usdt_before = get_usdt_balance()
+                log(f"💰 Saldo USDT prima dell’acquisto di {symbol}: {usdt_before:.2f}")
+                usdt_balance = get_usdt_balance()
+                if usdt_balance < ORDER_USDT:
+                    log(f"⏩ Acquisto saltato per {symbol}: saldo USDT ({usdt_balance:.2f}) insufficiente")
+                    continue
+
+                open_positions.add(symbol)  # ⛓️ Protezione contro doppio acquisto
                 resp = market_buy(symbol, ORDER_USDT)
                 if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                     log(f"✅ Acquisto completato per {symbol}")
-
-                    # Salva entry price
                     entry_price = price
 
-                    # Calcola ATR
                     atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=14)
                     df["atr"] = atr.average_true_range()
                     df.dropna(subset=["atr", "rsi", "macd", "macd_signal", "ema20", "adx"], inplace=True)
                     last = df.iloc[-1]
                     atr_value = last["atr"]
 
-                    # 🔧 TP/SL dinamico in base a RSI
                     if last["rsi"] > 65:
-                        tp_factor = 1.5
-                        sl_factor = 1.0
+                        tp_factor = 1.5; sl_factor = 1.0
                     elif last["rsi"] > 55:
-                        tp_factor = 2.0
-                        sl_factor = 1.2
+                        tp_factor = 2.0; sl_factor = 1.2
                     else:
-                        tp_factor = 2.5
-                        sl_factor = 1.5
+                        tp_factor = 2.5; sl_factor = 1.5
 
-                    # 📉 Aggiusta TP e SL per asset volatili (coin esplosive = SL più stretto)
                     if symbol in VOLATILE_ASSETS:
-                        tp_factor += 0.5       # Lascia correre i profitti
-                        sl_factor -= 0.2       # Taglia prima le perdite
-                        if sl_factor < 0.8:    # SL troppo stretto non va bene
-                            sl_factor = 0.8
+                        tp_factor += 0.5
+                        sl_factor = max(sl_factor - 0.2, 0.8)
 
-                    # Calcola i target
                     tp = entry_price + (atr_value * tp_factor)
                     sl = entry_price - (atr_value * sl_factor)
-
-                    # Salva i dati
                     qty_acquistata = get_free_qty(symbol)
+
                     position_data[symbol] = {
                         "entry_price": entry_price,
                         "tp": tp,
@@ -774,11 +741,14 @@ if __name__ == "__main__":
                         "p_max": entry_price
                     }
 
+                    log(f"📌 Posizione attiva su {symbol}, entry: {entry_price:.6f}, TP: {tp:.6f}, SL: {sl:.6f}")
                     log(f"📊 ATR per {symbol}: {atr_value:.6f} → TP: {tp:.4f}, SL: {sl:.4f} (TPx: {tp_factor}, SLx: {sl_factor})")
                     notify_trade_result(symbol, "entry", price, strategy)
+
                 else:
                     log(f"❌ Acquisto fallito per {symbol}, rimuovo da open_positions")
-                    open_positions.discard(symbol)  # <-- rimuovilo se l’ordine fallisce
+                    open_positions.discard(symbol)
+
 
             elif signal == "exit":
                 qty = get_free_qty(symbol)
