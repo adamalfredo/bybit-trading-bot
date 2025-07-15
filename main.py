@@ -39,7 +39,8 @@ INTERVAL_MINUTES = 15
 ATR_WINDOW = 14
 TP_FACTOR = 2.0
 SL_FACTOR = 1.5
-TRAILING_ACTIVATION_THRESHOLD = 0.001
+# TRAILING_ACTIVATION_THRESHOLD = 0.001 # +0.1% activation threshold
+TRAILING_ACTIVATION_THRESHOLD = 0.02
 TRAILING_SL_BUFFER = 0.007
 TRAILING_DISTANCE = 0.02
 INITIAL_STOP_LOSS_PCT = 0.02
@@ -85,6 +86,11 @@ def get_last_price(symbol: str) -> Optional[float]:
 
 def market_buy(symbol: str, usdt: float):
     price = get_last_price(symbol)
+    order_value = usdt
+    if order_value < 5:
+        log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
+        return
+
     if not price:
         log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
         return None
@@ -358,43 +364,52 @@ def calculate_stop_loss(entry_price, current_price, p_max, trailing_active):
     else:
         return p_max * (1 - TRAILING_DISTANCE)
 
-def log_trade_to_google(symbol, entry_price, exit_price, pnl, strategy, result_type, entry_cost, exit_value, delta):
+import gspread
+from google.oauth2.service_account import Credentials
+
+# Config
+SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"  # copia da URL: https://docs.google.com/spreadsheets/d/<QUESTO>/edit
+SHEET_NAME = "Foglio1"  # o quello che hai scelto
+
+# Setup una sola volta
+def setup_gspread():
+    scope = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_file("gspread-creds.json", scopes=scope)
+    client = gspread.authorize(creds)
+    return client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
+
+# Salva una riga nel foglio
+def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
     try:
         import gspread
         from google.oauth2.service_account import Credentials
         import base64
-        import tempfile
 
         SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"
         SHEET_NAME = "Foglio1"
 
-        # Decodifica la variabile di ambiente contenente il JSON delle credenziali
+        # Decodifica la variabile base64 in file temporaneo
         encoded = os.getenv("GSPREAD_CREDS_B64")
         if not encoded:
-            log("❌ Variabile GSPREAD_CREDS_B64 non trovata.")
+            log("❌ Variabile GSPREAD_CREDS_B64 non trovata")
             return
 
-        # Scrivi le credenziali decodificate in un file temporaneo
-        with tempfile.NamedTemporaryFile(mode="w+b", delete=False) as tmp:
-            tmp.write(base64.b64decode(encoded))
-            tmp.flush()
-            creds = Credentials.from_service_account_file(tmp.name, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        creds_path = "/tmp/gspread-creds.json"
+        with open(creds_path, "wb") as f:
+            f.write(base64.b64decode(encoded))
 
-        # Autenticazione e scrittura
+        scope = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_file(creds_path, scopes=scope)
         client = gspread.authorize(creds)
         sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
-
         sheet.append_row([
             time.strftime("%Y-%m-%d %H:%M:%S"),
             symbol,
-            round(entry_price, 6),
-            round(exit_price, 6),
-            f"{pnl:.2f}%",
+            round(entry, 6),
+            round(exit, 6),
+            f"{pnl_pct:.2f}%",
             strategy,
-            result_type,
-            f"{entry_cost:.2f}",
-            f"{exit_value:.2f}",
-            f"{delta:.2f}"
+            result_type
         ])
     except Exception as e:
         log(f"❌ Errore log su Google Sheets: {e}")
