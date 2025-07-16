@@ -107,12 +107,17 @@ def get_instrument_info(symbol: str):
             raise Exception(f"Dati strumento non disponibili per {symbol}")
 
         info = data["result"]["list"][0]
-        qty_step = float(info["lotSizeFilter"]["qtyStep"])
-        precision = abs(Decimal(str(qty_step)).as_tuple().exponent)
+        lot_filter = info.get("lotSizeFilter", {})
+
+        # Usa minOrderQty come qty_step e basePrecision per i decimali
+        qty_step = float(lot_filter.get("minOrderQty", "0.0001"))
+        precision = int(info.get("basePrecision", "6"))
+
         return qty_step, precision
+
     except Exception as e:
         log(f"❌ Errore get_instrument_info per {symbol}: {e}")
-        return 0.0, 6  # fallback
+        return 0.0, 6
 
 def market_buy(symbol: str, usdt: float):
     price = get_last_price(symbol)
