@@ -84,78 +84,29 @@ def get_last_price(symbol: str) -> Optional[float]:
         log(f"Errore ottenimento prezzo {symbol}: {e}")
     return None
 
-def get_instrument_info(symbol: str) -> Optional[dict]:
-    try:
-        url = "https://api.bybit.com/v5/market/instruments-info"
-        params = {"category": "spot", "symbol": symbol}
-        response = requests.get(url, params=params)
-        data = response.json()
+def market_buy(symbol: str, usdt: float):
+    price = get_last_price(symbol)
+    order_value = usdt
+    if order_value < 5:
+        log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
+        return
 
-        if data["retCode"] != 0 or not data["result"]["list"]:
-            return None
-
-        info = data["result"]["list"][0]
-        return {
-            "qtyStep": info.get("lotSizeFilter", {}).get("qtyStep", "0.01"),
-            "lotPrecision": int(info.get("lotSizeFilter", {}).get("lotSizePrecision", 6))
-        }
-
-    except Exception as e:
-        log(f"❌ Errore in get_instrument_info() per {symbol}: {e}")
+    if not price:
+        log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
         return None
 
-def calculate_quantity(symbol: str, usdt_amount: float, price: float) -> Optional[str]:
+    qty_step, precision = get_instrument_info(symbol)
     try:
-        instrument = get_instrument_info(symbol)
-        if not instrument or not isinstance(instrument, dict):
-            log(f"❌ Errore get_instrument_info per {symbol}: risposta nulla o non valida")
-            return None
-
-        qty_step_raw = instrument.get("qtyStep")
-        precision = instrument.get("lotPrecision", 6)
-
-        if qty_step_raw is None:
-            log(f"❌ Errore get_instrument_info per {symbol}: 'qtyStep' mancante")
-            return None
-
-        try:
-            qty_step = Decimal(str(qty_step_raw))
-        except Exception as e:
-            log(f"❌ Errore qtyStep non convertibile in Decimal per {symbol}: {qty_step_raw}")
-            return None
-
+        # Calcolo quantità in coin basata su USDT disponibile
+        dec_usdt = Decimal(str(usdt))
         dec_price = Decimal(str(price))
-        dec_amount = Decimal(str(usdt_amount))
+        qty = (dec_usdt / dec_price).quantize(Decimal(str(qty_step)), rounding=ROUND_DOWN)
 
-        qty = (dec_amount / dec_price).quantize(qty_step, rounding=ROUND_DOWN)
-        order_value = qty * dec_price
-
-        if order_value < Decimal("5.1"):
-            log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.4f} USDT")
-            return None
-
-        if order_value > Decimal("10000"):
-            log(f"❌ Valore ordine troppo ALTO per {symbol}: {order_value:.2f} USDT")
-            return None
-
-        qty_str = f"{qty:.{precision}f}".rstrip('0').rstrip('.')
-        return qty_str if Decimal(qty_str) > 0 else None
-
-    except Exception as e:
-        log(f"❌ Errore in calculate_quantity() per {symbol}: {e}")
-        return None
-
-def market_buy(symbol: str, usdt_amount: float) -> Optional[dict]:
-    try:
-        price = get_last_price(symbol)
-        if price is None:
-            log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
-            return None
-
-        qty_str = calculate_quantity(symbol, usdt_amount, price)
-        if not qty_str:
+        if qty <= 0:
             log(f"❌ Quantità calcolata nulla per {symbol}")
             return None
+
+        qty_str = str(int(qty)) if precision == 0 else f"{qty:.{precision}f}".rstrip('0').rstrip('.')
 
         body = {
             "category": "spot",
@@ -169,24 +120,48 @@ def market_buy(symbol: str, usdt_amount: float) -> Optional[dict]:
         body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
         payload = f"{ts}{KEY}5000{body_json}"
         sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-
         headers = {
             "X-BAPI-API-KEY": KEY,
             "X-BAPI-SIGN": sign,
             "X-BAPI-TIMESTAMP": ts,
             "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-SIGN-TYPE": "2",
             "Content-Type": "application/json"
         }
 
-        log(f"BUY BODY: {body}")
-        response = requests.post("https://api.bybit.com/spot/v1/order", headers=headers, data=body_json)
-        resp_json = response.json()
-        log(f"RESPONSE: {response.status_code} {resp_json}")
-
-        return resp_json
+        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+        log(f"BUY BODY: {body_json}")
+        log(f"RESPONSE: {resp.status_code} {resp.json()}")
+        return resp
     except Exception as e:
-        log(f"❌ Errore market_buy() per {symbol}: {e}")
+        log(f"❌ Errore invio ordine BUY per {symbol}: {e}")
         return None
+
+def get_instrument_info(symbol: str):
+    endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
+    try:
+        params = {"category": "spot", "symbol": symbol}
+        resp = requests.get(endpoint, params=params, timeout=10)
+        data = resp.json()
+        if data.get("retCode") == 0:
+            instruments = data.get("result", {}).get("list", [])
+            if instruments:
+                info = instruments[0]
+                lot_filter = info.get("lotSizeFilter", {})
+                qty_step_str = lot_filter.get("qtyStep")
+                if qty_step_str:
+                    qty_step = float(qty_step_str)
+                    precision = abs(Decimal(qty_step_str).as_tuple().exponent)
+                    return qty_step, precision
+                base_precision_str = lot_filter.get("basePrecision")
+                if base_precision_str:
+                    precision = abs(Decimal(base_precision_str).as_tuple().exponent)
+                    qty_step = 1 / (10 ** precision) if precision > 0 else 1
+                    return qty_step, precision
+        log(f"⚠️ Errore get_instrument_info per {symbol}: {data}")
+    except Exception as e:
+        log(f"⚠️ Errore richiesta get_instrument_info: {e}")
+    return 0.0001, 4
 
 def market_sell(symbol: str, qty: float):
     price = get_last_price(symbol)
@@ -314,6 +289,10 @@ def analyze_asset(symbol: str):
         log(f"Errore analisi {symbol}: {e}")
         return None, None, None
 
+# Altri blocchi seguiranno qui (tra cui: gestione posizioni, loop, trailing stop, logging su Sheets)
+# Per brevità e sicurezza, dividiamo anche questo in ulteriori sotto-blocchi se necessario
+# Procediamo con la chiusura completa a seguire
+
 log("🔄 Avvio sistema di monitoraggio segnali reali")
 notify_telegram("🤖 BOT AVVIATO - In ascolto per segnali di ingresso/uscita")
 
@@ -388,11 +367,11 @@ def calculate_stop_loss(entry_price, current_price, p_max, trailing_active):
 import gspread
 from google.oauth2.service_account import Credentials
 
-# Config globale
-SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"
-SHEET_NAME = "Foglio1"
+# Config
+SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"  # copia da URL: https://docs.google.com/spreadsheets/d/<QUESTO>/edit
+SHEET_NAME = "Foglio1"  # o quello che hai scelto
 
-# Setup gspread (non usato nel tuo attuale flusso, ma lasciato per completezza)
+# Setup una sola volta
 def setup_gspread():
     scope = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_file("gspread-creds.json", scopes=scope)
@@ -402,7 +381,12 @@ def setup_gspread():
 # Salva una riga nel foglio
 def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
     try:
+        import gspread
+        from google.oauth2.service_account import Credentials
         import base64
+
+        SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"
+        SHEET_NAME = "Foglio1"
 
         # Decodifica la variabile base64 in file temporaneo
         encoded = os.getenv("GSPREAD_CREDS_B64")
@@ -426,8 +410,7 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
             f"{pnl_pct:.2f}%",
             strategy,
             result_type
-        ], value_input_option="USER_ENTERED")
-        log(f"✅ Log salvato su Google Sheets per {symbol}")
+        ])
     except Exception as e:
         log(f"❌ Errore log su Google Sheets: {e}")
 
@@ -459,7 +442,7 @@ while True:
                 continue
 
             resp = market_buy(symbol, ORDER_USDT)
-            if not (resp and resp.get("ret_code") == 0):
+            if not (resp and resp.status_code == 200 and resp.json().get("retCode") == 0):
                 log(f"❌ Acquisto fallito per {symbol}")
                 continue
 
@@ -513,14 +496,6 @@ while True:
                 log(f"🔴 Vendita completata per {symbol}")
                 log(f"📊 PnL stimato: {pnl:.2f}% | Delta: {delta:.2f}")
                 notify_telegram(f"🔴📉 Vendita per {symbol} a {price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}%")
-                log_trade_to_google(
-                    symbol=symbol,
-                    entry=entry_price,
-                    exit=price,
-                    pnl_pct=pnl,
-                    strategy=strategy,
-                    result_type="Exit Signal"
-                )
 
                 open_positions.discard(symbol)
                 last_exit_time[symbol] = time.time()
@@ -571,14 +546,6 @@ while True:
 
                         log(f"🔻 Trailing Stop attivato per {symbol} → Prezzo: {current_price:.4f} | SL: {entry['sl']:.4f}")
                         notify_telegram(f"🔻 Trailing Stop venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
-                        log_trade_to_google(
-                            symbol=symbol,
-                            entry=entry_price,
-                            exit=current_price,
-                            pnl_pct=pnl,
-                            strategy="Trailing Stop",
-                            result_type="SL Trailing"
-                        )
 
                         # 🗑️ Pulizia
                         open_positions.discard(symbol)
