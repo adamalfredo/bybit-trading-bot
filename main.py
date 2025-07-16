@@ -459,7 +459,7 @@ while True:
                 continue
 
             resp = market_buy(symbol, ORDER_USDT)
-            if not (resp and resp.status_code == 200 and resp.json().get("retCode") == 0):
+            if not (resp and resp.get("ret_code") == 0):
                 log(f"❌ Acquisto fallito per {symbol}")
                 continue
 
