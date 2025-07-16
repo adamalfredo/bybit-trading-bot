@@ -119,28 +119,54 @@ def get_instrument_info(symbol: str):
         log(f"❌ Errore get_instrument_info per {symbol}: {e}")
         return 0.0, 6
 
-def market_buy(symbol: str, usdt: float):
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
-        return None
-
-    order_value = usdt
-    if order_value < 5:
-        log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
-        return
-
-    qty_step, precision = get_instrument_info(symbol)
+def calculate_quantity(symbol: str, usdt_amount: float, price: float) -> Optional[str]:
     try:
-        dec_usdt = Decimal(str(usdt))
-        dec_price = Decimal(str(price))
-        qty = (dec_usdt / dec_price).quantize(Decimal(str(qty_step)), rounding=ROUND_DOWN)
-
-        if qty <= 0:
-            log(f"❌ Quantità calcolata nulla per {symbol}")
+        instrument = get_instrument_info(symbol)
+        if not instrument:
+            log(f"❌ Errore get_instrument_info per {symbol}: risposta nulla")
             return None
 
-        qty_str = str(int(qty)) if precision == 0 else f"{qty:.{precision}f}".rstrip('0').rstrip('.')
+        qty_step = Decimal(instrument.get("qtyStep", ""))
+        precision = instrument.get("lotPrecision", 6)
+
+        if not qty_step:
+            log(f"❌ Errore get_instrument_info per {symbol}: 'qtyStep' mancante")
+            return None
+
+        dec_price = Decimal(str(price))
+        dec_amount = Decimal(str(usdt_amount))
+        qty = (dec_amount / dec_price).quantize(qty_step, rounding=ROUND_DOWN)
+
+        # 🔒 Verifica che il valore dell'ordine non sia troppo basso o troppo alto
+        order_value = qty * dec_price
+
+        if order_value < Decimal("5.1"):
+            log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.4f} USDT")
+            return None
+
+        if order_value > Decimal("10000"):  # Filtro di sicurezza, modifica se vuoi
+            log(f"❌ Valore ordine troppo ALTO per {symbol}: {order_value:.2f} USDT")
+            return None
+
+        # ✅ Converte qty in stringa con precisione corretta
+        qty_str = f"{qty:.{precision}f}".rstrip('0').rstrip('.')
+        return qty_str if Decimal(qty_str) > 0 else None
+
+    except Exception as e:
+        log(f"❌ Errore in calculate_quantity() per {symbol}: {e}")
+        return None
+
+def market_buy(symbol: str, usdt_amount: float) -> Optional[dict]:
+    try:
+        price = get_last_price(symbol)
+        if price is None:
+            log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
+            return None
+
+        qty_str = calculate_quantity(symbol, usdt_amount, price)
+        if not qty_str:
+            log(f"❌ Quantità calcolata nulla per {symbol}")
+            return None
 
         body = {
             "category": "spot",
@@ -154,21 +180,23 @@ def market_buy(symbol: str, usdt: float):
         body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
         payload = f"{ts}{KEY}5000{body_json}"
         sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
         headers = {
             "X-BAPI-API-KEY": KEY,
             "X-BAPI-SIGN": sign,
             "X-BAPI-TIMESTAMP": ts,
             "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN-TYPE": "2",
             "Content-Type": "application/json"
         }
 
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"BUY BODY: {body_json}")
-        log(f"RESPONSE: {resp.status_code} {resp.json()}")
-        return resp
+        log(f"BUY BODY: {body}")
+        response = requests.post("https://api.bybit.com/spot/v1/order", headers=headers, data=body_json)
+        resp_json = response.json()
+        log(f"RESPONSE: {response.status_code} {resp_json}")
+
+        return resp_json
     except Exception as e:
-        log(f"❌ Errore invio ordine BUY per {symbol}: {e}")
+        log(f"❌ Errore market_buy() per {symbol}: {e}")
         return None
 
 def market_sell(symbol: str, qty: float):
