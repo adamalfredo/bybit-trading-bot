@@ -92,20 +92,25 @@ def market_buy(symbol: str, usdt: float):
 
     qty_step, precision = get_instrument_info(symbol)
 
+    # Calcolo quantità raw
     dec_usdt = Decimal(str(usdt))
     dec_price = Decimal(str(price))
-    raw_qty = dec_usdt / dec_price
-
     step = Decimal(str(qty_step))
+    raw_qty = dec_usdt / dec_price
     rounded_qty = (raw_qty // step) * step
 
-    order_value = (rounded_qty * dec_price).quantize(Decimal("0.00000001"))
+    # Ciclo di riduzione fino a superare soglia minima ordine
+    while (rounded_qty * dec_price).quantize(Decimal("0.00000001")) < Decimal("5"):
+        rounded_qty -= step
+        if rounded_qty <= 0:
+            log(f"❌ Quantità troppo piccola per {symbol}")
+            return None
 
-    if order_value < Decimal("5"):
-        log(f"❌ Ordine troppo piccolo per {symbol} ({order_value} USDT), Bybit lo rifiuterebbe")
-        return None
-
-    qty_str = str(int(rounded_qty)) if precision == 0 else f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+    # Conversione qty in stringa
+    if precision == 0:
+        qty_str = str(int(rounded_qty))
+    else:
+        qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
 
     body = {
         "category": "spot",
