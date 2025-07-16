@@ -142,7 +142,7 @@ def market_buy(symbol: str, order_usdt: float = 50.0):
         }
 
         url = "https://api.bybit.com/v5/order/create"
-        response = requests.post(url, headers=headers, **json=body**)  # ✅ CORRETTO QUI
+        response = requests.post(url, headers=headers, json=body)  # ✅ CORRETTO QUI
         data = response.json()
 
         log(f"BUY BODY: {body}")
