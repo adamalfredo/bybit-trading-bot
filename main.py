@@ -84,6 +84,36 @@ def get_last_price(symbol: str) -> Optional[float]:
         log(f"Errore ottenimento prezzo {symbol}: {e}")
     return None
 
+def get_instrument_info(symbol: str):
+    try:
+        ts = str(int(time.time() * 1000))
+        recv_window = "5000"
+        payload = f"{ts}{KEY}{recv_window}category=spot&symbol={symbol}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": recv_window,
+            "X-BAPI-SIGN-TYPE": "2"
+        }
+
+        url = f"{BYBIT_BASE_URL}/v5/market/instruments-info?category=spot&symbol={symbol}"
+        response = requests.get(url, headers=headers)
+        data = response.json()
+
+        if data["retCode"] != 0 or not data["result"]["list"]:
+            raise Exception(f"Dati strumento non disponibili per {symbol}")
+
+        info = data["result"]["list"][0]
+        qty_step = float(info["lotSizeFilter"]["qtyStep"])
+        precision = abs(Decimal(str(qty_step)).as_tuple().exponent)
+        return qty_step, precision
+    except Exception as e:
+        log(f"❌ Errore get_instrument_info per {symbol}: {e}")
+        return 0.0, 6  # fallback
+
 def market_buy(symbol: str, usdt: float):
     price = get_last_price(symbol)
     if not price:
