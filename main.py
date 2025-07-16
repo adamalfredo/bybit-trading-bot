@@ -105,6 +105,11 @@ def market_buy(symbol: str, usdt: float):
         if qty <= 0:
             log(f"❌ Quantità calcolata nulla per {symbol}")
             return None
+        
+        order_value = float(qty) * price
+        if order_value < 50:
+            log(f"❌ Ordine calcolato per {symbol} è troppo piccolo: {order_value:.2f} USDT < 50. Annullato.")
+            return None
 
         qty_str = str(int(qty)) if precision == 0 else f"{qty:.{precision}f}".rstrip('0').rstrip('.')
 
