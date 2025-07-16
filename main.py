@@ -141,7 +141,7 @@ def market_buy(symbol: str, price: float):
         }
 
         log(f"BUY BODY: {body}")
-        response = requests.post(f"{BASE_URL}/v5/order/create", headers=headers, data=body_json)
+        response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"RESPONSE: {response.status_code} {response.json()}")
 
         data = response.json()
