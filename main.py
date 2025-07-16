@@ -118,54 +118,18 @@ def send_signed_request(method, endpoint, params=None):
 
     return response.json()
 
-def market_buy(symbol: str, usdt_amount: float = 50.0):
+def market_buy(symbol: str, order_usdt: float = 50.0):
     try:
-        # 1. Recupera prezzo attuale (esatto)
-        price = get_last_price(symbol)
-        if not price:
-            log(f"❌ Prezzo non disponibile per {symbol}")
-            return None
-
-        # 2. Recupera info per arrotondamento
-        qty_step, precision = get_instrument_info(symbol)
-        if not qty_step or not precision:
-            log(f"❌ Errore nel recupero qty_step o precision per {symbol}")
-            return None
-
-        # 3. Calcola qty: usdt / prezzo, e arrotonda
-        raw_qty = usdt_amount / price
-        dec_qty = Decimal(str(raw_qty))
-        step = Decimal(str(qty_step))
-        rounded_qty = (dec_qty // step) * step  # floor to step
-
-        # 4. Valore finale dell’ordine (qty * prezzo)
-        total_value = float(rounded_qty) * price
-
-        # 5. Controlli finali
-        if rounded_qty <= 0:
-            log(f"❌ Quantità troppo piccola per {symbol}")
-            return None
-        if total_value < 5:
-            log(f"❌ Ordine troppo piccolo per {symbol}: {total_value:.2f} USDT")
-            return None
-        if total_value > usdt_amount * 1.1:
-            log(f"❌ Ordine troppo grande per {symbol}: {total_value:.2f} USDT")
-            return None
-
-        # 6. Prepara quantità in formato stringa corretta
-        qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
-
         body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "qty": qty_str
+            "quoteOrderQty": str(order_usdt)
         }
 
-        # 7. Firma e invia
-        body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
         ts = str(int(time.time() * 1000))
+        body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
         payload = f"{ts}{KEY}5000{body_json}"
         sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
@@ -177,19 +141,21 @@ def market_buy(symbol: str, usdt_amount: float = 50.0):
             "Content-Type": "application/json"
         }
 
-        log(f"BUY BODY: {body}")
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"RESPONSE: {resp.status_code} {resp.json()}")
+        url = "https://api.bybit.com/v5/order/create"
+        response = requests.post(url, headers=headers, data=body_json)
+        data = response.json()
 
-        if resp.status_code == 200 and resp.json().get("retCode") == 0:
-            return resp
+        log(f"BUY BODY: {body}")
+        log(f"RESPONSE: {response.status_code} {data}")
+
+        if data["retCode"] == 0:
+            return True
         else:
             log(f"❌ Acquisto fallito per {symbol}")
-            return None
-
+            return False
     except Exception as e:
-        log(f"❌ Errore in market_buy(): {e}")
-        return None
+        log(f"❌ Errore acquisto per {symbol}: {e}")
+        return False
 
 def get_instrument_info(symbol: str):
     endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
