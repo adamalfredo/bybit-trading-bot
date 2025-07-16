@@ -90,46 +90,54 @@ def get_instrument_info(symbol: str) -> Optional[dict]:
         params = {"category": "spot", "symbol": symbol}
         response = requests.get(url, params=params)
         data = response.json()
-        if data["retCode"] == 0:
-            info = data["result"]["list"][0]
-            return {
-                "qtyStep": info.get("lotSizeFilter", {}).get("qtyStep", ""),
-                "lotPrecision": info.get("lotPrecision", 6)
-            }
+
+        if data["retCode"] != 0 or not data["result"]["list"]:
+            return None
+
+        info = data["result"]["list"][0]
+        return {
+            "qtyStep": info.get("lotSizeFilter", {}).get("qtyStep", "0.01"),
+            "lotPrecision": int(info.get("lotSizeFilter", {}).get("lotSizePrecision", 6))
+        }
+
     except Exception as e:
-        log(f"❌ Errore get_instrument_info per {symbol}: {e}")
-    return None
+        log(f"❌ Errore in get_instrument_info() per {symbol}: {e}")
+        return None
 
 def calculate_quantity(symbol: str, usdt_amount: float, price: float) -> Optional[str]:
     try:
         instrument = get_instrument_info(symbol)
-        if not instrument:
-            log(f"❌ Errore get_instrument_info per {symbol}: risposta nulla")
+        if not instrument or not isinstance(instrument, dict):
+            log(f"❌ Errore get_instrument_info per {symbol}: risposta nulla o non valida")
             return None
 
-        qty_step = Decimal(instrument.get("qtyStep", ""))
+        qty_step_raw = instrument.get("qtyStep")
         precision = instrument.get("lotPrecision", 6)
 
-        if not qty_step:
+        if qty_step_raw is None:
             log(f"❌ Errore get_instrument_info per {symbol}: 'qtyStep' mancante")
+            return None
+
+        try:
+            qty_step = Decimal(str(qty_step_raw))
+        except Exception as e:
+            log(f"❌ Errore qtyStep non convertibile in Decimal per {symbol}: {qty_step_raw}")
             return None
 
         dec_price = Decimal(str(price))
         dec_amount = Decimal(str(usdt_amount))
-        qty = (dec_amount / dec_price).quantize(qty_step, rounding=ROUND_DOWN)
 
-        # 🔒 Verifica che il valore dell'ordine non sia troppo basso o troppo alto
+        qty = (dec_amount / dec_price).quantize(qty_step, rounding=ROUND_DOWN)
         order_value = qty * dec_price
 
         if order_value < Decimal("5.1"):
             log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.4f} USDT")
             return None
 
-        if order_value > Decimal("10000"):  # Filtro di sicurezza, modifica se vuoi
+        if order_value > Decimal("10000"):
             log(f"❌ Valore ordine troppo ALTO per {symbol}: {order_value:.2f} USDT")
             return None
 
-        # ✅ Converte qty in stringa con precisione corretta
         qty_str = f"{qty:.{precision}f}".rstrip('0').rstrip('.')
         return qty_str if Decimal(qty_str) > 0 else None
 
