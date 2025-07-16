@@ -352,11 +352,11 @@ def calculate_stop_loss(entry_price, current_price, p_max, trailing_active):
 import gspread
 from google.oauth2.service_account import Credentials
 
-# Config
-SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"  # copia da URL: https://docs.google.com/spreadsheets/d/<QUESTO>/edit
-SHEET_NAME = "Foglio1"  # o quello che hai scelto
+# Config globale
+SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"
+SHEET_NAME = "Foglio1"
 
-# Setup una sola volta
+# Setup gspread (non usato nel tuo attuale flusso, ma lasciato per completezza)
 def setup_gspread():
     scope = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_file("gspread-creds.json", scopes=scope)
@@ -366,12 +366,7 @@ def setup_gspread():
 # Salva una riga nel foglio
 def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
     try:
-        import gspread
-        from google.oauth2.service_account import Credentials
         import base64
-
-        SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"
-        SHEET_NAME = "Foglio1"
 
         # Decodifica la variabile base64 in file temporaneo
         encoded = os.getenv("GSPREAD_CREDS_B64")
@@ -395,7 +390,8 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
             f"{pnl_pct:.2f}%",
             strategy,
             result_type
-        ])
+        ], value_input_option="USER_ENTERED")
+        log(f"✅ Log salvato su Google Sheets per {symbol}")
     except Exception as e:
         log(f"❌ Errore log su Google Sheets: {e}")
 
