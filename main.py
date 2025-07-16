@@ -118,14 +118,14 @@ def send_signed_request(method, endpoint, params=None):
 
     return response.json()
 
-def market_buy(symbol: str, order_usdt: float = 50.0):
+def market_buy(symbol: str, order_usdt: float):
     try:
         body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "quoteOrderQty": str(order_usdt)
+            "quoteQty": str(order_usdt)  # ✅ Questo è l'unico parametro corretto
         }
 
         ts = str(int(time.time() * 1000))
@@ -141,21 +141,14 @@ def market_buy(symbol: str, order_usdt: float = 50.0):
             "Content-Type": "application/json"
         }
 
-        url = "https://api.bybit.com/v5/order/create"
-        response = requests.post(url, headers=headers, data=body_json)
-        data = response.json()
-
+        resp = requests.post("https://api.bybit.com/spot/v1/order", headers=headers, data=body_json)
         log(f"BUY BODY: {body}")
-        log(f"RESPONSE: {response.status_code} {data}")
+        log(f"RESPONSE: {resp.status_code} {resp.json()}")
+        return resp
 
-        if data["retCode"] == 0:
-            return True
-        else:
-            log(f"❌ Acquisto fallito per {symbol}")
-            return False
     except Exception as e:
-        log(f"❌ Errore acquisto per {symbol}: {e}")
-        return False
+        log(f"❌ Errore in market_buy: {e}")
+        return None
 
 def get_instrument_info(symbol: str):
     endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
