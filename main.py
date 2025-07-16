@@ -123,7 +123,7 @@ def market_buy(symbol: str, amount_usdt: float):
         url = f"{BYBIT_BASE_URL}/v5/order/create"
         timestamp = str(int(time.time() * 1000))
         body = {
-            "category": "spot",
+            # "category": "spot",  <-- ❌ NON INSERIRE
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
