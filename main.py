@@ -84,18 +84,33 @@ def get_last_price(symbol: str) -> Optional[float]:
         log(f"Errore ottenimento prezzo {symbol}: {e}")
     return None
 
-def calculate_quantity(price, balance, percent=0.3, min_order_value=5.0, qty_step=0.001, precision=3):
-    from decimal import Decimal
-    order_usdt = balance * percent
-    if order_usdt < min_order_value:
+def calculate_quantity(symbol: str, price: float, order_usdt: float = 50.0) -> Optional[str]:
+    try:
+        qty_step, precision = get_instrument_info(symbol)
+        raw_qty = order_usdt / price
+
+        # Arrotonda la quantità al passo corretto
+        dec_qty = Decimal(str(raw_qty))
+        step = Decimal(str(qty_step))
+        rounded_qty = (dec_qty // step) * step
+
+        if rounded_qty <= 0:
+            return None
+
+        # Verifica che il valore totale superi i 5 USDT
+        total_value = float(rounded_qty) * price
+        if total_value < 5.1:
+            return None
+
+        # Ritorna qty come stringa formattata corretta
+        if precision == 0:
+            return str(int(rounded_qty))
+        else:
+            return f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+
+    except Exception as e:
+        log(f"❌ Errore in calculate_quantity(): {e}")
         return None
-    qty_raw = Decimal(order_usdt / price)
-    step = Decimal(str(qty_step))
-    rounded_qty = (qty_raw // step) * step
-    if precision == 0:
-        return str(int(rounded_qty))
-    else:
-        return f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
     
 def send_signed_request(method, endpoint, params=None):
     import time, hmac, hashlib
