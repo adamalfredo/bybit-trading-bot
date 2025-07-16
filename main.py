@@ -124,17 +124,18 @@ def market_buy(symbol: str, amount_usdt: float):
         timestamp = str(int(time.time() * 1000))
         recv_window = "5000"
 
-        # ❗️IMPORTANTE: category deve essere omesso per quoteQty
+        # ✅ Formato corretto per V5 con quoteQty e category
         body = {
+            "category": "spot",  # OBBLIGATORIO per v5!
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
             "quoteQty": str(amount_usdt)
         }
 
-        # ⚠️ query_string = URL-form-encoded string, NOT JSON!
-        query_string = "&".join(f"{k}={v}" for k, v in body.items())
-        payload = f"{timestamp}{KEY}{recv_window}{query_string}"
+        # Firma corretta del body in formato JSON
+        body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+        payload = f"{timestamp}{KEY}{recv_window}{body_json}"
         sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
         headers = {
@@ -142,15 +143,15 @@ def market_buy(symbol: str, amount_usdt: float):
             "X-BAPI-SIGN": sign,
             "X-BAPI-TIMESTAMP": timestamp,
             "X-BAPI-RECV-WINDOW": recv_window,
-            "Content-Type": "application/x-www-form-urlencoded"
+            "Content-Type": "application/json"
         }
 
         log(f"BUY BODY: {body}")
-        resp = requests.post(url, headers=headers, data=query_string)
-        log(f"RESPONSE: {resp.status_code} {resp.json()}")
+        response = requests.post(url, headers=headers, data=body_json)
+        log(f"RESPONSE: {response.status_code} {response.json()}")
 
-        if resp.status_code == 200 and resp.json().get("retCode") == 0:
-            return resp
+        if response.status_code == 200 and response.json().get("retCode") == 0:
+            return response
         else:
             log(f"❌ Acquisto fallito per {symbol}")
             return None
