@@ -70,19 +70,9 @@ def is_bullish_breakout_confirmed(df: pd.DataFrame) -> bool:
         return True
     return False
 
-def get_last_price(symbol: str) -> Optional[float]:
-    url = f"{BYBIT_BASE_URL}/v5/market/tickers"
-    params = {"category": "spot", "symbol": symbol}
-    try:
-        resp = requests.get(url, params=params, timeout=10)
-        data = resp.json()
-        if data.get("retCode") == 0:
-            lst = data.get("result", {}).get("list")
-            if lst and "lastPrice" in lst[0]:
-                return float(lst[0]["lastPrice"])
-    except Exception as e:
-        log(f"Errore ottenimento prezzo {symbol}: {e}")
-    return None
+
+
+
 
 def send_signed_request(method, endpoint, params=None):
     import time, hmac, hashlib
@@ -118,15 +108,46 @@ def send_signed_request(method, endpoint, params=None):
 
     return response.json()
 
-def market_buy(symbol: str, order_usdt: float = 50.0):
+def get_instrument_info(symbol: str):
+    url = f"https://api.bybit.com/v5/market/instruments-info?category=spot&symbol={symbol}"
+    res = requests.get(url).json()
+    if res["retCode"] != 0 or not res["result"]["list"]:
+        return None
+    return res["result"]["list"][0]
+
+def get_last_price(symbol: str) -> float:
+    url = f"https://api.bybit.com/v2/public/tickers?symbol={symbol}"
+    response = requests.get(url).json()
+    return float(response["result"][0]["last_price"])
+
+def calculate_quantity(symbol: str, usdt_amount: float, price: float):
+    info = get_instrument_info(symbol)
+    if not info:
+        raise Exception(f"Impossibile ottenere info per {symbol}")
+
+    qty_step = float(info["lotSizeFilter"]["qtyStep"])
+    min_qty = float(info["lotSizeFilter"]["minOrderQty"])
+    precision = abs(Decimal(str(qty_step)).as_tuple().exponent)
+
+    raw_qty = usdt_amount / price
+    rounded_qty = (Decimal(str(raw_qty)) // Decimal(str(qty_step))) * Decimal(str(qty_step))
+
+    if rounded_qty < Decimal(str(min_qty)):
+        raise Exception(f"❌ Quantità troppo bassa per {symbol}")
+
+    return str(round(rounded_qty, precision)), qty_step, precision
+
+def market_buy(symbol: str, usdt_amount: float = 50.0):
     try:
+        price = get_last_price(symbol)
+        qty, qty_step, precision = calculate_quantity(symbol, usdt_amount, price)
+
         body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "timeInForce": "IOC",  # ← OBBLIGATORIO per quoteOrderQty
-            "quoteOrderQty": str(order_usdt)
+            "qty": qty
         }
 
         ts = str(int(time.time() * 1000))
@@ -157,32 +178,6 @@ def market_buy(symbol: str, order_usdt: float = 50.0):
     except Exception as e:
         log(f"❌ Errore acquisto per {symbol}: {e}")
         return False
-
-def get_instrument_info(symbol: str):
-    endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
-    try:
-        params = {"category": "spot", "symbol": symbol}
-        resp = requests.get(endpoint, params=params, timeout=10)
-        data = resp.json()
-        if data.get("retCode") == 0:
-            instruments = data.get("result", {}).get("list", [])
-            if instruments:
-                info = instruments[0]
-                lot_filter = info.get("lotSizeFilter", {})
-                qty_step_str = lot_filter.get("qtyStep")
-                if qty_step_str:
-                    qty_step = float(qty_step_str)
-                    precision = abs(Decimal(qty_step_str).as_tuple().exponent)
-                    return qty_step, precision
-                base_precision_str = lot_filter.get("basePrecision")
-                if base_precision_str:
-                    precision = abs(Decimal(base_precision_str).as_tuple().exponent)
-                    qty_step = 1 / (10 ** precision) if precision > 0 else 1
-                    return qty_step, precision
-        log(f"⚠️ Errore get_instrument_info per {symbol}: {data}")
-    except Exception as e:
-        log(f"⚠️ Errore richiesta get_instrument_info: {e}")
-    return 0.0001, 4
 
 def market_sell(symbol: str, qty: float):
     price = get_last_price(symbol)
