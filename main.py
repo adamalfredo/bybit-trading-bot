@@ -84,40 +84,21 @@ def get_last_price(symbol: str) -> Optional[float]:
         log(f"Errore ottenimento prezzo {symbol}: {e}")
     return None
 
-def get_instrument_info(symbol: str):
+def get_instrument_info(symbol: str) -> Optional[dict]:
     try:
-        ts = str(int(time.time() * 1000))
-        recv_window = "5000"
-        payload = f"{ts}{KEY}{recv_window}category=spot&symbol={symbol}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": recv_window,
-            "X-BAPI-SIGN-TYPE": "2"
-        }
-
-        url = f"{BYBIT_BASE_URL}/v5/market/instruments-info?category=spot&symbol={symbol}"
-        response = requests.get(url, headers=headers)
+        url = "https://api.bybit.com/v5/market/instruments-info"
+        params = {"category": "spot", "symbol": symbol}
+        response = requests.get(url, params=params)
         data = response.json()
-
-        if data["retCode"] != 0 or not data["result"]["list"]:
-            raise Exception(f"Dati strumento non disponibili per {symbol}")
-
-        info = data["result"]["list"][0]
-        lot_filter = info.get("lotSizeFilter", {})
-
-        # Usa minOrderQty come qty_step e basePrecision per i decimali
-        qty_step = float(lot_filter.get("minOrderQty", "0.0001"))
-        precision = int(info.get("basePrecision", "6"))
-
-        return qty_step, precision
-
+        if data["retCode"] == 0:
+            info = data["result"]["list"][0]
+            return {
+                "qtyStep": info.get("lotSizeFilter", {}).get("qtyStep", ""),
+                "lotPrecision": info.get("lotPrecision", 6)
+            }
     except Exception as e:
         log(f"❌ Errore get_instrument_info per {symbol}: {e}")
-        return 0.0, 6
+    return None
 
 def calculate_quantity(symbol: str, usdt_amount: float, price: float) -> Optional[str]:
     try:
