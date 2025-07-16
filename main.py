@@ -129,9 +129,8 @@ def market_buy(symbol: str, order_usdt: float = 50.0):
         }
 
         ts = str(int(time.time() * 1000))
-        # Firma su json.dumps(body) SENZA sort_keys=True
-        body_str = json.dumps(body, separators=(",", ":"))
-        payload = f"{ts}{KEY}5000{body_str}"
+        body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+        payload = f"{ts}{KEY}5000{body_json}"
         sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
         headers = {
@@ -143,7 +142,7 @@ def market_buy(symbol: str, order_usdt: float = 50.0):
         }
 
         url = "https://api.bybit.com/v5/order/create"
-        response = requests.post(url, headers=headers, json=body)  # json=body OK
+        response = requests.post(url, headers=headers, data=body_json)
         data = response.json()
 
         log(f"BUY BODY: {body}")
