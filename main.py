@@ -95,30 +95,13 @@ def market_buy(symbol: str, usdt: float):
         log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
         return None
 
-    qty_step, precision = get_instrument_info(symbol)
     try:
-        # Calcolo quantità in coin basata su USDT disponibile
-        dec_usdt = Decimal(str(usdt))
-        dec_price = Decimal(str(price))
-        qty = (dec_usdt / dec_price).quantize(Decimal(str(qty_step)), rounding=ROUND_DOWN)
-
-        if qty <= 0:
-            log(f"❌ Quantità calcolata nulla per {symbol}")
-            return None
-        
-        order_value = float(qty) * price
-        if order_value < 50:
-            log(f"❌ Ordine calcolato per {symbol} troppo piccolo: {order_value:.6f} USDT (minimo richiesto: 50.00). Annullato.")
-            return None
-
-        qty_str = str(int(qty)) if precision == 0 else f"{qty:.{precision}f}".rstrip('0').rstrip('.')
-
         body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "qty": qty_str
+            "quoteQty": str(usdt)  # Ordine basato sul valore in USDT
         }
 
         ts = str(int(time.time() * 1000))
