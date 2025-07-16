@@ -96,6 +96,40 @@ def calculate_quantity(price, balance, percent=0.3, min_order_value=5.0, qty_ste
         return str(int(rounded_qty))
     else:
         return f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+    
+def send_signed_request(method, endpoint, params=None):
+    import time, hmac, hashlib
+    if params is None:
+        params = {}
+
+    api_key = BYBIT_API_KEY
+    api_secret = BYBIT_API_SECRET
+    timestamp = str(int(time.time() * 1000))
+    recv_window = "5000"
+
+    body = json.dumps(params, separators=(",", ":")) if method == "POST" else ""
+
+    payload = f"{timestamp}{api_key}{recv_window}{body}"
+    signature = hmac.new(
+        api_secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+    headers = {
+        "X-BAPI-API-KEY": api_key,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "Content-Type": "application/json",
+    }
+
+    url = f"https://api.bybit.com{endpoint}"
+
+    if method == "POST":
+        response = requests.post(url, headers=headers, data=body)
+    else:
+        response = requests.get(url, headers=headers, params=params)
+
+    return response.json()
 
 def market_buy(symbol: str, price: float):
     try:
