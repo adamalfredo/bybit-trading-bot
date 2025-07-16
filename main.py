@@ -122,23 +122,26 @@ def market_buy(symbol: str, amount_usdt: float):
     try:
         url = f"{BYBIT_BASE_URL}/v5/order/create"
         timestamp = str(int(time.time() * 1000))
+        recv_window = "5000"
+
+        # ❗️IMPORTANTE: category deve essere omesso per quoteQty
         body = {
-            # "category": "spot",  <-- ❌ NON INSERIRE
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
             "quoteQty": str(amount_usdt)
         }
 
+        # ⚠️ query_string = URL-form-encoded string, NOT JSON!
         query_string = "&".join(f"{k}={v}" for k, v in body.items())
-        payload = f"{timestamp}{KEY}5000{query_string}"
+        payload = f"{timestamp}{KEY}{recv_window}{query_string}"
         sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
         headers = {
             "X-BAPI-API-KEY": KEY,
             "X-BAPI-SIGN": sign,
             "X-BAPI-TIMESTAMP": timestamp,
-            "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-RECV-WINDOW": recv_window,
             "Content-Type": "application/x-www-form-urlencoded"
         }
 
