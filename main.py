@@ -90,16 +90,29 @@ def market_buy(symbol: str, usdt: float):
         log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
         return None
 
-    if usdt < 5:
-        log(f"❌ Valore ordine troppo basso per {symbol}: {usdt:.2f} USDT")
+    qty_step, precision = get_instrument_info(symbol)
+
+    dec_usdt = Decimal(str(usdt))
+    dec_price = Decimal(str(price))
+    raw_qty = dec_usdt / dec_price
+
+    step = Decimal(str(qty_step))
+    rounded_qty = (raw_qty // step) * step
+
+    order_value = (rounded_qty * dec_price).quantize(Decimal("0.00000001"))
+
+    if order_value < Decimal("5"):
+        log(f"❌ Ordine troppo piccolo per {symbol} ({order_value} USDT), Bybit lo rifiuterebbe")
         return None
+
+    qty_str = str(int(rounded_qty)) if precision == 0 else f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
 
     body = {
         "category": "spot",
         "symbol": symbol,
         "side": "Buy",
         "orderType": "Market",
-        "quoteQty": str(usdt)
+        "qty": qty_str
     }
 
     try:
