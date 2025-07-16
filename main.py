@@ -85,50 +85,35 @@ def get_last_price(symbol: str) -> Optional[float]:
     return None
 
 def market_buy(symbol: str, usdt: float):
-    price = get_last_price(symbol)
     order_value = usdt
     if order_value < 5:
         log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
         return
 
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
-        return None
+    quote_qty_str = f"{usdt:.2f}"  # Importo in USDT (fisso)
 
-    qty_step, precision = get_instrument_info(symbol)
+    body = {
+        "category": "spot",
+        "symbol": symbol,
+        "side": "Buy",
+        "orderType": "Market",
+        "quoteQty": quote_qty_str  # ✅ usa quoteQty al posto di qty
+    }
+
+    ts = str(int(time.time() * 1000))
+    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json"
+    }
+
     try:
-        # Calcolo quantità in coin basata su USDT disponibile
-        dec_usdt = Decimal(str(usdt))
-        dec_price = Decimal(str(price))
-        qty = (dec_usdt / dec_price).quantize(Decimal(str(qty_step)), rounding=ROUND_DOWN)
-
-        if qty <= 0:
-            log(f"❌ Quantità calcolata nulla per {symbol}")
-            return None
-
-        qty_str = str(int(qty)) if precision == 0 else f"{qty:.{precision}f}".rstrip('0').rstrip('.')
-
-        body = {
-            "category": "spot",
-            "symbol": symbol,
-            "side": "Buy",
-            "orderType": "Market",
-            "qty": qty_str
-        }
-
-        ts = str(int(time.time() * 1000))
-        body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
-        payload = f"{ts}{KEY}5000{body_json}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json"
-        }
-
         resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"BUY BODY: {body_json}")
         log(f"RESPONSE: {resp.status_code} {resp.json()}")
@@ -496,6 +481,14 @@ while True:
                 log(f"🔴 Vendita completata per {symbol}")
                 log(f"📊 PnL stimato: {pnl:.2f}% | Delta: {delta:.2f}")
                 notify_telegram(f"🔴📉 Vendita per {symbol} a {price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}%")
+                log_trade_to_google(
+                    symbol=symbol,
+                    entry=entry_price,
+                    exit=price,
+                    pnl_pct=pnl,
+                    strategy=strategy,
+                    result_type="Exit Signal"
+                )
 
                 open_positions.discard(symbol)
                 last_exit_time[symbol] = time.time()
@@ -546,6 +539,14 @@ while True:
 
                         log(f"🔻 Trailing Stop attivato per {symbol} → Prezzo: {current_price:.4f} | SL: {entry['sl']:.4f}")
                         notify_telegram(f"🔻 Trailing Stop venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
+                        log_trade_to_google(
+                            symbol=symbol,
+                            entry=entry_price,
+                            exit=current_price,
+                            pnl_pct=pnl,
+                            strategy="Trailing Stop",
+                            result_type="SL Trailing"
+                        )
 
                         # 🗑️ Pulizia
                         open_positions.discard(symbol)
