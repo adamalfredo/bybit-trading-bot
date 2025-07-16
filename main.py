@@ -84,16 +84,56 @@ def get_last_price(symbol: str) -> Optional[float]:
         log(f"Errore ottenimento prezzo {symbol}: {e}")
     return None
 
-def market_buy(symbol: str, usdt_amount: float = ORDER_USDT):
+def calculate_quantity(symbol: str, usdt_amount: float, price: float) -> Optional[str]:
     try:
-        body = {
-            "category": "spot",
-            "symbol": symbol,
-            "side": "Buy",
-            "orderType": "Market",
-            "quoteQty": str(usdt_amount)  # <-- questo è l'importo in USDT da spendere
-        }
+        info = get_instrument_info(symbol)
+        if not info:
+            log(f"⚠️ Impossibile ottenere info strumento per {symbol}")
+            return None
 
+        qty_step, precision = info
+        step = Decimal(str(qty_step))
+        dec_usdt = Decimal(str(usdt_amount))
+        dec_price = Decimal(str(price))
+
+        # Quantità grezza
+        raw_qty = dec_usdt / dec_price
+
+        # Arrotondamento al passo corretto
+        rounded_qty = (raw_qty // step) * step
+
+        if rounded_qty < step:
+            log(f"❌ Quantità calcolata troppo bassa ({rounded_qty}) per {symbol}")
+            return None
+
+        if precision == 0:
+            return str(int(rounded_qty))
+        else:
+            return f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+    except Exception as e:
+        log(f"❌ Errore in calculate_quantity(): {e}")
+        return None
+
+def market_buy(symbol: str, usdt_amount: float):
+    price = get_last_price(symbol)
+    if not price:
+        log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
+        return None
+
+    qty = calculate_quantity(symbol, usdt_amount, price)
+    if not qty:
+        log(f"❌ Quantità non valida per {symbol}, acquisto saltato")
+        return None
+
+    body = {
+        "category": "spot",
+        "symbol": symbol,
+        "side": "Buy",
+        "orderType": "Market",
+        "qty": qty
+    }
+
+    try:
         ts = str(int(time.time() * 1000))
         body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
         payload = f"{ts}{KEY}5000{body_json}"
@@ -104,20 +144,14 @@ def market_buy(symbol: str, usdt_amount: float = ORDER_USDT):
             "X-BAPI-SIGN": sign,
             "X-BAPI-TIMESTAMP": ts,
             "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-SIGN-TYPE": "2",
             "Content-Type": "application/json"
         }
 
+        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"BUY BODY: {body}")
-        response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        response_json = response.json()
-        log(f"RESPONSE: {response.status_code} {response_json}")
-
-        if response_json.get("retCode") == 0:
-            return response_json
-        else:
-            log(f"❌ Acquisto fallito per {symbol}")
-            return None
-
+        log(f"RESPONSE: {resp.status_code} {resp.json()}")
+        return resp
     except Exception as e:
         log(f"❌ Errore in market_buy(): {e}")
         return None
