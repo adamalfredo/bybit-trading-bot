@@ -84,47 +84,14 @@ def get_last_price(symbol: str) -> Optional[float]:
         log(f"Errore ottenimento prezzo {symbol}: {e}")
     return None
 
-def market_buy(symbol: str, price: float):
-    qty_step, precision = get_instrument_info(symbol)
-    usdt_amount = ORDER_USDT  # 52 USDT
-    min_value = 5.01  # valore minimo richiesto da Bybit
-
+def market_buy(symbol: str, usdt_amount: float = ORDER_USDT):
     try:
-        dec_price = Decimal(str(price))
-        dec_step = Decimal(str(qty_step))
-        dec_usdt = Decimal(str(usdt_amount))
-
-        # Calcolo qty iniziale
-        raw_qty = dec_usdt / dec_price
-
-        # Arrotondamento qty verso il basso
-        rounded_qty = (raw_qty // dec_step) * dec_step
-
-        # Calcolo valore ordine
-        order_value = rounded_qty * dec_price
-
-        # Se inferiore al minimo, aggiusta verso l’alto
-        if order_value < Decimal(str(min_value)):
-            rounded_qty += dec_step
-            order_value = rounded_qty * dec_price
-
-        # Ricontrollo: se anche così sotto soglia, abbandona
-        if order_value < Decimal(str(min_value)):
-            log(f"❌ Valore ordine troppo basso anche dopo aggiustamento → {order_value:.4f} USDT")
-            return False
-
-        # Converte in stringa finale
-        if precision == 0:
-            qty_str = str(int(rounded_qty))
-        else:
-            qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
-
         body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "qty": qty_str
+            "quoteQty": str(usdt_amount)  # <-- questo è l'importo in USDT da spendere
         }
 
         ts = str(int(time.time() * 1000))
@@ -142,19 +109,18 @@ def market_buy(symbol: str, price: float):
 
         log(f"BUY BODY: {body}")
         response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"RESPONSE: {response.status_code} {response.json()}")
+        response_json = response.json()
+        log(f"RESPONSE: {response.status_code} {response_json}")
 
-        data = response.json()
-        if data.get("retCode") == 0:
-            log(f"🟢 Acquisto registrato per {symbol} | Entry: {price:.4f}")
-            return True
+        if response_json.get("retCode") == 0:
+            return response_json
         else:
             log(f"❌ Acquisto fallito per {symbol}")
-            return False
+            return None
 
     except Exception as e:
         log(f"❌ Errore in market_buy(): {e}")
-        return False
+        return None
 
 def get_instrument_info(symbol: str):
     endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
