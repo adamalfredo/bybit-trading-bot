@@ -85,35 +85,49 @@ def get_last_price(symbol: str) -> Optional[float]:
     return None
 
 def market_buy(symbol: str, usdt: float):
+    price = get_last_price(symbol)
+    if not price:
+        log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
+        return None
+
     order_value = usdt
     if order_value < 5:
         log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
         return
 
-    quote_qty_str = f"{usdt:.2f}"  # Importo in USDT (fisso)
-
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Buy",
-        "orderType": "Market",
-        "quoteQty": quote_qty_str  # ✅ usa quoteQty al posto di qty
-    }
-
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
-
+    qty_step, precision = get_instrument_info(symbol)
     try:
+        dec_usdt = Decimal(str(usdt))
+        dec_price = Decimal(str(price))
+        qty = (dec_usdt / dec_price).quantize(Decimal(str(qty_step)), rounding=ROUND_DOWN)
+
+        if qty <= 0:
+            log(f"❌ Quantità calcolata nulla per {symbol}")
+            return None
+
+        qty_str = str(int(qty)) if precision == 0 else f"{qty:.{precision}f}".rstrip('0').rstrip('.')
+
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": "Buy",
+            "orderType": "Market",
+            "qty": qty_str
+        }
+
+        ts = str(int(time.time() * 1000))
+        body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+        payload = f"{ts}{KEY}5000{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-SIGN-TYPE": "2",
+            "Content-Type": "application/json"
+        }
+
         resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"BUY BODY: {body_json}")
         log(f"RESPONSE: {resp.status_code} {resp.json()}")
@@ -121,32 +135,6 @@ def market_buy(symbol: str, usdt: float):
     except Exception as e:
         log(f"❌ Errore invio ordine BUY per {symbol}: {e}")
         return None
-
-def get_instrument_info(symbol: str):
-    endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
-    try:
-        params = {"category": "spot", "symbol": symbol}
-        resp = requests.get(endpoint, params=params, timeout=10)
-        data = resp.json()
-        if data.get("retCode") == 0:
-            instruments = data.get("result", {}).get("list", [])
-            if instruments:
-                info = instruments[0]
-                lot_filter = info.get("lotSizeFilter", {})
-                qty_step_str = lot_filter.get("qtyStep")
-                if qty_step_str:
-                    qty_step = float(qty_step_str)
-                    precision = abs(Decimal(qty_step_str).as_tuple().exponent)
-                    return qty_step, precision
-                base_precision_str = lot_filter.get("basePrecision")
-                if base_precision_str:
-                    precision = abs(Decimal(base_precision_str).as_tuple().exponent)
-                    qty_step = 1 / (10 ** precision) if precision > 0 else 1
-                    return qty_step, precision
-        log(f"⚠️ Errore get_instrument_info per {symbol}: {data}")
-    except Exception as e:
-        log(f"⚠️ Errore richiesta get_instrument_info: {e}")
-    return 0.0001, 4
 
 def market_sell(symbol: str, qty: float):
     price = get_last_price(symbol)
@@ -273,10 +261,6 @@ def analyze_asset(symbol: str):
     except Exception as e:
         log(f"Errore analisi {symbol}: {e}")
         return None, None, None
-
-# Altri blocchi seguiranno qui (tra cui: gestione posizioni, loop, trailing stop, logging su Sheets)
-# Per brevità e sicurezza, dividiamo anche questo in ulteriori sotto-blocchi se necessario
-# Procediamo con la chiusura completa a seguire
 
 log("🔄 Avvio sistema di monitoraggio segnali reali")
 notify_telegram("🤖 BOT AVVIATO - In ascolto per segnali di ingresso/uscita")
