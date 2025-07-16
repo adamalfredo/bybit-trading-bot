@@ -118,43 +118,58 @@ def send_signed_request(method, endpoint, params=None):
 
     return response.json()
 
-def market_buy(symbol: str, amount_usdt: float):
+def market_buy(symbol: str, usdt_amount: float):
     try:
-        url = f"{BYBIT_BASE_URL}/v5/order/create"
-        timestamp = str(int(time.time() * 1000))
-        recv_window = "5000"
+        price = get_last_price(symbol)
+        if not price:
+            log(f"❌ Prezzo non disponibile per {symbol}")
+            return None
 
-        # ✅ Formato corretto per V5 con quoteQty e category
+        qty_step, precision = get_instrument_info(symbol)
+        raw_qty = usdt_amount / price
+
+        # Arrotondamento corretto
+        dec_qty = Decimal(str(raw_qty))
+        step = Decimal(str(qty_step))
+        rounded_qty = (dec_qty // step) * step
+
+        if rounded_qty <= 0:
+            log(f"❌ Quantità calcolata troppo bassa per {symbol}")
+            return None
+
+        qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+
+        # Controlla valore minimo ordine
+        total_value = float(qty_str) * price
+        if total_value < 5.1:
+            log(f"❌ Ordine troppo piccolo per {symbol}: {total_value:.2f} USDT")
+            return None
+
         body = {
-            "category": "spot",  # OBBLIGATORIO per v5!
+            "category": "spot",
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "quoteQty": str(amount_usdt)
+            "qty": qty_str
         }
 
-        # Firma corretta del body in formato JSON
         body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
-        payload = f"{timestamp}{KEY}{recv_window}{body_json}"
+        ts = str(int(time.time() * 1000))
+        payload = f"{ts}{KEY}5000{body_json}"
         sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
         headers = {
             "X-BAPI-API-KEY": KEY,
             "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": timestamp,
-            "X-BAPI-RECV-WINDOW": recv_window,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
             "Content-Type": "application/json"
         }
 
         log(f"BUY BODY: {body}")
-        response = requests.post(url, headers=headers, data=body_json)
-        log(f"RESPONSE: {response.status_code} {response.json()}")
-
-        if response.status_code == 200 and response.json().get("retCode") == 0:
-            return response
-        else:
-            log(f"❌ Acquisto fallito per {symbol}")
-            return None
+        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+        log(f"RESPONSE: {resp.status_code} {resp.json()}")
+        return resp
     except Exception as e:
         log(f"❌ Errore in market_buy(): {e}")
         return None
