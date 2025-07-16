@@ -84,62 +84,77 @@ def get_last_price(symbol: str) -> Optional[float]:
         log(f"Errore ottenimento prezzo {symbol}: {e}")
     return None
 
-def market_buy(symbol: str, usdt: float):
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
-        return None
-
+def market_buy(symbol: str, price: float):
     qty_step, precision = get_instrument_info(symbol)
-
-    dec_price = Decimal(str(price))
-    step = Decimal(str(qty_step))
-    target_usdt = Decimal(str(usdt)) + Decimal("0.5")  # margine per compensare arrotondamento
-    raw_qty = target_usdt / dec_price
-    rounded_qty = (raw_qty // step) * step
-
-    # Riduci finché valore >= usdt richiesto (es. 50)
-    while (rounded_qty * dec_price).quantize(Decimal("0.00000001")) < Decimal(str(usdt)):
-        rounded_qty -= step
-        if rounded_qty <= 0:
-            log(f"❌ Quantità troppo piccola per {symbol}")
-            return None
-
-    # Converte qty in stringa con precisione
-    if precision == 0:
-        qty_str = str(int(rounded_qty))
-    else:
-        qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
-
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Buy",
-        "orderType": "Market",
-        "qty": qty_str
-    }
+    usdt_amount = ORDER_USDT  # 52 USDT
+    min_value = 5.01  # valore minimo richiesto da Bybit
 
     try:
+        dec_price = Decimal(str(price))
+        dec_step = Decimal(str(qty_step))
+        dec_usdt = Decimal(str(usdt_amount))
+
+        # Calcolo qty iniziale
+        raw_qty = dec_usdt / dec_price
+
+        # Arrotondamento qty verso il basso
+        rounded_qty = (raw_qty // dec_step) * dec_step
+
+        # Calcolo valore ordine
+        order_value = rounded_qty * dec_price
+
+        # Se inferiore al minimo, aggiusta verso l’alto
+        if order_value < Decimal(str(min_value)):
+            rounded_qty += dec_step
+            order_value = rounded_qty * dec_price
+
+        # Ricontrollo: se anche così sotto soglia, abbandona
+        if order_value < Decimal(str(min_value)):
+            log(f"❌ Valore ordine troppo basso anche dopo aggiustamento → {order_value:.4f} USDT")
+            return False
+
+        # Converte in stringa finale
+        if precision == 0:
+            qty_str = str(int(rounded_qty))
+        else:
+            qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": "Buy",
+            "orderType": "Market",
+            "qty": qty_str
+        }
+
         ts = str(int(time.time() * 1000))
         body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
         payload = f"{ts}{KEY}5000{body_json}"
         sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
         headers = {
             "X-BAPI-API-KEY": KEY,
             "X-BAPI-SIGN": sign,
             "X-BAPI-TIMESTAMP": ts,
             "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN-TYPE": "2",
             "Content-Type": "application/json"
         }
 
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"BUY BODY: {body_json}")
-        log(f"RESPONSE: {resp.status_code} {resp.json()}")
-        return resp
+        log(f"BUY BODY: {body}")
+        response = requests.post(f"{BASE_URL}/v5/order/create", headers=headers, data=body_json)
+        log(f"RESPONSE: {response.status_code} {response.json()}")
+
+        data = response.json()
+        if data.get("retCode") == 0:
+            log(f"🟢 Acquisto registrato per {symbol} | Entry: {price:.4f}")
+            return True
+        else:
+            log(f"❌ Acquisto fallito per {symbol}")
+            return False
+
     except Exception as e:
-        log(f"❌ Errore invio ordine BUY per {symbol}: {e}")
-        return None
+        log(f"❌ Errore in market_buy(): {e}")
+        return False
 
 def get_instrument_info(symbol: str):
     endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
