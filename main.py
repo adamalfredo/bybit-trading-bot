@@ -496,6 +496,7 @@ while True:
                 log(f"🔴 Vendita completata per {symbol}")
                 log(f"📊 PnL stimato: {pnl:.2f}% | Delta: {delta:.2f}")
                 notify_telegram(f"🔴📉 Vendita per {symbol} a {price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}%")
+                log_trade_to_google(symbol, entry_price, price, pnl, strategy, "Exit Signal")
 
                 open_positions.discard(symbol)
                 last_exit_time[symbol] = time.time()
@@ -546,6 +547,7 @@ while True:
 
                         log(f"🔻 Trailing Stop attivato per {symbol} → Prezzo: {current_price:.4f} | SL: {entry['sl']:.4f}")
                         notify_telegram(f"🔻 Trailing Stop venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
+                        log_trade_to_google(symbol, entry_price, current_price, pnl, "Trailing Stop", "SL Triggered")
 
                         # 🗑️ Pulizia
                         open_positions.discard(symbol)
