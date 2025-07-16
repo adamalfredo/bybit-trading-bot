@@ -125,6 +125,7 @@ def market_buy(symbol: str, order_usdt: float = 50.0):
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
+            "timeInForce": "IOC",  # ← OBBLIGATORIO per quoteOrderQty
             "quoteOrderQty": str(order_usdt)
         }
 
