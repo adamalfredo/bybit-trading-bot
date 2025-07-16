@@ -84,74 +84,46 @@ def get_last_price(symbol: str) -> Optional[float]:
         log(f"Errore ottenimento prezzo {symbol}: {e}")
     return None
 
-def calculate_quantity(symbol: str, usdt_amount: float, price: float) -> Optional[str]:
+def calculate_quantity(price, balance, percent=0.3, min_order_value=5.0, qty_step=0.001, precision=3):
+    from decimal import Decimal
+    order_usdt = balance * percent
+    if order_usdt < min_order_value:
+        return None
+    qty_raw = Decimal(order_usdt / price)
+    step = Decimal(str(qty_step))
+    rounded_qty = (qty_raw // step) * step
+    if precision == 0:
+        return str(int(rounded_qty))
+    else:
+        return f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+
+def market_buy(symbol: str, price: float):
     try:
-        info = get_instrument_info(symbol)
-        if not info:
-            log(f"⚠️ Impossibile ottenere info strumento per {symbol}")
-            return None
+        qty_step, precision = get_instrument_info(symbol)
+        usdt_balance = get_usdt_balance()
 
-        qty_step, precision = info
-        step = Decimal(str(qty_step))
-        dec_usdt = Decimal(str(usdt_amount))
-        dec_price = Decimal(str(price))
+        qty = calculate_quantity(price, usdt_balance, percent=0.3, qty_step=qty_step, precision=precision)
+        if qty is None:
+            log(f"❌ Quantità calcolata troppo bassa per {symbol}, ordine ignorato")
+            return
 
-        # Quantità grezza
-        raw_qty = dec_usdt / dec_price
-
-        # Arrotondamento al passo corretto
-        rounded_qty = (raw_qty // step) * step
-
-        if rounded_qty < step:
-            log(f"❌ Quantità calcolata troppo bassa ({rounded_qty}) per {symbol}")
-            return None
-
-        if precision == 0:
-            return str(int(rounded_qty))
-        else:
-            return f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
-    except Exception as e:
-        log(f"❌ Errore in calculate_quantity(): {e}")
-        return None
-
-def market_buy(symbol: str, usdt_amount: float):
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
-        return None
-
-    qty = calculate_quantity(symbol, usdt_amount, price)
-    if not qty:
-        log(f"❌ Quantità non valida per {symbol}, acquisto saltato")
-        return None
-
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Buy",
-        "orderType": "Market",
-        "qty": qty
-    }
-
-    try:
-        ts = str(int(time.time() * 1000))
-        body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
-        payload = f"{ts}{KEY}5000{body_json}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json"
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": "Buy",
+            "orderType": "Market",
+            "qty": qty
         }
 
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"BUY BODY: {body}")
-        log(f"RESPONSE: {resp.status_code} {resp.json()}")
-        return resp
+        response = send_signed_request("POST", "/v5/order/create", body)
+        log(f"RESPONSE: {response}")
+
+        if response.get("retCode") == 0:
+            return response
+        else:
+            log(f"❌ Acquisto fallito per {symbol}")
+            return None
     except Exception as e:
         log(f"❌ Errore in market_buy(): {e}")
         return None
