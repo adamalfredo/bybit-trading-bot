@@ -92,21 +92,20 @@ def market_buy(symbol: str, usdt: float):
 
     qty_step, precision = get_instrument_info(symbol)
 
-    # Calcolo quantità raw
-    dec_usdt = Decimal(str(usdt))
     dec_price = Decimal(str(price))
     step = Decimal(str(qty_step))
-    raw_qty = dec_usdt / dec_price
+    target_usdt = Decimal(str(usdt)) + Decimal("0.5")  # margine per compensare arrotondamento
+    raw_qty = target_usdt / dec_price
     rounded_qty = (raw_qty // step) * step
 
-    # Ciclo di riduzione fino a superare soglia minima ordine
-    while (rounded_qty * dec_price).quantize(Decimal("0.00000001")) < Decimal("5"):
+    # Riduci finché valore >= usdt richiesto (es. 50)
+    while (rounded_qty * dec_price).quantize(Decimal("0.00000001")) < Decimal(str(usdt)):
         rounded_qty -= step
         if rounded_qty <= 0:
             log(f"❌ Quantità troppo piccola per {symbol}")
             return None
 
-    # Conversione qty in stringa
+    # Converte qty in stringa con precisione
     if precision == 0:
         qty_str = str(int(rounded_qty))
     else:
