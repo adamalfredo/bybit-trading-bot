@@ -120,6 +120,8 @@ def send_signed_request(method, endpoint, params=None):
 
 def market_buy(symbol: str, amount_usdt: float):
     try:
+        url = f"{BYBIT_BASE_URL}/v5/order/create"
+        timestamp = str(int(time.time() * 1000))
         body = {
             "category": "spot",
             "symbol": symbol,
@@ -128,12 +130,24 @@ def market_buy(symbol: str, amount_usdt: float):
             "quoteQty": str(amount_usdt)
         }
 
-        log(f"BUY BODY: {body}")
-        response = send_signed_request("POST", "/v5/order/create", body)
-        log(f"RESPONSE: {response}")
+        query_string = "&".join(f"{k}={v}" for k, v in body.items())
+        payload = f"{timestamp}{KEY}5000{query_string}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
-        if response.get("retCode") == 0:
-            return response
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+
+        log(f"BUY BODY: {body}")
+        resp = requests.post(url, headers=headers, data=query_string)
+        log(f"RESPONSE: {resp.status_code} {resp.json()}")
+
+        if resp.status_code == 200 and resp.json().get("retCode") == 0:
+            return resp
         else:
             log(f"❌ Acquisto fallito per {symbol}")
             return None
