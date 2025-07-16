@@ -86,22 +86,33 @@ def get_last_price(symbol: str) -> Optional[float]:
 
 def market_buy(symbol: str, usdt: float):
     price = get_last_price(symbol)
-    order_value = usdt
-    if order_value < 5:
-        log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
-        return
-
     if not price:
         log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
         return None
 
+    if usdt < 5:
+        log(f"❌ Valore ordine troppo basso per {symbol}: {usdt:.2f} USDT")
+        return None
+
+    qty_step, precision = get_instrument_info(symbol)
     try:
+        # Calcolo quantità (quanto comprare con X USDT)
+        qty = Decimal(str(usdt)) / Decimal(str(price))
+        qty = (qty // Decimal(str(qty_step))) * Decimal(str(qty_step))  # arrotondamento corretto
+
+        if qty <= 0:
+            log(f"❌ Quantità calcolata nulla per {symbol}")
+            return None
+
+        # Converto in stringa formattata corretta per l'API
+        qty_str = str(int(qty)) if precision == 0 else f"{qty:.{precision}f}".rstrip('0').rstrip('.')
+
         body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "quoteQty": str(usdt)  # Ordine basato sul valore in USDT
+            "qty": qty_str
         }
 
         ts = str(int(time.time() * 1000))
@@ -121,6 +132,7 @@ def market_buy(symbol: str, usdt: float):
         log(f"BUY BODY: {body_json}")
         log(f"RESPONSE: {resp.status_code} {resp.json()}")
         return resp
+
     except Exception as e:
         log(f"❌ Errore invio ordine BUY per {symbol}: {e}")
         return None
