@@ -90,38 +90,16 @@ def market_buy(symbol: str, usdt: float):
         log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
         return None
 
-    qty_step, precision = get_instrument_info(symbol)
-
-    # Calcolo della quantità da acquistare (50 USDT / prezzo)
-    dec_usdt = Decimal(str(usdt))
-    dec_price = Decimal(str(price))
-    raw_qty = dec_usdt / dec_price
-
-    # Arrotondamento della quantità al passo corretto
-    step = Decimal(str(qty_step))
-    rounded_qty = (raw_qty // step) * step
-
-    # Calcolo del valore finale in USDT dopo arrotondamento
-    order_value = (rounded_qty * dec_price).quantize(Decimal("0.00000001"))
-
-    # Verifica che il valore dell'ordine sia almeno 5 USDT
-    if order_value < Decimal("5"):
-        log(f"❌ Ordine troppo piccolo per {symbol} ({order_value} USDT), Bybit lo rifiuterebbe")
+    if usdt < 5:
+        log(f"❌ Valore ordine troppo basso per {symbol}: {usdt:.2f} USDT")
         return None
 
-    # Conversione qty in stringa con la precisione corretta
-    if precision == 0:
-        qty_str = str(int(rounded_qty))
-    else:
-        qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
-
-    # Costruzione del body per ordine market
     body = {
         "category": "spot",
         "symbol": symbol,
         "side": "Buy",
         "orderType": "Market",
-        "qty": qty_str
+        "quoteQty": str(usdt)
     }
 
     try:
