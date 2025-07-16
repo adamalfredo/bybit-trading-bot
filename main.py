@@ -253,6 +253,7 @@ def analyze_asset(symbol: str):
         close = find_close_column(df)
         if close is None:
             return None, None, None
+
         bb = BollingerBands(close=close)
         df["bb_upper"] = bb.bollinger_hband()
         df["bb_lower"] = bb.bollinger_lband()
@@ -267,31 +268,47 @@ def analyze_asset(symbol: str):
         df["adx"] = ADXIndicator(high=df["High"], low=df["Low"], close=close).adx()
         atr = AverageTrueRange(high=df["High"], low=df["Low"], close=close, window=ATR_WINDOW)
         df["atr"] = atr.average_true_range()
+
         df.dropna(subset=[
             "bb_upper", "bb_lower", "rsi", "sma20", "sma50", "ema20", "ema50",
             "macd", "macd_signal", "adx", "atr"
         ], inplace=True)
+
+        is_volatile = symbol in VOLATILE_ASSETS
+        adx_threshold = 20 if is_volatile else 15
+
         last = df.iloc[-1]
         prev = df.iloc[-2]
         price = float(last["Close"])
-        if last["Close"] > last["bb_upper"] and last["rsi"] < 70:
-            return "entry", "Breakout Bollinger", price
-        elif prev["sma20"] < prev["sma50"] and last["sma20"] > last["sma50"]:
-            return "entry", "Incrocio SMA 20/50", price
-        elif last["macd"] > last["macd_signal"] and last["adx"] > 20:
-            return "entry", "MACD bullish + ADX", price
-        elif last["Close"] < last["bb_lower"] and last["rsi"] > 30:
+
+        # Strategie per asset volatili
+        if is_volatile:
+            if last["Close"] > last["bb_upper"] and last["rsi"] < 70:
+                return "entry", "Breakout Bollinger", price
+            elif prev["sma20"] < prev["sma50"] and last["sma20"] > last["sma50"]:
+                return "entry", "Incrocio SMA 20/50", price
+            elif last["macd"] > last["macd_signal"] and last["adx"] > adx_threshold:
+                return "entry", "MACD bullish + ADX", price
+
+        # Strategie per asset stabili
+        else:
+            if prev["ema20"] < prev["ema50"] and last["ema20"] > last["ema50"]:
+                return "entry", "Incrocio EMA 20/50", price
+            elif last["macd"] > last["macd_signal"] and last["adx"] > adx_threshold:
+                return "entry", "MACD bullish (stabile)", price
+            elif last["rsi"] > 50 and last["ema20"] > last["ema50"]:
+                return "entry", "Trend EMA + RSI", price
+
+        # EXIT comune a tutti
+        if last["Close"] < last["bb_lower"] and last["rsi"] > 30:
             return "exit", "Rimbalzo RSI + BB", price
-        elif last["macd"] < last["macd_signal"] and last["adx"] > 20:
+        elif last["macd"] < last["macd_signal"] and last["adx"] > adx_threshold:
             return "exit", "MACD bearish + ADX", price
+
         return None, None, None
     except Exception as e:
         log(f"Errore analisi {symbol}: {e}")
         return None, None, None
-
-# Altri blocchi seguiranno qui (tra cui: gestione posizioni, loop, trailing stop, logging su Sheets)
-# Per brevità e sicurezza, dividiamo anche questo in ulteriori sotto-blocchi se necessario
-# Procediamo con la chiusura completa a seguire
 
 log("🔄 Avvio sistema di monitoraggio segnali reali")
 notify_telegram("🤖 BOT AVVIATO - In ascolto per segnali di ingresso/uscita")
