@@ -118,32 +118,42 @@ def send_signed_request(method, endpoint, params=None):
 
     return response.json()
 
-def market_buy(symbol: str, usdt_amount: float):
+def market_buy(symbol: str, usdt_amount: float = 50.0):
     try:
+        # 1. Recupera prezzo attuale (esatto)
         price = get_last_price(symbol)
         if not price:
             log(f"❌ Prezzo non disponibile per {symbol}")
             return None
 
+        # 2. Recupera info per arrotondamento
         qty_step, precision = get_instrument_info(symbol)
-        raw_qty = usdt_amount / price
+        if not qty_step or not precision:
+            log(f"❌ Errore nel recupero qty_step o precision per {symbol}")
+            return None
 
-        # Arrotondamento corretto
+        # 3. Calcola qty: usdt / prezzo, e arrotonda
+        raw_qty = usdt_amount / price
         dec_qty = Decimal(str(raw_qty))
         step = Decimal(str(qty_step))
-        rounded_qty = (dec_qty // step) * step
+        rounded_qty = (dec_qty // step) * step  # floor to step
 
+        # 4. Valore finale dell’ordine (qty * prezzo)
+        total_value = float(rounded_qty) * price
+
+        # 5. Controlli finali
         if rounded_qty <= 0:
-            log(f"❌ Quantità calcolata troppo bassa per {symbol}")
+            log(f"❌ Quantità troppo piccola per {symbol}")
             return None
-
-        qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
-
-        # Controlla valore minimo ordine
-        total_value = float(qty_str) * price
-        if total_value < 5.1:
+        if total_value < 5:
             log(f"❌ Ordine troppo piccolo per {symbol}: {total_value:.2f} USDT")
             return None
+        if total_value > usdt_amount * 1.1:
+            log(f"❌ Ordine troppo grande per {symbol}: {total_value:.2f} USDT")
+            return None
+
+        # 6. Prepara quantità in formato stringa corretta
+        qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
 
         body = {
             "category": "spot",
@@ -153,6 +163,7 @@ def market_buy(symbol: str, usdt_amount: float):
             "qty": qty_str
         }
 
+        # 7. Firma e invia
         body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
         ts = str(int(time.time() * 1000))
         payload = f"{ts}{KEY}5000{body_json}"
@@ -169,7 +180,13 @@ def market_buy(symbol: str, usdt_amount: float):
         log(f"BUY BODY: {body}")
         resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"RESPONSE: {resp.status_code} {resp.json()}")
-        return resp
+
+        if resp.status_code == 200 and resp.json().get("retCode") == 0:
+            return resp
+        else:
+            log(f"❌ Acquisto fallito per {symbol}")
+            return None
+
     except Exception as e:
         log(f"❌ Errore in market_buy(): {e}")
         return None
