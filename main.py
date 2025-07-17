@@ -172,12 +172,17 @@ def calculate_quantity(symbol: str, quote_qty: float) -> Optional[str]:
 
 def market_buy(symbol: str, usdt_amount: float):
     try:
+        qty_str = calculate_quantity(symbol, usdt_amount)
+        if not qty_str:
+            log(f"❌ Quantità non valida per acquisto {symbol}")
+            return None
+
         body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "quoteOrderQty": str(round(usdt_amount, 2))  # ← sempre in USDT, non qty!
+            "qty": qty_str  # ✅ usa qty calcolata, NON quoteOrderQty
         }
 
         ts = str(int(time.time() * 1000))
@@ -202,7 +207,13 @@ def market_buy(symbol: str, usdt_amount: float):
 
         log(f"BUY BODY: {body}")
         log(f"RESPONSE: {response.status_code} {response.text}")
-        return response.json()
+
+        resp_data = response.json()
+        if resp_data.get("retCode") != 0:
+            log(f"❌ Errore ordine BUY: {resp_data.get('retMsg')}")
+            return None
+
+        return resp_data
 
     except Exception as e:
         log(f"❌ Errore in market_buy: {e}")
