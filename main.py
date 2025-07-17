@@ -137,17 +137,14 @@ def calculate_quantity(symbol: str, usdt_amount: float, price: float):
 
     return str(round(rounded_qty, precision)), qty_step, precision
 
-def market_buy(symbol: str, usdt_amount: float = 50.0):
+def market_buy(symbol: str, order_usdt: float = 50.0):
     try:
-        price = get_last_price(symbol)
-        qty, qty_step, precision = calculate_quantity(symbol, usdt_amount, price)
-
         body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "qty": qty
+            "quoteOrderQty": str(order_usdt)
         }
 
         ts = str(int(time.time() * 1000))
@@ -164,7 +161,9 @@ def market_buy(symbol: str, usdt_amount: float = 50.0):
         }
 
         url = "https://api.bybit.com/v5/order/create"
-        response = requests.post(url, headers=headers, data=body_json)
+
+        # ✅ CORRETTO: usa `json=body` (non `data=...`)
+        response = requests.post(url, headers=headers, json=body)
         data = response.json()
 
         log(f"BUY BODY: {body}")
@@ -175,6 +174,7 @@ def market_buy(symbol: str, usdt_amount: float = 50.0):
         else:
             log(f"❌ Acquisto fallito per {symbol}")
             return False
+
     except Exception as e:
         log(f"❌ Errore acquisto per {symbol}: {e}")
         return False
