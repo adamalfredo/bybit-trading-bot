@@ -169,7 +169,7 @@ def market_buy(symbol: str, order_usdt: float = 50.0):
         response = requests.post(url, headers=headers, json=body)
 
         log(f"BUY BODY: {body}")
-        log(f"RESPONSE RAW: {response.status_code} {response.text}")
+        log(f"RESPONSE RAW (text): {response.status_code} → {repr(response.text)}")
 
         try:
             data = response.json()
