@@ -151,7 +151,7 @@ def market_buy(symbol: str, usdt_amount: float):
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "quoteOrderQty": str(round(usdt_amount * 0.995, 2))  # leggero buffer di sicurezza
+            "quoteQty": str(round(usdt_amount * 0.995, 2))  # leggero buffer
         }
 
         ts = str(int(time.time() * 1000))
