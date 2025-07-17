@@ -119,20 +119,20 @@ def get_instrument_info(symbol: str):
 
     return qty_step, precision
 
-def get_last_price(symbol: str) -> Optional[float]:
+def get_last_price(symbol: str) -> Optional[tuple[float, float]]:
     url = f"{BYBIT_BASE_URL}/v5/market/tickers"
     params = {"category": "spot", "symbol": symbol}
     try:
         resp = requests.get(url, params=params, timeout=10)
-        log(f"GET_LAST_PRICE RAW: {resp.status_code} {repr(resp.text)}")  # 🔍 AGGIUNTA
+        log(f"GET_LAST_PRICE RAW: {resp.status_code} {repr(resp.text)}")
         data = resp.json()
         if data.get("retCode") == 0:
             lst = data.get("result", {}).get("list")
-            if lst and "lastPrice" in lst[0]:
-                return float(lst[0]["lastPrice"])
+            if lst and "lastPrice" in lst[0] and "ask1Price" in lst[0]:
+                return float(lst[0]["lastPrice"]), float(lst[0]["ask1Price"])
     except Exception as e:
         log(f"❌ Errore ottenimento prezzo {symbol}: {e}")
-    return None
+    return None, None
 
 def calculate_quantity(symbol: str, usdt_amount: float, price: float):
     qty_step, precision = get_instrument_info(symbol)
@@ -146,13 +146,13 @@ def calculate_quantity(symbol: str, usdt_amount: float, price: float):
 
 def market_buy(symbol: str, usdt_amount: float):
     try:
-        price = get_last_price(symbol)
-        if not price:
-            log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
+        last_price, ask_price = get_last_price(symbol)
+        if not ask_price:
+            log(f"❌ Prezzo ask non disponibile per {symbol}, impossibile acquistare")
             return None
 
-        qty_str, qty_step, precision = calculate_quantity(symbol, usdt_amount, price)
-        order_value = float(qty_str) * price
+        qty_str, qty_step, precision = calculate_quantity(symbol, usdt_amount, ask_price)
+        order_value = float(qty_str) * ask_price
         if order_value < 5:
             log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
             return None
@@ -162,7 +162,7 @@ def market_buy(symbol: str, usdt_amount: float):
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "qty": qty_str  # ✅ quantità della coin
+            "qty": qty_str
         }
 
         ts = str(int(time.time() * 1000))
