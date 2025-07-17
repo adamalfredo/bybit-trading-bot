@@ -135,18 +135,28 @@ def get_last_price(symbol: str) -> Optional[tuple[float, float]]:
     return None, None
 
 def calculate_quantity(symbol: str, usdt_amount: float, price: float):
-    qty_step, precision = get_instrument_info(symbol)
+    info = get_instrument_info(symbol)
+    qty_step, precision = info["qty_step"], info["precision"]
+    min_order_amt = info["min_order_amt"]
 
-    # Aggiungi margine di sicurezza al prezzo per evitare ordine troppo basso
-    adjusted_price = price * 1.01  # 🔒 maggiorazione del prezzo (1%)
-    raw_qty = (usdt_amount * 0.995) / adjusted_price
+    # Margine sicurezza su prezzo e quantità
+    adjusted_price = price * 1.01
+    raw_qty = usdt_amount / adjusted_price
 
-    rounded_qty = (Decimal(str(raw_qty)) // Decimal(str(qty_step))) * Decimal(str(qty_step))
+    # Arrotonda qty al passo corretto
+    step = Decimal(str(qty_step))
+    dec_qty = Decimal(str(raw_qty))
+    rounded_qty = (dec_qty // step) * step
 
-    if rounded_qty < Decimal(str(qty_step)):
-        raise Exception(f"❌ Quantità troppo bassa per {symbol}")
+    # Calcolo valore effettivo dell’ordine (con bid peggiorato)
+    value = float(rounded_qty) * adjusted_price
 
-    return str(round(rounded_qty, precision)), qty_step, precision
+    # Se valore inferiore a minOrderAmt + buffer → scarta
+    if value < float(min_order_amt) + 0.05:
+        raise Exception(f"❌ Ordine troppo piccolo ({value:.2f} USDT) per {symbol}. Minimo richiesto: {min_order_amt}")
+
+    qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+    return qty_str, qty_step, precision
 
 def market_buy(symbol: str, usdt_amount: float):
     try:
