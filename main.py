@@ -104,33 +104,18 @@ def send_signed_request(method, endpoint, params=None):
 
     return response.json()
 
-from decimal import Decimal
-
 def get_instrument_info(symbol: str):
-    url = f"{BYBIT_BASE_URL}/v5/market/instruments-info?category=spot&symbol={symbol}"
-    res = requests.get(url).json()
-    log(f"GET_INSTRUMENT_INFO RAW: {res}")  # Per debugging
+    url = f"https://api.bybit.com/v5/market/instruments-info?category=spot&symbol={symbol}"
+    response = requests.get(url)
+    raw = response.json()
+    log(f"GET_INSTRUMENT_INFO RAW: {raw}")
+    data = raw["result"]["list"][0]
 
-    if res["retCode"] != 0 or not res["result"]["list"]:
-        return 0.0001, 4  # fallback di sicurezza
-
-    info = res["result"]["list"][0]
-    lot = info.get("lotSizeFilter", {})
-
-    # Se esiste qtyStep, calcola precision da lì
-    if "qtyStep" in lot:
-        qty_step = float(lot["qtyStep"])
-        precision = abs(Decimal(str(qty_step)).as_tuple().exponent)
-    else:
-        # Se qtyStep manca, prova da basePrecision (corretto)
-        base_precision = lot.get("basePrecision")
-        if base_precision:
-            precision = abs(Decimal(str(base_precision)).as_tuple().exponent)
-            qty_step = 10 ** -precision
-        else:
-            # fallback finale
-            qty_step = 0.0001
-            precision = 4
+    lot = data.get("lotSizeFilter", {})
+    qty_step = float(lot.get("minOrderQty", 0.00001))  # più sicuro di 'qtyStep'
+    
+    # basePrecision può essere "0.00001", quindi usiamo Decimal
+    precision = abs(Decimal(str(lot.get("basePrecision", "0.00001"))).as_tuple().exponent)
 
     return qty_step, precision
 
@@ -167,14 +152,17 @@ def calculate_quantity(symbol: str, usdt_amount: float, price: float):
     return str(round(rounded_qty, precision)), qty_step, precision
 
 def market_buy(symbol: str, usdt_amount: float):
-    url = f"{BYBIT_BASE_URL}/v5/order/create"
+    qty_step, precision = get_instrument_info(symbol)
+    price = get_last_price(symbol)
+    qty = usdt_amount / price
+    rounded_qty = float(Decimal(qty).quantize(Decimal(str(qty_step)), rounding=ROUND_DOWN))
 
     body = {
         "category": "spot",
         "symbol": symbol,
         "side": "Buy",
         "orderType": "Market",
-        "quoteOrderQty": str(usdt_amount)  # <--- GIUSTO
+        "qty": str(rounded_qty)
     }
 
     ts = str(int(time.time() * 1000))
@@ -190,8 +178,8 @@ def market_buy(symbol: str, usdt_amount: float):
         "Content-Type": "application/json"
     }
 
-    response = requests.post(url, headers=headers, data=body_json)
     log(f"BUY BODY: {body}")
+    response = requests.post("https://api.bybit.com/v5/order/create", headers=headers, data=body_json)
     log(f"RESPONSE: {response.status_code} {response.text}")
     return response.json()
 
