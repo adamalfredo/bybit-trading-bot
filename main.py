@@ -111,12 +111,22 @@ def send_signed_request(method, endpoint, params=None):
 def get_instrument_info(symbol: str):
     url = f"{BYBIT_BASE_URL}/v5/market/instruments-info?category=spot&symbol={symbol}"
     res = requests.get(url).json()
+    log(f"GET_INSTRUMENT_INFO RAW: {res}")  # log utile per debugging
+
     if res["retCode"] != 0 or not res["result"]["list"]:
-        return 0.0001, 4  # fallback
+        return 0.0001, 4  # fallback sicuro
 
     info = res["result"]["list"][0]
-    qty_step = float(info["lotSizeFilter"]["qtyStep"])
-    precision = abs(Decimal(str(qty_step)).as_tuple().exponent)
+    lot = info.get("lotSizeFilter", {})
+
+    # Fallback su basePrecision se qtyStep non esiste
+    if "qtyStep" in lot:
+        qty_step = float(lot["qtyStep"])
+        precision = abs(Decimal(str(qty_step)).as_tuple().exponent)
+    else:
+        precision = int(lot.get("basePrecision", 4))
+        qty_step = 10 ** -precision
+
     return qty_step, precision
 
 def get_last_price(symbol: str) -> Optional[float]:
