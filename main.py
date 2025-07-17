@@ -174,21 +174,16 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     return qty_str
 
 def market_buy(symbol: str, usdt_amount: float):
-    qty_str = calculate_quantity(symbol, usdt_amount)
-    if not qty_str:
-        log(f"❌ Errore nel calcolo quantità per {symbol}, ordine ignorato.")
-        return None
-
     body = {
         "category": "spot",
         "symbol": symbol,
         "side": "Buy",
         "orderType": "Market",
-        "qty": qty_str
+        "quoteOrderQty": f"{usdt_amount:.2f}"
     }
 
     ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))
+    body_json = json.dumps(body, separators=(",", ":"))  # ⚠️ NO sort_keys=True!
     payload = f"{ts}{KEY}5000{body_json}"
     sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
