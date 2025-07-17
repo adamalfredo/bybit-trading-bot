@@ -204,17 +204,43 @@ def calculate_quantity(symbol: str, quote_qty: float) -> Optional[str]:
         return None
 
 def market_buy(symbol: str, usdt_amount: float):
+    price = get_last_price(symbol)
+    if not price:
+        log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
+        return
+
+    info = get_instrument_info(symbol)
+    qty_step = info["qty_step"]
+    precision = info["precision"]
+    min_order_amt = info["min_order_amt"]
+
+    qty = usdt_amount / price
+    step = Decimal(str(qty_step))
+    dec_qty = Decimal(str(qty))
+    rounded_qty = (dec_qty // step) * step
+    if rounded_qty * Decimal(str(price)) < Decimal(str(min_order_amt)):
+        log(f"❌ Ordine troppo piccolo per {symbol}, valore={rounded_qty*Decimal(str(price))} USDT")
+        return
+
+    qty_str = str(int(rounded_qty)) if precision == 0 else f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+
     body = {
         "category": "spot",
         "symbol": symbol,
         "side": "Buy",
         "orderType": "Market",
-        "quoteOrderQty": str(usdt_amount)
+        "qty": qty_str
     }
+
+    log(f"🧪 DEBUG | Tipo ordine: {body.get('orderType')} | Campi presenti: {list(body.keys())}")
+    assert "qty" in body, "❌ ERRORE: Campo 'qty' mancante per Market Buy"
+    assert "quoteOrderQty" not in body, "❌ ERRORE: Campo 'quoteOrderQty' NON supportato per Market Buy"
+
     ts = str(int(time.time() * 1000))
     body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
     payload = f"{ts}{KEY}5000{body_json}"
     sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
     headers = {
         "X-BAPI-API-KEY": KEY,
         "X-BAPI-SIGN": sign,
@@ -223,13 +249,14 @@ def market_buy(symbol: str, usdt_amount: float):
         "X-BAPI-SIGN-TYPE": "2",
         "Content-Type": "application/json"
     }
+
     try:
         resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"BUY BODY: {body_json}")
         log(f"RESPONSE: {resp.status_code} {resp.json()}")
         return resp
     except Exception as e:
-        log(f"❌ Errore invio ordine BUY per {symbol}: {e}")
+        log(f"Errore invio ordine BUY: {e}")
         return None
 
 def market_sell(symbol: str, qty: float):
