@@ -232,7 +232,7 @@ def market_sell(symbol: str, qty: float):
         "qty": qty_str
     }
     ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+    body_json = json.dumps(body, separators=(",", ":"))
     payload = f"{ts}{KEY}5000{body_json}"
     sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
     headers = {
