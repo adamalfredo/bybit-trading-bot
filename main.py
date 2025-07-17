@@ -162,24 +162,22 @@ def calculate_quantity(symbol: str, quote_qty: float) -> Optional[str]:
 
         order_value = float(rounded_qty) * price
 
-        # ❌ Verifica limite inferiore
+        # ✅ Verifica che il valore calcolato sia dentro i limiti accettabili
         if order_value < info["min_order_amt"]:
-            log(f"⚠️ Ordine troppo piccolo per {symbol} ({order_value:.2f} USDT, minimo richiesto: {info['min_order_amt']} USDT)")
+            log(f"⚠️ Valore troppo basso per {symbol} → {order_value:.2f} < {info['min_order_amt']} USDT")
             return None
 
-        # ❌ Verifica che valore ordine non sia < quote_qty * 0.9 → eccessivo arrotondamento
         if order_value < quote_qty * 0.9:
-            log(f"⚠️ Valore effettivo troppo distante da importo target per {symbol} → {order_value:.2f} < {quote_qty * 0.9:.2f}")
+            log(f"⚠️ Arrotondamento troppo penalizzante per {symbol} → {order_value:.2f} < {quote_qty * 0.9:.2f}")
             return None
 
-        # ❌ Verifica che valore ordine non sia > quote_qty * 1.5 → protezione coin piccole
         if order_value > quote_qty * 1.5:
             adjusted_qty = Decimal(str(quote_qty * 1.5 / price))
             rounded_qty = (adjusted_qty // step) * step
             order_value = float(rounded_qty) * price
-            log(f"⚠️ Quantità troppo elevata per {symbol}, applicato limite di sicurezza → Nuova qty: {rounded_qty}, Valore: {order_value:.2f} USDT")
+            log(f"⚠️ Valore troppo elevato per {symbol}, tagliato → Qty: {rounded_qty}, Valore: {order_value:.2f} USDT")
 
-        # ✅ Converte quantità arrotondata a stringa
+        # Ritorna la quantità come stringa con la giusta precisione
         if info["precision"] == 0:
             return str(int(rounded_qty))
         else:
