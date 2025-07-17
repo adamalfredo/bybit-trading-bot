@@ -150,6 +150,7 @@ def market_buy(symbol: str, order_usdt: float = 50.0):
             "qty": qty_str
         }
 
+        # Firma del corpo ordinato
         body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
         ts = str(int(time.time() * 1000))
         payload = f"{ts}{KEY}5000{body_json}"
@@ -166,15 +167,20 @@ def market_buy(symbol: str, order_usdt: float = 50.0):
 
         url = f"{BYBIT_BASE_URL}/v5/order/create"
         response = requests.post(url, headers=headers, json=body)
-        data = response.json()
 
         log(f"BUY BODY: {body}")
-        log(f"RESPONSE: {response.status_code} {data}")
+
+        try:
+            data = response.json()
+            log(f"RESPONSE: {response.status_code} {data}")
+        except Exception:
+            log(f"RESPONSE NON JSON ({response.status_code}): {response.text}")
+            return None
 
         if data["retCode"] == 0:
-            return response  # ✅ Successo
+            return response
         else:
-            log(f"❌ Acquisto fallito per {symbol}")
+            log(f"❌ Acquisto fallito per {symbol}: {data.get('retMsg')}")
             return response
 
     except Exception as e:
