@@ -135,29 +135,22 @@ def get_last_price(symbol: str) -> Optional[float]:
     return None
 
 def calculate_quantity(symbol: str, usdt_amount: float, price: float):
-    info = get_instrument_info(symbol)
-    if not info:
-        raise Exception(f"Impossibile ottenere info per {symbol}")
-
-    qty_step = float(info["lotSizeFilter"]["qtyStep"])
-    min_qty = float(info["lotSizeFilter"]["minOrderQty"])
-    precision = abs(Decimal(str(qty_step)).as_tuple().exponent)
-
+    qty_step, precision = get_instrument_info(symbol)
     raw_qty = usdt_amount / price
     rounded_qty = (Decimal(str(raw_qty)) // Decimal(str(qty_step))) * Decimal(str(qty_step))
 
-    if rounded_qty < Decimal(str(min_qty)):
+    if rounded_qty < Decimal(str(qty_step)):
         raise Exception(f"❌ Quantità troppo bassa per {symbol}")
 
     return str(round(rounded_qty, precision)), qty_step, precision
 
 def market_buy(symbol: str, usdt_amount: float):
-    qty_step, precision = get_instrument_info(symbol)
     price = get_last_price(symbol)
-
-    order_value = usdt_amount * 0.995  # Riduci per evitare errore saldo insufficiente
-    qty = order_value / price
-    rounded_qty = float(Decimal(qty).quantize(Decimal(str(qty_step)), rounding=ROUND_DOWN))
+    if not price:
+        log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
+        return
+    rounded_qty_str, qty_step, precision = calculate_quantity(symbol, usdt_amount * 0.995, price)
+    rounded_qty = float(rounded_qty_str)
 
     body = {
         "category": "spot",
@@ -420,8 +413,6 @@ def setup_gspread():
 # Salva una riga nel foglio
 def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
     try:
-        import gspread
-        from google.oauth2.service_account import Credentials
         import base64
 
         SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"
