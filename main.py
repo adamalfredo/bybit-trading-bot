@@ -136,7 +136,11 @@ def get_last_price(symbol: str) -> Optional[tuple[float, float]]:
 
 def calculate_quantity(symbol: str, usdt_amount: float, price: float):
     qty_step, precision = get_instrument_info(symbol)
-    raw_qty = (usdt_amount * 0.995) / price
+
+    # Aggiungi margine di sicurezza al prezzo per evitare ordine troppo basso
+    adjusted_price = price * 1.01  # 🔒 maggiorazione del prezzo (1%)
+    raw_qty = (usdt_amount * 0.995) / adjusted_price
+
     rounded_qty = (Decimal(str(raw_qty)) // Decimal(str(qty_step))) * Decimal(str(qty_step))
 
     if rounded_qty < Decimal(str(qty_step)):
