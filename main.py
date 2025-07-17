@@ -556,7 +556,7 @@ while True:
             continue
 
         entry = position_data[symbol]
-        current_price = get_last_price(symbol)  # usa solo askPrice (indice 1)
+        _, current_price = get_last_price(symbol)
         if not current_price:
             continue
 
