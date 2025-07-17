@@ -137,10 +137,28 @@ def calculate_quantity(symbol: str, usdt_amount: float, price: float):
 
     return str(round(rounded_qty, precision)), qty_step, precision
 
-def market_buy(symbol: str, order_usdt: float = 50.0):
+def market_buy(symbol: str, usdt: float = 50.0):
+    price = get_last_price(symbol)
+    if not price:
+        log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
+        return None
+
+    qty_step, precision = get_instrument_info(symbol)
+    order_value = usdt
+    if order_value < 5:
+        log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
+        return
+
     try:
-        price = get_last_price(symbol)
-        qty_str, qty_step, precision = calculate_quantity(symbol, order_usdt, price)
+        dec_usdt = Decimal(str(usdt))
+        dec_price = Decimal(str(price))
+        qty = (dec_usdt / dec_price).quantize(Decimal(str(qty_step)), rounding=ROUND_DOWN)
+
+        if qty <= 0:
+            log(f"❌ Quantità calcolata nulla per {symbol}")
+            return None
+
+        qty_str = str(int(qty)) if precision == 0 else f"{qty:.{precision}f}".rstrip('0').rstrip('.')
 
         body = {
             "category": "spot",
@@ -150,7 +168,6 @@ def market_buy(symbol: str, order_usdt: float = 50.0):
             "qty": qty_str
         }
 
-        # Firma del corpo ordinato
         body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
         ts = str(int(time.time() * 1000))
         payload = f"{ts}{KEY}5000{body_json}"
@@ -166,25 +183,14 @@ def market_buy(symbol: str, order_usdt: float = 50.0):
         }
 
         url = f"{BYBIT_BASE_URL}/v5/order/create"
-        response = requests.post(url, headers=headers, json=body)
+        resp = requests.post(url, headers=headers, data=body_json)  # ✅ attenzione qui
 
-        log(f"BUY BODY: {body}")
-        log(f"RESPONSE RAW (text): {response.status_code} → {repr(response.text)}")
-
-        try:
-            data = response.json()
-        except Exception as e:
-            log(f"❌ Errore parsing JSON: {e}")
-            return None
-
-        if data["retCode"] == 0:
-            return response
-        else:
-            log(f"❌ Acquisto fallito per {symbol}: {data.get('retMsg')}")
-            return response
+        log(f"BUY BODY: {body_json}")
+        log(f"RESPONSE: {resp.status_code} {resp.text}")
+        return resp
 
     except Exception as e:
-        log(f"❌ Errore acquisto per {symbol}: {e}")
+        log(f"❌ Errore invio ordine BUY per {symbol}: {e}")
         return None
 
 def market_sell(symbol: str, qty: float):
