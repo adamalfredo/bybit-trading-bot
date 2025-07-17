@@ -150,32 +150,36 @@ def calculate_quantity(symbol: str, quote_qty: float) -> Optional[str]:
             log(f"❌ Prezzo non valido per {symbol}")
             return None
 
-        # Calcolo preliminare della qty da USDT
+        # Calcola quantità teorica
         raw_qty = quote_qty / price
-
-        # Arrotonda alla precisione corretta
-        dec_qty = Decimal(str(raw_qty))
         step = Decimal(str(info["qty_step"]))
+        dec_qty = Decimal(str(raw_qty))
         rounded_qty = (dec_qty // step) * step
 
         if rounded_qty <= 0:
             log(f"❌ Quantità calcolata nulla o negativa per {symbol}")
             return None
 
-        # Verifica ordine minimo
         order_value = float(rounded_qty) * price
+
+        # ❌ Verifica limite inferiore
         if order_value < info["min_order_amt"]:
             log(f"⚠️ Ordine troppo piccolo per {symbol} ({order_value:.2f} USDT, minimo richiesto: {info['min_order_amt']} USDT)")
             return None
 
-        # Limite di sicurezza per quantità enorme (es. PEPE): taglia a max 1.5x dell'importo previsto
+        # ❌ Verifica che valore ordine non sia < quote_qty * 0.9 → eccessivo arrotondamento
+        if order_value < quote_qty * 0.9:
+            log(f"⚠️ Valore effettivo troppo distante da importo target per {symbol} → {order_value:.2f} < {quote_qty * 0.9:.2f}")
+            return None
+
+        # ❌ Verifica che valore ordine non sia > quote_qty * 1.5 → protezione coin piccole
         if order_value > quote_qty * 1.5:
             adjusted_qty = Decimal(str(quote_qty * 1.5 / price))
             rounded_qty = (adjusted_qty // step) * step
             order_value = float(rounded_qty) * price
             log(f"⚠️ Quantità troppo elevata per {symbol}, applicato limite di sicurezza → Nuova qty: {rounded_qty}, Valore: {order_value:.2f} USDT")
 
-        # Restituisci qty come stringa formattata correttamente
+        # ✅ Converte quantità arrotondata a stringa
         if info["precision"] == 0:
             return str(int(rounded_qty))
         else:
