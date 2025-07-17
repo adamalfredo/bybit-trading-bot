@@ -212,6 +212,7 @@ def market_buy(symbol: str, usdt_amount: float):
             "X-BAPI-SIGN": sign,
             "X-BAPI-TIMESTAMP": ts,
             "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-SIGN-TYPE": "2",
             "Content-Type": "application/json"
         }
 
