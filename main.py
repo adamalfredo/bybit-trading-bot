@@ -183,7 +183,7 @@ def market_buy(symbol: str, usdt_amount: float):
     }
 
     ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))  # ⚠️ NO sort_keys=True!
+    body_json = json.dumps(body, separators=(",", ":"))
     payload = f"{ts}{KEY}5000{body_json}"
     sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
@@ -239,8 +239,10 @@ def market_sell(symbol: str, qty: float):
         if rounded_qty <= 0:
             log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
             return
-        qty_str = str(int(rounded_qty)) if precision == 0 else f"{rounded_qty:.{precision}f}"
-
+        if precision == 0:
+            qty_str = str(int(rounded_qty))
+        else:
+            qty_str = f"{rounded_qty:.{precision}f}"
     except Exception as e:
         log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
         return
