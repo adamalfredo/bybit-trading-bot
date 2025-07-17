@@ -136,7 +136,7 @@ def get_last_price(symbol: str) -> Optional[float]:
 
 def calculate_quantity(symbol: str, usdt_amount: float, price: float):
     qty_step, precision = get_instrument_info(symbol)
-    raw_qty = usdt_amount / price
+    raw_qty = (usdt_amount * 0.995) / price
     rounded_qty = (Decimal(str(raw_qty)) // Decimal(str(qty_step))) * Decimal(str(qty_step))
 
     if rounded_qty < Decimal(str(qty_step)):
@@ -152,6 +152,10 @@ def market_buy(symbol: str, usdt_amount: float):
             return None
 
         qty_str, qty_step, precision = calculate_quantity(symbol, usdt_amount, price)
+        order_value = float(qty_str) * price
+        if order_value < 5:
+            log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
+            return None
 
         body = {
             "category": "spot",
