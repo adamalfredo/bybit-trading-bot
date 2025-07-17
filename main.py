@@ -154,31 +154,37 @@ def get_last_price(symbol: str) -> Optional[float]:
         log(f"❌ Errore in get_last_price: {e}")
         return None
 
-def market_buy(symbol: str, usdt_amount: float):
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}, impossibile calcolare qty")
-        return None
-
+def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     info = get_instrument_info(symbol)
-    qty_step = info["qty_step"]
-    precision = info["precision"]
-    min_order_amt = info["min_order_amt"]
-
-    qty = usdt_amount / price
-    dec_qty = Decimal(str(qty))
-    step = Decimal(str(qty_step))
-    rounded_qty = (dec_qty // step) * step
-    if rounded_qty <= 0:
-        log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
+    price = get_last_price(symbol)
+    if not info or not price:
+        log(f"❌ Impossibile ottenere info o prezzo per {symbol}")
         return None
 
-    qty_str = str(int(rounded_qty)) if precision == 0 else f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+    qty_step = Decimal(str(info["qty_step"]))
+    precision = info["precision"]
+    min_qty = Decimal(str(info["min_qty"]))
 
-    # Check valore minimo ordine
-    order_value = float(qty_str) * price
-    if order_value < min_order_amt:
-        log(f"❌ Ordine troppo piccolo per {symbol}: {order_value:.4f} USDT")
+    # Margine sicurezza per evitare errori: 0.99 × USDT
+    qty = Decimal(str(usdt_amount * 0.99)) / Decimal(str(price))
+
+    # Arrotonda al passo minimo
+    qty = (qty // qty_step) * qty_step
+
+    if qty < min_qty:
+        log(f"❌ Quantità calcolata troppo piccola per {symbol}: {qty}")
+        return None
+
+    # Format corretto per precisione (es. 3, 4, 6 decimali...)
+    if precision == 0:
+        return str(int(qty))
+    else:
+        return f"{qty:.{precision}f}".rstrip("0").rstrip(".")
+
+def market_buy(symbol: str, usdt_amount: float):
+    qty_str = calculate_quantity(symbol, usdt_amount)
+    if not qty_str:
+        log(f"❌ Errore nel calcolo quantità per {symbol}, ordine ignorato.")
         return None
 
     body = {
@@ -639,4 +645,6 @@ while True:
                         log(f"❌ Vendita fallita con Trailing Stop per {symbol}")
 
     # Sicurezza: attesa tra i cicli principali
+    # Aggiungi pausa di sicurezza per evitare ciclo troppo veloce se tutto salta
+    time.sleep(1)
     time.sleep(INTERVAL_MINUTES * 60)
