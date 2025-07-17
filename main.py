@@ -154,116 +154,42 @@ def get_last_price(symbol: str) -> Optional[float]:
         log(f"❌ Errore in get_last_price: {e}")
         return None
 
-def calculate_quantity(symbol: str, quote_qty: float) -> Optional[str]:
-    try:
-        info = get_instrument_info(symbol)
-        price = get_last_price(symbol)
-
-        if price is None or price <= 0:
-            log(f"❌ Prezzo non valido per {symbol}")
-            return None
-
-        raw_qty = quote_qty / price
-        step = Decimal(str(info["qty_step"]))
-        dec_qty = Decimal(str(raw_qty))
-        rounded_qty = (dec_qty // step) * step
-
-        if rounded_qty <= 0:
-            log(f"❌ Quantità calcolata nulla o negativa per {symbol}")
-            return None
-
-        order_value = float(rounded_qty) * price
-        min_order_amt = info["min_order_amt"]
-        max_order_amt = 10_000  # ⛔️ Soft cap per evitare retCode 170124
-
-        log(f"🧪 DEBUG Qty {symbol} → raw: {raw_qty:.8f}, rounded: {rounded_qty}, value: {order_value:.2f} USDT")
-
-        # Limite minimo imposto da Bybit
-        if order_value < min_order_amt:
-            log(f"⚠️ Valore troppo basso per {symbol} → {order_value:.2f} < min_order_amt {min_order_amt} USDT")
-            return None
-
-        # Protezione contro valore troppo elevato
-        if order_value > max_order_amt:
-            log(f"❌ Valore ordine troppo alto per {symbol}: {order_value:.2f} > max_order_amt {max_order_amt}")
-            return None
-
-        # Penalizzazione da arrotondamento
-        if order_value < quote_qty * 0.9:
-            log(f"⚠️ Arrotondamento troppo penalizzante per {symbol} → {order_value:.2f} < {quote_qty * 0.9:.2f}")
-            return None
-
-        # Taglio se troppo distante dal valore atteso
-        if order_value > quote_qty * 1.5:
-            adjusted_qty = Decimal(str(quote_qty * 1.5 / price))
-            rounded_qty = (adjusted_qty // step) * step
-            order_value = float(rounded_qty) * price
-            log(f"⚠️ Valore elevato, tagliato → Qty: {rounded_qty}, Valore: {order_value:.2f} USDT")
-
-        # Ritorna qty formattata
-        if info["precision"] == 0:
-            return str(int(rounded_qty))
-        else:
-            return f"{rounded_qty:.{info['precision']}f}".rstrip('0').rstrip('.')
-
-    except Exception as e:
-        log(f"❌ Errore in calculate_quantity per {symbol}: {e}")
-        return None
-
 def market_buy(symbol: str, usdt_amount: float):
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
-        return
-
-    info = get_instrument_info(symbol)
-    qty_step = info["qty_step"]
-    precision = info["precision"]
-    min_order_amt = info["min_order_amt"]
-
-    qty = usdt_amount / price
-    step = Decimal(str(qty_step))
-    dec_qty = Decimal(str(qty))
-    rounded_qty = (dec_qty // step) * step
-    if rounded_qty * Decimal(str(price)) < Decimal(str(min_order_amt)):
-        log(f"❌ Ordine troppo piccolo per {symbol}, valore={rounded_qty*Decimal(str(price))} USDT")
-        return
-
-    qty_str = str(int(rounded_qty)) if precision == 0 else f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
-
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Buy",
-        "orderType": "Market",
-        "qty": qty_str
-    }
-
-    log(f"🧪 DEBUG | Tipo ordine: {body.get('orderType')} | Campi presenti: {list(body.keys())}")
-    assert "qty" in body, "❌ ERRORE: Campo 'qty' mancante per Market Buy"
-    assert "quoteOrderQty" not in body, "❌ ERRORE: Campo 'quoteOrderQty' NON supportato per Market Buy"
-
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
-
     try:
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"BUY BODY: {body_json}")
-        log(f"RESPONSE: {resp.status_code} {resp.json()}")
-        return resp
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": "Buy",
+            "orderType": "Market",
+            "quoteOrderQty": str(usdt_amount)  # ← definitivo
+        }
+
+        ts = str(int(time.time() * 1000))
+        body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+        payload = f"{ts}{KEY}5000{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "Content-Type": "application/json"
+        }
+
+        log(f"🧪 DEBUG | Tipo ordine: Market | Campi presenti: {list(body.keys())}")
+        log(f"BUY BODY: {json.dumps(body)}")
+
+        response = requests.post(
+            f"{BYBIT_BASE_URL}/v5/order/create",
+            headers=headers,
+            data=body_json,
+            timeout=10
+        )
+        return response.json()
+
     except Exception as e:
-        log(f"Errore invio ordine BUY: {e}")
+        log(f"❌ Errore in market_buy: {e}")
         return None
 
 def market_sell(symbol: str, qty: float):
