@@ -150,17 +150,32 @@ def calculate_quantity(symbol: str, quote_qty: float) -> Optional[str]:
             log(f"❌ Prezzo non valido per {symbol}")
             return None
 
-        qty = quote_qty / price
+        # Calcolo preliminare della qty da USDT
+        raw_qty = quote_qty / price
 
-        dec_qty = Decimal(str(qty))
+        # Arrotonda alla precisione corretta
+        dec_qty = Decimal(str(raw_qty))
         step = Decimal(str(info["qty_step"]))
         rounded_qty = (dec_qty // step) * step
 
-        order_value = float(rounded_qty) * price
-        if order_value < info["min_order_amt"]:
-            log(f"⚠️ Ordine troppo piccolo per {symbol} ({order_value:.2f} USDT)")
+        if rounded_qty <= 0:
+            log(f"❌ Quantità calcolata nulla o negativa per {symbol}")
             return None
 
+        # Verifica ordine minimo
+        order_value = float(rounded_qty) * price
+        if order_value < info["min_order_amt"]:
+            log(f"⚠️ Ordine troppo piccolo per {symbol} ({order_value:.2f} USDT, minimo richiesto: {info['min_order_amt']} USDT)")
+            return None
+
+        # Limite di sicurezza per quantità enorme (es. PEPE): taglia a max 1.5x dell'importo previsto
+        if order_value > quote_qty * 1.5:
+            adjusted_qty = Decimal(str(quote_qty * 1.5 / price))
+            rounded_qty = (adjusted_qty // step) * step
+            order_value = float(rounded_qty) * price
+            log(f"⚠️ Quantità troppo elevata per {symbol}, applicato limite di sicurezza → Nuova qty: {rounded_qty}, Valore: {order_value:.2f} USDT")
+
+        # Restituisci qty come stringa formattata correttamente
         if info["precision"] == 0:
             return str(int(rounded_qty))
         else:
@@ -584,7 +599,7 @@ while True:
             continue
 
         entry = position_data[symbol]
-        _, current_price = get_last_price(symbol)
+        current_price = get_last_price(symbol)
         if not current_price:
             continue
 
