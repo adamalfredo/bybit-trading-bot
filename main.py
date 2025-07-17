@@ -202,7 +202,7 @@ def market_buy(symbol: str, usdt_amount: float):
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "qty": qty_str  # ✅ usa qty calcolata, NON quoteOrderQty
+            "quoteOrderQty": str(usdt_amount),
         }
 
         ts = str(int(time.time() * 1000))
