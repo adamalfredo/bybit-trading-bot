@@ -109,11 +109,15 @@ def send_signed_request(method, endpoint, params=None):
     return response.json()
 
 def get_instrument_info(symbol: str):
-    url = f"https://api.bybit.com/v5/market/instruments-info?category=spot&symbol={symbol}"
+    url = f"{BYBIT_BASE_URL}/v5/market/instruments-info?category=spot&symbol={symbol}"
     res = requests.get(url).json()
     if res["retCode"] != 0 or not res["result"]["list"]:
-        return None
-    return res["result"]["list"][0]
+        return 0.0001, 4  # fallback
+
+    info = res["result"]["list"][0]
+    qty_step = float(info["lotSizeFilter"]["qtyStep"])
+    precision = abs(Decimal(str(qty_step)).as_tuple().exponent)
+    return qty_step, precision
 
 def get_last_price(symbol: str) -> Optional[float]:
     url = f"{BYBIT_BASE_URL}/v5/market/tickers"
