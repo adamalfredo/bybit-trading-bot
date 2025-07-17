@@ -521,8 +521,22 @@ while True:
                 log(f"💸 Saldo USDT insufficiente per {symbol} ({usdt_balance:.2f})")
                 continue
 
-            order_amount = min(ORDER_USDT, usdt_balance)
+            # 📊 Valuta la forza del segnale in base alla strategia
+            strategy_strength = {
+                "Breakout Bollinger": 1.0,
+                "MACD bullish + ADX": 0.9,
+                "Incrocio SMA 20/50": 0.75,
+                "Incrocio EMA 20/50": 0.7,
+                "MACD bullish (stabile)": 0.65,
+                "Trend EMA + RSI": 0.6
+            }
+            strength = strategy_strength.get(strategy, 0.5)  # default prudente
+
+            max_invest = usdt_balance * strength
+            order_amount = min(max_invest, usdt_balance, 250)  # tetto massimo se vuoi
+
             resp = market_buy(symbol, order_amount)
+
             if resp is None:
                 log(f"❌ Acquisto fallito per {symbol}")
                 continue
@@ -557,7 +571,7 @@ while True:
 
             open_positions.add(symbol)
             log(f"🟢 Acquisto registrato per {symbol} | Entry: {price:.4f} | TP: {tp:.4f} | SL: {sl:.4f}")
-            notify_telegram(f"🟢📈 Acquisto per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}")
+            notify_telegram(f"🟢📈 Acquisto per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}\nInvestito: {order_amount:.2f} USDT")
 
         # 🔴 USCITA (EXIT)
         elif signal == "exit" and symbol in open_positions:
