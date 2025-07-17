@@ -204,24 +204,17 @@ def calculate_quantity(symbol: str, quote_qty: float) -> Optional[str]:
         return None
 
 def market_buy(symbol: str, usdt_amount: float):
-    qty = calculate_quantity(symbol, usdt_amount)
-    if not qty:
-        log(f"❌ Quantità non valida per {symbol}, ordine non inviato")
-        return
-
     body = {
         "category": "spot",
         "symbol": symbol,
         "side": "Buy",
         "orderType": "Market",
-        "qty": qty
+        "quoteOrderQty": str(usdt_amount)
     }
-
     ts = str(int(time.time() * 1000))
     body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
     payload = f"{ts}{KEY}5000{body_json}"
     sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-
     headers = {
         "X-BAPI-API-KEY": KEY,
         "X-BAPI-SIGN": sign,
@@ -230,14 +223,13 @@ def market_buy(symbol: str, usdt_amount: float):
         "X-BAPI-SIGN-TYPE": "2",
         "Content-Type": "application/json"
     }
-
     try:
         resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"BUY BODY: {body_json}")
         log(f"RESPONSE: {resp.status_code} {resp.json()}")
         return resp
     except Exception as e:
-        log(f"❌ Errore invio ordine BUY: {e}")
+        log(f"❌ Errore invio ordine BUY per {symbol}: {e}")
         return None
 
 def market_sell(symbol: str, qty: float):
