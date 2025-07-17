@@ -169,12 +169,12 @@ def market_buy(symbol: str, order_usdt: float = 50.0):
         response = requests.post(url, headers=headers, json=body)
 
         log(f"BUY BODY: {body}")
+        log(f"RESPONSE RAW: {response.status_code} {response.text}")
 
         try:
             data = response.json()
-            log(f"RESPONSE: {response.status_code} {data}")
-        except Exception:
-            log(f"RESPONSE NON JSON ({response.status_code}): {response.text}")
+        except Exception as e:
+            log(f"❌ Errore parsing JSON: {e}")
             return None
 
         if data["retCode"] == 0:
