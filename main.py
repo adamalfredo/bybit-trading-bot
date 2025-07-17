@@ -105,40 +105,26 @@ def send_signed_request(method, endpoint, params=None):
     return response.json()
 
 def get_instrument_info(symbol: str) -> dict:
+    url = f"{BYBIT_BASE_URL}/v5/market/instruments-info?category=spot&symbol={symbol}"
     try:
-        response = requests.get(
-            f"{BYBIT_BASE_URL}/v5/market/instruments-info",
-            params={"category": "spot", "symbol": symbol},
-            timeout=10
-        )
-        data = response.json()
-
+        resp = requests.get(url)
+        data = resp.json()
         if data["retCode"] != 0:
-            raise ValueError(f"API error: {data['retMsg']}")
+            log(f"❌ Errore fetch info strumento: {data['retMsg']}")
+            return {}
 
-        instruments = data.get("result", {}).get("list", [])
-        if not instruments:
-            raise ValueError(f"Nessuna info strumentale trovata per {symbol}")
-
-        info = instruments[0]
-        lot = info.get("lotSizeFilter", {})
-
-        if "basePrecision" not in lot or "minOrderAmt" not in lot:
-            raise ValueError(f"Parametri mancanti in lotSizeFilter per {symbol}: {lot}")
-
-        qty_step = float(lot["basePrecision"])
-        precision = abs(Decimal(str(qty_step)).as_tuple().exponent)
-        min_order_amt = float(lot["minOrderAmt"])
-
+        info = data["result"]["list"][0]
+        lot = info["lotSizeFilter"]
         return {
-            "qty_step": qty_step,
-            "precision": precision,
-            "min_order_amt": min_order_amt
+            "min_qty": float(lot.get("minOrderQty", 0)),
+            "qty_step": float(lot.get("qtyStep", 0.0001)),
+            "precision": int(info.get("priceScale", 4)),
+            "min_order_amt": float(info.get("minOrderAmt", 5))
         }
 
     except Exception as e:
-        log(f"❌ Errore in get_instrument_info per {symbol}: {e}")
-        raise
+        log(f"❌ Errore get_instrument_info: {e}")
+        return {}
 
 def get_last_price(symbol: str) -> Optional[float]:
     try:
@@ -155,31 +141,37 @@ def get_last_price(symbol: str) -> Optional[float]:
         return None
 
 def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
-    info = get_instrument_info(symbol)
     price = get_last_price(symbol)
-    if not info or not price:
-        log(f"❌ Impossibile ottenere info o prezzo per {symbol}")
+    if not price:
+        log(f"❌ Prezzo non disponibile per {symbol}")
         return None
 
-    qty_step = Decimal(str(info["qty_step"]))
-    precision = info["precision"]
-    min_qty = Decimal(str(info["min_qty"]))
-
-    # Margine sicurezza per evitare errori: 0.99 × USDT
-    qty = Decimal(str(usdt_amount * 0.99)) / Decimal(str(price))
-
-    # Arrotonda al passo minimo
-    qty = (qty // qty_step) * qty_step
-
-    if qty < min_qty:
-        log(f"❌ Quantità calcolata troppo piccola per {symbol}: {qty}")
+    info = get_instrument_info(symbol)
+    if not info or "qty_step" not in info or "precision" not in info or "min_qty" not in info or "min_order_amt" not in info:
+        log(f"❌ Dati incompleti per {symbol}: {info}")
         return None
 
-    # Format corretto per precisione (es. 3, 4, 6 decimali...)
-    if precision == 0:
-        return str(int(qty))
-    else:
-        return f"{qty:.{precision}f}".rstrip("0").rstrip(".")
+    qty = usdt_amount / price
+    dec_qty = Decimal(str(qty))
+    step = Decimal(str(info["qty_step"]))
+    rounded_qty = (dec_qty // step) * step
+
+    if rounded_qty <= 0:
+        log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
+        return None
+
+    qty_str = (
+        str(int(rounded_qty))
+        if info["precision"] == 0
+        else f"{rounded_qty:.{info['precision']}f}".rstrip("0").rstrip(".")
+    )
+
+    order_value = float(qty_str) * price
+    if order_value < info["min_order_amt"]:
+        log(f"❌ Ordine troppo piccolo per {symbol}: {order_value:.4f} USDT")
+        return None
+
+    return qty_str
 
 def market_buy(symbol: str, usdt_amount: float):
     qty_str = calculate_quantity(symbol, usdt_amount)
