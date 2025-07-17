@@ -104,7 +104,7 @@ def send_signed_request(method, endpoint, params=None):
 
     return response.json()
 
-def get_instrument_info(symbol: str):
+def get_instrument_info(symbol: str) -> dict:
     try:
         response = requests.get(
             f"{BYBIT_BASE_URL}/v5/market/instruments-info",
@@ -112,19 +112,25 @@ def get_instrument_info(symbol: str):
             timeout=10
         )
         data = response.json()
-        info = data["result"]["list"][0]
 
-        qty_step = float(info["lotSizeFilter"]["basePrecision"])
+        if data["retCode"] != 0:
+            raise ValueError(f"API error: {data['retMsg']}")
+
+        info = data["result"]["list"][0]
+        lot = info["lotSizeFilter"]
+
+        qty_step = float(lot["qtyStep"])                      # ← CORRETTO
         precision = abs(Decimal(str(qty_step)).as_tuple().exponent)
-        min_order_amt = float(info["lotSizeFilter"]["minOrderAmt"])
+        min_order_amt = float(lot["minOrderAmt"])             # ← VALORE MINIMO ORDINE IN USDT
 
         return {
             "qty_step": qty_step,
             "precision": precision,
             "min_order_amt": min_order_amt
         }
+
     except Exception as e:
-        log(f"❌ Errore in get_instrument_info: {e}")
+        log(f"❌ Errore in get_instrument_info per {symbol}: {e}")
         raise
 
 def get_last_price(symbol: str) -> Optional[float]:
