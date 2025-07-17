@@ -147,9 +147,11 @@ def market_buy(symbol: str, order_usdt: float = 50.0):
             "quoteOrderQty": str(order_usdt)
         }
 
+        # Corpo firmato in ordine alfabetico
+        body_for_signature = json.dumps(body, separators=(",", ":"), sort_keys=True)
+
         ts = str(int(time.time() * 1000))
-        body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
-        payload = f"{ts}{KEY}5000{body_json}"
+        payload = f"{ts}{KEY}5000{body_for_signature}"
         sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
         headers = {
@@ -162,7 +164,7 @@ def market_buy(symbol: str, order_usdt: float = 50.0):
 
         url = "https://api.bybit.com/v5/order/create"
 
-        # ✅ CORRETTO: usa `json=body` (non `data=...`)
+        # Invio diretto con oggetto Python, NON la stringa firmata
         response = requests.post(url, headers=headers, json=body)
         data = response.json()
 
