@@ -145,34 +145,41 @@ def calculate_quantity(symbol: str, usdt_amount: float, price: float):
     return str(round(rounded_qty, precision)), qty_step, precision
 
 def market_buy(symbol: str, usdt_amount: float):
-    price = get_last_price(symbol)
-    qty_str, qty_step, precision = calculate_quantity(symbol, usdt_amount, price)
+    try:
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": "Buy",
+            "orderType": "Market",
+            "quoteOrderQty": str(round(usdt_amount * 0.995, 2))  # leggero buffer di sicurezza
+        }
 
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Buy",
-        "orderType": "Market",
-        "qty": qty_str
-    }
+        ts = str(int(time.time() * 1000))
+        body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+        payload = f"{ts}{KEY}5000{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "Content-Type": "application/json"
+        }
 
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "Content-Type": "application/json"
-    }
+        response = requests.post(
+            "https://api.bybit.com/v5/order/create",
+            headers=headers,
+            data=body_json,
+            timeout=10
+        )
+        log(f"BUY BODY: {body}")
+        log(f"RESPONSE: {response.status_code} {response.text}")
+        return response.json()
 
-    log(f"BUY BODY: {body}")
-    response = requests.post("https://api.bybit.com/v5/order/create", headers=headers, data=body_json)
-    log(f"RESPONSE: {response.status_code} {response.text}")
-    return response.json()
+    except Exception as e:
+        log(f"❌ Errore in market_buy: {e}")
+        return None
 
 def market_sell(symbol: str, qty: float):
     price = get_last_price(symbol)
