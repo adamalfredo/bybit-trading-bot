@@ -165,7 +165,7 @@ def market_buy(symbol: str, order_usdt: float = 50.0):
         }
 
         url = f"{BYBIT_BASE_URL}/v5/order/create"
-        response = requests.post(url, headers=headers, data=body_json)
+        response = requests.post(url, headers=headers, json=body)
         data = response.json()
 
         log(f"BUY BODY: {body}")
