@@ -146,18 +146,14 @@ def calculate_quantity(symbol: str, usdt_amount: float, price: float):
 
 def market_buy(symbol: str, usdt_amount: float):
     price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
-        return
-    rounded_qty_str, qty_step, precision = calculate_quantity(symbol, usdt_amount * 0.995, price)
-    rounded_qty = float(rounded_qty_str)
+    qty_str, qty_step, precision = calculate_quantity(symbol, usdt_amount, price)
 
     body = {
         "category": "spot",
         "symbol": symbol,
         "side": "Buy",
         "orderType": "Market",
-        "qty": str(rounded_qty)
+        "qty": qty_str
     }
 
     ts = str(int(time.time() * 1000))
