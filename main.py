@@ -163,11 +163,7 @@ def calculate_quantity(symbol: str, quote_qty: float) -> Optional[str]:
             log(f"❌ Prezzo non valido per {symbol}")
             return None
 
-        # Calcola quantità teorica
         raw_qty = quote_qty / price
-        if raw_qty > 1_000_000:
-            log(f"❌ Quantità calcolata troppo alta ({raw_qty}) per {symbol}, skip ordine.")
-            return None
         step = Decimal(str(info["qty_step"]))
         dec_qty = Decimal(str(raw_qty))
         rounded_qty = (dec_qty // step) * step
@@ -177,23 +173,34 @@ def calculate_quantity(symbol: str, quote_qty: float) -> Optional[str]:
             return None
 
         order_value = float(rounded_qty) * price
+        min_order_amt = info["min_order_amt"]
+        max_order_amt = 10_000  # ⛔️ Soft cap per evitare retCode 170124
 
-        # ✅ Verifica che il valore calcolato sia dentro i limiti accettabili
-        if order_value < info["min_order_amt"]:
-            log(f"⚠️ Valore troppo basso per {symbol} → {order_value:.2f} < {info['min_order_amt']} USDT")
+        log(f"🧪 DEBUG Qty {symbol} → raw: {raw_qty:.8f}, rounded: {rounded_qty}, value: {order_value:.2f} USDT")
+
+        # Limite minimo imposto da Bybit
+        if order_value < min_order_amt:
+            log(f"⚠️ Valore troppo basso per {symbol} → {order_value:.2f} < min_order_amt {min_order_amt} USDT")
             return None
 
+        # Protezione contro valore troppo elevato
+        if order_value > max_order_amt:
+            log(f"❌ Valore ordine troppo alto per {symbol}: {order_value:.2f} > max_order_amt {max_order_amt}")
+            return None
+
+        # Penalizzazione da arrotondamento
         if order_value < quote_qty * 0.9:
             log(f"⚠️ Arrotondamento troppo penalizzante per {symbol} → {order_value:.2f} < {quote_qty * 0.9:.2f}")
             return None
 
+        # Taglio se troppo distante dal valore atteso
         if order_value > quote_qty * 1.5:
             adjusted_qty = Decimal(str(quote_qty * 1.5 / price))
             rounded_qty = (adjusted_qty // step) * step
             order_value = float(rounded_qty) * price
-            log(f"⚠️ Valore troppo elevato per {symbol}, tagliato → Qty: {rounded_qty}, Valore: {order_value:.2f} USDT")
+            log(f"⚠️ Valore elevato, tagliato → Qty: {rounded_qty}, Valore: {order_value:.2f} USDT")
 
-        # Ritorna la quantità come stringa con la giusta precisione
+        # Ritorna qty formattata
         if info["precision"] == 0:
             return str(int(rounded_qty))
         else:
