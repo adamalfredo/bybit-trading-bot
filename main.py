@@ -152,6 +152,9 @@ def calculate_quantity(symbol: str, quote_qty: float) -> Optional[str]:
 
         # Calcola quantità teorica
         raw_qty = quote_qty / price
+        if raw_qty > 1_000_000:
+            log(f"❌ Quantità calcolata troppo alta ({raw_qty}) per {symbol}, skip ordine.")
+            return None
         step = Decimal(str(info["qty_step"]))
         dec_qty = Decimal(str(raw_qty))
         rounded_qty = (dec_qty // step) * step
@@ -246,7 +249,9 @@ def market_sell(symbol: str, qty: float):
     if order_value < 5:
         log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
         return
-    qty_step, precision = get_instrument_info(symbol)
+    info = get_instrument_info(symbol)
+    qty_step = info["qty_step"]
+    precision = info["precision"]
     try:
         dec_qty = Decimal(str(qty))
         step = Decimal(str(qty_step))
