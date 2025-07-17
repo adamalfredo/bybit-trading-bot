@@ -139,19 +139,20 @@ def calculate_quantity(symbol: str, usdt_amount: float, price: float):
 
 def market_buy(symbol: str, order_usdt: float = 50.0):
     try:
+        price = get_last_price(symbol)
+        qty_str, qty_step, precision = calculate_quantity(symbol, order_usdt, price)
+
         body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "quoteOrderQty": str(order_usdt)
+            "qty": qty_str
         }
 
-        # Corpo firmato in ordine alfabetico
-        body_for_signature = json.dumps(body, separators=(",", ":"), sort_keys=True)
-
+        body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
         ts = str(int(time.time() * 1000))
-        payload = f"{ts}{KEY}5000{body_for_signature}"
+        payload = f"{ts}{KEY}5000{body_json}"
         sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
         headers = {
@@ -159,27 +160,26 @@ def market_buy(symbol: str, order_usdt: float = 50.0):
             "X-BAPI-SIGN": sign,
             "X-BAPI-TIMESTAMP": ts,
             "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-SIGN-TYPE": "2",
             "Content-Type": "application/json"
         }
 
-        url = "https://api.bybit.com/v5/order/create"
-
-        # Invio diretto con oggetto Python, NON la stringa firmata
-        response = requests.post(url, headers=headers, json=body)
+        url = f"{BYBIT_BASE_URL}/v5/order/create"
+        response = requests.post(url, headers=headers, data=body_json)
         data = response.json()
 
         log(f"BUY BODY: {body}")
         log(f"RESPONSE: {response.status_code} {data}")
 
         if data["retCode"] == 0:
-            return True
+            return response  # ✅ Successo
         else:
             log(f"❌ Acquisto fallito per {symbol}")
-            return False
+            return response
 
     except Exception as e:
         log(f"❌ Errore acquisto per {symbol}: {e}")
-        return False
+        return None
 
 def market_sell(symbol: str, qty: float):
     price = get_last_price(symbol)
