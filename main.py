@@ -22,7 +22,7 @@ BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
 BYBIT_BASE_URL = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
-ORDER_USDT = 50
+ORDER_USDT = 50.0
 
 ASSETS = [
     "WIFUSDT", "PEPEUSDT", "BONKUSDT", "INJUSDT", "SUIUSDT",
@@ -105,78 +105,84 @@ def send_signed_request(method, endpoint, params=None):
     return response.json()
 
 def get_instrument_info(symbol: str):
-    url = f"https://api.bybit.com/v5/market/instruments-info?category=spot&symbol={symbol}"
-    response = requests.get(url)
-    raw = response.json()
-    log(f"GET_INSTRUMENT_INFO RAW: {raw}")
-    data = raw["result"]["list"][0]
-
-    lot = data.get("lotSizeFilter", {})
-    qty_step = float(lot.get("minOrderQty", 0.00001))  # più sicuro di 'qtyStep'
-    
-    # basePrecision può essere "0.00001", quindi usiamo Decimal
-    precision = abs(Decimal(str(lot.get("basePrecision", "0.00001"))).as_tuple().exponent)
-
-    return qty_step, precision
-
-def get_last_price(symbol: str) -> Optional[tuple[float, float]]:
-    url = f"{BYBIT_BASE_URL}/v5/market/tickers"
-    params = {"category": "spot", "symbol": symbol}
     try:
-        resp = requests.get(url, params=params, timeout=10)
-        log(f"GET_LAST_PRICE RAW: {resp.status_code} {repr(resp.text)}")
-        data = resp.json()
-        if data.get("retCode") == 0:
-            lst = data.get("result", {}).get("list")
-            if lst and "lastPrice" in lst[0] and "ask1Price" in lst[0]:
-                return float(lst[0]["lastPrice"]), float(lst[0]["ask1Price"])
+        response = requests.get(
+            f"{BYBIT_BASE_URL}/v5/market/instruments-info",
+            params={"category": "spot", "symbol": symbol},
+            timeout=10
+        )
+        data = response.json()
+        info = data["result"]["list"][0]
+
+        qty_step = float(info["lotSizeFilter"]["basePrecision"])
+        precision = abs(Decimal(str(qty_step)).as_tuple().exponent)
+        min_order_amt = float(info["lotSizeFilter"]["minOrderAmt"])
+
+        return {
+            "qty_step": qty_step,
+            "precision": precision,
+            "min_order_amt": min_order_amt
+        }
     except Exception as e:
-        log(f"❌ Errore ottenimento prezzo {symbol}: {e}")
-    return None, None
+        log(f"❌ Errore in get_instrument_info: {e}")
+        raise
 
-def calculate_quantity(symbol: str, usdt_amount: float, price: float):
-    info = get_instrument_info(symbol)
-    qty_step, precision = info["qty_step"], info["precision"]
-    min_order_amt = info["min_order_amt"]
-
-    # Margine sicurezza su prezzo e quantità
-    adjusted_price = price * 1.01
-    raw_qty = usdt_amount / adjusted_price
-
-    # Arrotonda qty al passo corretto
-    step = Decimal(str(qty_step))
-    dec_qty = Decimal(str(raw_qty))
-    rounded_qty = (dec_qty // step) * step
-
-    # Calcolo valore effettivo dell’ordine (con bid peggiorato)
-    value = float(rounded_qty) * adjusted_price
-
-    # Se valore inferiore a minOrderAmt + buffer → scarta
-    if value < float(min_order_amt) + 0.05:
-        raise Exception(f"❌ Ordine troppo piccolo ({value:.2f} USDT) per {symbol}. Minimo richiesto: {min_order_amt}")
-
-    qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
-    return qty_str, qty_step, precision
-
-def market_buy(symbol: str, usdt_amount: float):
+def get_last_price(symbol: str) -> Optional[float]:
     try:
-        last_price, ask_price = get_last_price(symbol)
-        if not ask_price:
-            log(f"❌ Prezzo ask non disponibile per {symbol}, impossibile acquistare")
+        response = requests.get(
+            f"{BYBIT_BASE_URL}/v5/market/tickers",
+            params={"category": "spot", "symbol": symbol},
+            timeout=10
+        )
+        data = response.json()
+        last_price = data["result"]["list"][0]["lastPrice"]
+        return float(last_price)
+    except Exception as e:
+        log(f"❌ Errore in get_last_price: {e}")
+        return None
+
+def calculate_quantity(symbol: str, quote_qty: float) -> Optional[str]:
+    try:
+        info = get_instrument_info(symbol)
+        price = get_last_price(symbol)
+
+        if price is None or price <= 0:
+            log(f"❌ Prezzo non valido per {symbol}")
             return None
 
-        qty_str, qty_step, precision = calculate_quantity(symbol, usdt_amount, ask_price)
-        order_value = float(qty_str) * ask_price
-        if order_value < 5:
-            log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
+        qty = quote_qty / price
+
+        dec_qty = Decimal(str(qty))
+        step = Decimal(str(info["qty_step"]))
+        rounded_qty = (dec_qty // step) * step
+
+        order_value = float(rounded_qty) * price
+        if order_value < info["min_order_amt"]:
+            log(f"⚠️ Ordine troppo piccolo per {symbol} ({order_value:.2f} USDT)")
             return None
 
+        if info["precision"] == 0:
+            return str(int(rounded_qty))
+        else:
+            return f"{rounded_qty:.{info['precision']}f}".rstrip('0').rstrip('.')
+
+    except Exception as e:
+        log(f"❌ Errore in calculate_quantity per {symbol}: {e}")
+        return None
+
+def market_buy(symbol: str, quote_qty: float):
+    qty = calculate_quantity(symbol, quote_qty)
+    if qty is None:
+        log(f"❌ Quantità non valida per {symbol}")
+        return
+
+    try:
         body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "qty": qty_str
+            "qty": qty
         }
 
         ts = str(int(time.time() * 1000))
@@ -192,19 +198,22 @@ def market_buy(symbol: str, usdt_amount: float):
             "Content-Type": "application/json"
         }
 
+        log(f"BUY BODY: {body}")
         response = requests.post(
             f"{BYBIT_BASE_URL}/v5/order/create",
             headers=headers,
             data=body_json,
             timeout=10
         )
-        log(f"BUY BODY: {body}")
-        log(f"RESPONSE: {response.status_code} {response.text}")
-        return response.json()
+        data = response.json()
+        log(f"RESPONSE: {response.status_code} {data}")
 
+        if data["retCode"] == 0:
+            log(f"🟢 Acquisto registrato per {symbol}")
+        else:
+            log(f"❌ Acquisto fallito per {symbol}")
     except Exception as e:
         log(f"❌ Errore in market_buy: {e}")
-        return None
 
 def market_sell(symbol: str, qty: float):
     price = get_last_price(symbol)
@@ -500,7 +509,7 @@ while True:
                 continue
 
             resp = market_buy(symbol, ORDER_USDT)
-            if not (resp and resp.get("retCode") == 0):
+            if resp is None:
                 log(f"❌ Acquisto fallito per {symbol}")
                 continue
 
