@@ -70,10 +70,6 @@ def is_bullish_breakout_confirmed(df: pd.DataFrame) -> bool:
         return True
     return False
 
-
-
-
-
 def send_signed_request(method, endpoint, params=None):
     import time, hmac, hashlib
     if params is None:
@@ -108,24 +104,33 @@ def send_signed_request(method, endpoint, params=None):
 
     return response.json()
 
+from decimal import Decimal
+
 def get_instrument_info(symbol: str):
     url = f"{BYBIT_BASE_URL}/v5/market/instruments-info?category=spot&symbol={symbol}"
     res = requests.get(url).json()
-    log(f"GET_INSTRUMENT_INFO RAW: {res}")  # log utile per debugging
+    log(f"GET_INSTRUMENT_INFO RAW: {res}")  # Per debugging
 
     if res["retCode"] != 0 or not res["result"]["list"]:
-        return 0.0001, 4  # fallback sicuro
+        return 0.0001, 4  # fallback di sicurezza
 
     info = res["result"]["list"][0]
     lot = info.get("lotSizeFilter", {})
 
-    # Fallback su basePrecision se qtyStep non esiste
+    # Se esiste qtyStep, calcola precision da lì
     if "qtyStep" in lot:
         qty_step = float(lot["qtyStep"])
         precision = abs(Decimal(str(qty_step)).as_tuple().exponent)
     else:
-        precision = int(lot.get("basePrecision", 4))
-        qty_step = 10 ** -precision
+        # Se qtyStep manca, prova da basePrecision (corretto)
+        base_precision = lot.get("basePrecision")
+        if base_precision:
+            precision = abs(Decimal(str(base_precision)).as_tuple().exponent)
+            qty_step = 10 ** -precision
+        else:
+            # fallback finale
+            qty_step = 0.0001
+            precision = 4
 
     return qty_step, precision
 
@@ -161,61 +166,34 @@ def calculate_quantity(symbol: str, usdt_amount: float, price: float):
 
     return str(round(rounded_qty, precision)), qty_step, precision
 
-def market_buy(symbol: str, usdt: float = 50.0):
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
-        return None
+def market_buy(symbol: str, usdt_amount: float):
+    url = f"{BYBIT_BASE_URL}/v5/order/create"
 
-    qty_step, precision = get_instrument_info(symbol)
-    order_value = usdt
-    if order_value < 5:
-        log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
-        return
+    body = {
+        "category": "spot",
+        "symbol": symbol,
+        "side": "Buy",
+        "orderType": "Market",
+        "quoteOrderQty": str(usdt_amount)  # <--- GIUSTO
+    }
 
-    try:
-        dec_usdt = Decimal(str(usdt))
-        dec_price = Decimal(str(price))
-        qty = (dec_usdt / dec_price).quantize(Decimal(str(qty_step)), rounding=ROUND_DOWN)
+    ts = str(int(time.time() * 1000))
+    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
-        if qty <= 0:
-            log(f"❌ Quantità calcolata nulla per {symbol}")
-            return None
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000",
+        "Content-Type": "application/json"
+    }
 
-        qty_str = str(int(qty)) if precision == 0 else f"{qty:.{precision}f}".rstrip('0').rstrip('.')
-
-        body = {
-            "category": "spot",
-            "symbol": symbol,
-            "side": "Buy",
-            "orderType": "Market",
-            "qty": qty_str
-        }
-
-        body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
-        ts = str(int(time.time() * 1000))
-        payload = f"{ts}{KEY}5000{body_json}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json"
-        }
-
-        url = f"{BYBIT_BASE_URL}/v5/order/create"
-        resp = requests.post(url, headers=headers, data=body_json)  # ✅ attenzione qui
-
-        log(f"BUY BODY: {body_json}")
-        log(f"RESPONSE: {resp.status_code} {resp.text}")
-        return resp
-
-    except Exception as e:
-        log(f"❌ Errore invio ordine BUY per {symbol}: {e}")
-        return None
+    response = requests.post(url, headers=headers, data=body_json)
+    log(f"BUY BODY: {body}")
+    log(f"RESPONSE: {response.status_code} {response.text}")
+    return response.json()
 
 def market_sell(symbol: str, qty: float):
     price = get_last_price(symbol)
