@@ -154,7 +154,9 @@ def calculate_quantity(symbol: str, usdt_amount: float, price: float):
 def market_buy(symbol: str, usdt_amount: float):
     qty_step, precision = get_instrument_info(symbol)
     price = get_last_price(symbol)
-    qty = usdt_amount / price
+
+    order_value = usdt_amount * 0.995  # Riduci per evitare errore saldo insufficiente
+    qty = order_value / price
     rounded_qty = float(Decimal(qty).quantize(Decimal(str(qty_step)), rounding=ROUND_DOWN))
 
     body = {
@@ -479,7 +481,7 @@ while True:
                 continue
 
             resp = market_buy(symbol, ORDER_USDT)
-            if not (resp and resp.status_code == 200 and resp.json().get("retCode") == 0):
+            if not (resp and resp.get("retCode") == 0):
                 log(f"❌ Acquisto fallito per {symbol}")
                 continue
 
