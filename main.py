@@ -146,12 +146,19 @@ def calculate_quantity(symbol: str, usdt_amount: float, price: float):
 
 def market_buy(symbol: str, usdt_amount: float):
     try:
+        price = get_last_price(symbol)
+        if not price:
+            log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
+            return None
+
+        qty_str, qty_step, precision = calculate_quantity(symbol, usdt_amount, price)
+
         body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "quoteQty": str(round(usdt_amount * 0.995, 2))  # leggero buffer
+            "qty": qty_str  # ✅ quantità della coin
         }
 
         ts = str(int(time.time() * 1000))
@@ -168,7 +175,7 @@ def market_buy(symbol: str, usdt_amount: float):
         }
 
         response = requests.post(
-            "https://api.bybit.com/v5/order/create",
+            f"{BYBIT_BASE_URL}/v5/order/create",
             headers=headers,
             data=body_json,
             timeout=10
