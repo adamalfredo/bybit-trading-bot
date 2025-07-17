@@ -116,17 +116,17 @@ def get_instrument_info(symbol: str) -> dict:
         if data["retCode"] != 0:
             raise ValueError(f"API error: {data['retMsg']}")
 
-        instrument_list = data.get("result", {}).get("list", [])
-        if not instrument_list:
+        instruments = data.get("result", {}).get("list", [])
+        if not instruments:
             raise ValueError(f"Nessuna info strumentale trovata per {symbol}")
 
-        info = instrument_list[0]
+        info = instruments[0]
         lot = info.get("lotSizeFilter", {})
 
-        if "qtyStep" not in lot or "minOrderAmt" not in lot:
+        if "basePrecision" not in lot or "minOrderAmt" not in lot:
             raise ValueError(f"Parametri mancanti in lotSizeFilter per {symbol}: {lot}")
 
-        qty_step = float(lot["qtyStep"])
+        qty_step = float(lot["basePrecision"])
         precision = abs(Decimal(str(qty_step)).as_tuple().exponent)
         min_order_amt = float(lot["minOrderAmt"])
 
