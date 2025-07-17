@@ -170,19 +170,14 @@ def calculate_quantity(symbol: str, quote_qty: float) -> Optional[str]:
         log(f"❌ Errore in calculate_quantity per {symbol}: {e}")
         return None
 
-def market_buy(symbol: str, quote_qty: float):
-    qty = calculate_quantity(symbol, quote_qty)
-    if qty is None:
-        log(f"❌ Quantità non valida per {symbol}")
-        return
-
+def market_buy(symbol: str, usdt_amount: float):
     try:
         body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "qty": qty
+            "quoteOrderQty": str(round(usdt_amount, 2))  # ← sempre in USDT, non qty!
         }
 
         ts = str(int(time.time() * 1000))
@@ -198,22 +193,20 @@ def market_buy(symbol: str, quote_qty: float):
             "Content-Type": "application/json"
         }
 
-        log(f"BUY BODY: {body}")
         response = requests.post(
             f"{BYBIT_BASE_URL}/v5/order/create",
             headers=headers,
             data=body_json,
             timeout=10
         )
-        data = response.json()
-        log(f"RESPONSE: {response.status_code} {data}")
 
-        if data["retCode"] == 0:
-            log(f"🟢 Acquisto registrato per {symbol}")
-        else:
-            log(f"❌ Acquisto fallito per {symbol}")
+        log(f"BUY BODY: {body}")
+        log(f"RESPONSE: {response.status_code} {response.text}")
+        return response.json()
+
     except Exception as e:
         log(f"❌ Errore in market_buy: {e}")
+        return None
 
 def market_sell(symbol: str, qty: float):
     price = get_last_price(symbol)
@@ -508,7 +501,8 @@ while True:
                 log(f"💸 Saldo USDT insufficiente per {symbol} ({usdt_balance:.2f})")
                 continue
 
-            resp = market_buy(symbol, ORDER_USDT)
+            order_amount = min(ORDER_USDT, usdt_balance)
+            resp = market_buy(symbol, order_amount)
             if resp is None:
                 log(f"❌ Acquisto fallito per {symbol}")
                 continue
