@@ -115,10 +115,20 @@ def get_instrument_info(symbol: str):
         return None
     return res["result"]["list"][0]
 
-def get_last_price(symbol: str) -> float:
-    url = f"https://api.bybit.com/v2/public/tickers?symbol={symbol}"
-    response = requests.get(url).json()
-    return float(response["result"][0]["last_price"])
+def get_last_price(symbol: str) -> Optional[float]:
+    url = f"{BYBIT_BASE_URL}/v5/market/tickers"
+    params = {"category": "spot", "symbol": symbol}
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        log(f"GET_LAST_PRICE RAW: {resp.status_code} {repr(resp.text)}")  # 🔍 AGGIUNTA
+        data = resp.json()
+        if data.get("retCode") == 0:
+            lst = data.get("result", {}).get("list")
+            if lst and "lastPrice" in lst[0]:
+                return float(lst[0]["lastPrice"])
+    except Exception as e:
+        log(f"❌ Errore ottenimento prezzo {symbol}: {e}")
+    return None
 
 def calculate_quantity(symbol: str, usdt_amount: float, price: float):
     info = get_instrument_info(symbol)
