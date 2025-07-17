@@ -155,63 +155,42 @@ def get_last_price(symbol: str) -> Optional[float]:
         return None
 
 def market_buy(symbol: str, usdt_amount: float):
+    price = get_last_price(symbol)
+    if not price:
+        log(f"❌ Prezzo non disponibile per {symbol}, impossibile calcolare qty")
+        return None
+
+    info = get_instrument_info(symbol)
+    qty_step = info["qty_step"]
+    precision = info["precision"]
+    min_order_amt = info["min_order_amt"]
+
+    qty = usdt_amount / price
+    dec_qty = Decimal(str(qty))
+    step = Decimal(str(qty_step))
+    rounded_qty = (dec_qty // step) * step
+    if rounded_qty <= 0:
+        log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
+        return None
+
+    qty_str = str(int(rounded_qty)) if precision == 0 else f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+
+    # Check valore minimo ordine
+    order_value = float(qty_str) * price
+    if order_value < min_order_amt:
+        log(f"❌ Ordine troppo piccolo per {symbol}: {order_value:.4f} USDT")
+        return None
+
     body = {
         "category": "spot",
         "symbol": symbol,
         "side": "Buy",
         "orderType": "Market",
-        "quoteOrderQty": str(usdt_amount)
+        "qty": qty_str
     }
 
     ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
-
-    try:
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"BUY BODY: {body_json}")
-        log(f"RESPONSE: {resp.status_code} {resp.json()}")
-
-        if resp.status_code == 200 and resp.json().get("retCode") == 0:
-            # ⏱ Attesa per aggiornamento saldo
-            time.sleep(2)
-            new_qty = get_free_qty(symbol)
-            if not new_qty or new_qty == 0:
-                time.sleep(3)
-                new_qty = get_free_qty(symbol)
-
-            if new_qty and new_qty > 0:
-                log(f"🟢 Acquisto registrato per {symbol}")
-                return new_qty
-            else:
-                log(f"⚠️ Acquisto eseguito ma saldo ancora non aggiornato per {symbol}")
-                return None
-        return None
-
-    except Exception as e:
-        log(f"❌ Errore invio ordine BUY: {e}")
-        return None
-
-def market_buy(symbol: str, usdt_amount: float):
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Buy",
-        "orderType": "Market",
-        "quoteOrderQty": f"{usdt_amount:.2f}"
-    }
-
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))  # ⚠️ NO sort_keys=True!
+    body_json = json.dumps(body, separators=(",", ":"))
     payload = f"{ts}{KEY}5000{body_json}"
     sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
@@ -246,6 +225,57 @@ def market_buy(symbol: str, usdt_amount: float):
 
     except Exception as e:
         log(f"❌ Errore invio ordine BUY: {e}")
+        return None
+
+def market_sell(symbol: str, qty: float):
+    price = get_last_price(symbol)
+    if not price:
+        log(f"❌ Prezzo non disponibile per {symbol}, impossibile vendere")
+        return
+    order_value = qty * price
+    if order_value < 5:
+        log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
+        return
+    info = get_instrument_info(symbol)
+    qty_step = info["qty_step"]
+    precision = info["precision"]
+    try:
+        dec_qty = Decimal(str(qty))
+        step = Decimal(str(qty_step))
+        rounded_qty = (dec_qty // step) * step
+        if rounded_qty <= 0:
+            log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
+            return
+        qty_str = str(int(rounded_qty)) if precision == 0 else f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+    except Exception as e:
+        log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
+        return
+    body = {
+        "category": "spot",
+        "symbol": symbol,
+        "side": "Sell",
+        "orderType": "Market",
+        "qty": qty_str
+    }
+    ts = str(int(time.time() * 1000))
+    body_json = json.dumps(body, separators=(",", ":"))
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json"
+    }
+    try:
+        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+        log(f"SELL BODY: {body_json}")
+        log(f"RESPONSE: {resp.status_code} {resp.json()}")
+        return resp
+    except Exception as e:
+        log(f"Errore invio ordine SELL: {e}")
         return None
 
 def fetch_history(symbol: str):
