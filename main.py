@@ -244,7 +244,8 @@ def market_sell(symbol: str, qty: float):
         if rounded_qty <= 0:
             log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
             return
-        qty_str = str(int(rounded_qty)) if precision == 0 else f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+        qty_str = str(int(rounded_qty)) if precision == 0 else f"{rounded_qty:.{precision}f}"
+
     except Exception as e:
         log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
         return
