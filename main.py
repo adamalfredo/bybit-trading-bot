@@ -278,16 +278,6 @@ def market_buy(symbol: str, usdt_amount: float):
         return None
 
 def market_sell(symbol: str, qty: float):
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}, impossibile vendere")
-        return
-
-    order_value = qty * price
-    if order_value < 5:
-        log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
-        return
-
     info = get_instrument_info(symbol)
     qty_step = info["qty_step"]
     precision = info["precision"]
@@ -301,46 +291,39 @@ def market_sell(symbol: str, qty: float):
             log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
             return
 
-        # Usa decimali solo se consentito
-        if step >= 1:
-            qty_str = str(int(rounded_qty))
-        else:
-            qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+        qty_str = f"{rounded_qty:.{precision}f}".rstrip("0").rstrip(".")
 
-    except Exception as e:
-        log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
-        return
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": "Sell",
+            "orderType": "Market",
+            "qty": qty_str,
+        }
 
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Sell",
-        "orderType": "Market",
-        "qty": qty_str
-    }
+        ts = str(int(time.time() * 1000))
+        body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+        payload = f"{ts}{KEY}5000{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "Content-Type": "application/json",
+        }
 
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
-
-    try:
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+        resp = requests.post(
+            "https://api.bybit.com/spot/v1/order", headers=headers, data=body_json
+        )
         log(f"SELL BODY: {body_json}")
-        log(f"RESPONSE: {resp.status_code} {resp.json()}")
+        log(f"RESPONSE: {resp.status_code} {resp.text}")
         return resp
+
     except Exception as e:
-        log(f"❌ Errore invio ordine SELL: {e}")
-        return None
+        log(f"❌ Errore nella vendita per {symbol}: {e}")
+        return
 
 def run_test_buy_and_sell():
     from decimal import Decimal
