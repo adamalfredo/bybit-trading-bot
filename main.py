@@ -194,6 +194,41 @@ def get_free_qty(symbol: str) -> float:
         log(f"❌ Errore nel recupero saldo per {symbol}: {e}")
         return 0.0
 
+def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
+    price = get_last_price(symbol)
+    if not price:
+        log(f"❌ Prezzo non disponibile per {symbol}")
+        return None
+
+    info = get_instrument_info(symbol)
+    qty_step = info["qty_step"]
+    precision = info["precision"]
+
+    try:
+        qty = Decimal(str(usdt_amount)) / Decimal(str(price))
+        step = Decimal(str(qty_step))
+        rounded_qty = (qty // step) * step
+
+        if rounded_qty <= 0:
+            log(f"❌ Quantità calcolata troppo piccola per {symbol}")
+            return None
+
+        # Verifica che l'ordine valga almeno 5 USDT
+        order_value = rounded_qty * Decimal(str(price))
+        if order_value < Decimal("5"):
+            log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
+            return None
+
+        if precision == 0:
+            qty_str = str(int(rounded_qty))
+        else:
+            qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+        return qty_str
+
+    except Exception as e:
+        log(f"❌ Errore nel calcolo della quantità per {symbol}: {e}")
+        return None
+
 def force_buy(symbols, amount_usdt=50.0):
     for symbol in symbols:
         log(f"🚨 Acquisto forzato per {symbol}")
@@ -245,61 +280,10 @@ def force_buy(symbols, amount_usdt=50.0):
         log(f"🟢 Acquisto forzato registrato per {symbol} | Entry: {price:.4f} | TP: {tp:.4f} | SL: {sl:.4f}")
         notify_telegram(f"🟢📈 Acquisto *forzato* per {symbol}\nPrezzo: {price:.4f}\nInvestito: {amount_usdt:.2f} USDT")
 
-def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}")
-        return None
-
-    info = get_instrument_info(symbol)
-    if not info or "qty_step" not in info or "precision" not in info or "min_qty" not in info or "min_order_amt" not in info:
-        log(f"❌ Dati incompleti per {symbol}: {info}")
-        return None
-
-    qty = usdt_amount / price
-    dec_qty = Decimal(str(qty))
-    step = Decimal(str(info["qty_step"]))
-    rounded_qty = (dec_qty // step) * step
-
-    if rounded_qty <= 0:
-        log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
-        return None
-
-    qty_str = (
-        str(int(rounded_qty))
-        if info["precision"] == 0
-        else f"{rounded_qty:.{info['precision']}f}".rstrip("0").rstrip(".")
-    )
-
-    order_value = float(qty_str) * price
-    if order_value < info["min_order_amt"]:
-        log(f"❌ Ordine troppo piccolo per {symbol}: {order_value:.4f} USDT")
-        return None
-
-    return qty_str
-
 def market_buy(symbol: str, usdt_amount: float):
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
-        return None
-
-    info = get_instrument_info(symbol)
-    qty_step = info["qty_step"]
-    precision = info["precision"]
-
-    try:
-        qty = Decimal(str(usdt_amount)) / Decimal(str(price))
-        step = Decimal(str(qty_step))
-        rounded_qty = (qty // step) * step
-
-        if rounded_qty <= 0:
-            log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
-            return None
-
-        qty_str = str(int(rounded_qty)) if precision == 0 else f"{rounded_qty:.{precision}f}"
-    except Exception as e:
-        log(f"❌ Errore calcolo quantità per {symbol}: {e}")
+    qty_str = calculate_quantity(symbol, usdt_amount)
+    if not qty_str:
+        log(f"❌ Impossibile calcolare la quantità per l'acquisto di {symbol}")
         return None
 
     body = {
