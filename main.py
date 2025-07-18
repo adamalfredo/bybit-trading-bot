@@ -572,7 +572,7 @@ while True:
                 "entry_price": price,
                 "tp": tp,
                 "sl": sl,
-                "entry_cost": order_amount,
+                "entry_cost": price * qty,
                 "qty": qty,
                 "entry_time": time.time(),
                 "trailing_active": False,
