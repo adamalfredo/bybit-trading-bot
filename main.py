@@ -288,58 +288,50 @@ def market_sell(symbol: str, qty: float):
         log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
         return
 
-    info = get_instrument_info(symbol)
-    qty_step = info["qty_step"]
-    precision = info["precision"]
-
     try:
-        dec_qty = Decimal(str(qty))
-        step = Decimal(str(qty_step))
-        rounded_qty = (dec_qty // step) * step
+        qty_int = int(qty)  # Vendiamo solo la parte intera
+        if qty_int <= 0:
+            log(f"❌ Quantità troppo piccola per {symbol} (dopo conversione a intero)")
+            return
 
-        # Se per qualche motivo arrotonda a zero, meglio usare direttamente qty
-        if rounded_qty <= 0:
-            rounded_qty = step  # minimo possibile accettabile
-            log(f"⚠️ Quantità troppo piccola, imposto al minimo possibile: {rounded_qty}")
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": "Sell",
+            "orderType": "Market",
+            "qty": str(qty_int)  # Solo parte intera, come richiesto
+        }
 
-        if precision == 0:
-            qty_str = str(int(rounded_qty))
-        else:
-            qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+        ts = str(int(time.time() * 1000))
+        body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+        payload = f"{ts}{KEY}5000{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "Content-Type": "application/json"
+        }
+
+        response = requests.post(
+            "https://api.bybit.com/spot/v1/order",
+            headers=headers,
+            data=body_json
+        )
+
+        log(f"SELL BODY: {body}")
+        log(f"RESPONSE: {response.status_code} {response.text}")
+
+        if response.status_code != 200 or '"retCode":0' not in response.text:
+            log(f"❌ Vendita fallita per {symbol}")
+            return
+
+        log(f"✅ Vendita completata per {symbol}")
+
     except Exception as e:
-        log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
-        return
-
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Sell",
-        "orderType": "Market",
-        "qty": qty_str
-    }
-
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
-
-    try:
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"SELL BODY: {body_json}")
-        log(f"RESPONSE: {resp.status_code} {resp.json()}")
-        return resp
-    except Exception as e:
-        log(f"❌ Errore invio ordine SELL: {e}")
-        return None
+        log(f"❌ Errore durante la vendita di {symbol}: {e}")
 
 def fetch_history(symbol: str):
     endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
