@@ -582,6 +582,7 @@ while True:
             open_positions.add(symbol)
             log(f"🟢 Acquisto registrato per {symbol} | Entry: {price:.4f} | TP: {tp:.4f} | SL: {sl:.4f}")
             notify_telegram(f"🟢📈 Acquisto per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}\nInvestito: {order_amount:.2f} USDT")
+            time.sleep(3)
 
         # 🔴 USCITA (EXIT)
         elif signal == "exit" and symbol in open_positions:
@@ -663,5 +664,4 @@ while True:
 
     # Sicurezza: attesa tra i cicli principali
     # Aggiungi pausa di sicurezza per evitare ciclo troppo veloce se tutto salta
-    time.sleep(1)
     time.sleep(INTERVAL_MINUTES * 60)
