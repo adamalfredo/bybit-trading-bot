@@ -371,59 +371,84 @@ TEST_SYMBOLS = [("XRPUSDT", 50.0), ("LINKUSDT", 50.0)]
 
 for symbol, amount in TEST_SYMBOLS:
     log(f"🧪 Test acquisto di {amount} USDT in {symbol}")
-    qty = market_buy(symbol, amount)
-    if qty:
-        log(f"✅ Acquisto completato: {qty} {symbol.replace('USDT','')}")
+
+    # Calcolo quantità con prezzo fissato al momento dell'acquisto
+    qty_str = calculate_quantity(symbol, amount)
+    if not qty_str:
+        log(f"❌ Quantità non valida per acquisto di {symbol}")
+        continue
+
+    body = {
+        "category": "spot",
+        "symbol": symbol,
+        "side": "Buy",
+        "orderType": "Market",
+        "qty": qty_str
+    }
+
+    ts = str(int(time.time() * 1000))
+    body_json = json.dumps(body, separators=(",", ":"))
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json"
+    }
+
+    response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+    log(f"BUY BODY: {body_json}")
+    log(f"RESPONSE: {response.status_code} {response.json()}")
+
+    if response.status_code == 200 and response.json().get("retCode") == 0:
+        log(f"🟢 Acquisto registrato per {symbol} con qty {qty_str}")
         time.sleep(3)
 
-        # 📏 Troncamento qty per evitare decimali eccessivi
+        # ↓↓↓ INIZIO VENDITA basata sulla qty appena usata ↓↓↓
+
         info = get_instrument_info(symbol)
         qty_step = info["qty_step"]
-        if not qty_step or qty_step <= 0:
-            log(f"❌ Errore qty_step non valido per {symbol}")
-            continue
+        precision = get_decimal_places(qty_step)
 
-        from decimal import Decimal, ROUND_DOWN
-        dec_qty = Decimal(str(qty))
+        from decimal import Decimal
+        dec_qty = Decimal(qty_str)
         step = Decimal(str(qty_step))
-        rounded_qty = (dec_qty // step) * step  # troncamento
+        rounded_qty = (dec_qty // step) * step
 
         if rounded_qty <= 0:
             log(f"⚠️ Quantità troncata troppo piccola per {symbol}, niente vendita")
             continue
 
-        # ✏️ Format con decimali corretti
-        precision = get_decimal_places(qty_step)
         if precision == 0:
-            qty_str = str(int(rounded_qty))
+            sell_qty_str = str(int(rounded_qty))
         else:
-            qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+            sell_qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
 
-        log(f"🧪 Test vendita di {qty_str} {symbol.replace('USDT','')}")
-        body = {
+        log(f"🧪 Test vendita di {sell_qty_str} {symbol.replace('USDT','')}")
+
+        sell_body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Sell",
             "orderType": "Market",
-            "qty": qty_str
+            "qty": sell_qty_str
         }
 
         ts = str(int(time.time() * 1000))
-        body_json = json.dumps(body, separators=(",", ":"))
-        payload = f"{ts}{KEY}5000{body_json}"
+        sell_json = json.dumps(sell_body, separators=(",", ":"))
+        payload = f"{ts}{KEY}5000{sell_json}"
         sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json"
-        }
 
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"SELL BODY: {body_json}")
+        headers["X-BAPI-SIGN"] = sign
+        headers["X-BAPI-TIMESTAMP"] = ts
+
+        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=sell_json)
+        log(f"SELL BODY: {sell_json}")
         log(f"RESPONSE: {resp.status_code} {resp.json()}")
+
         if resp.status_code == 200 and resp.json().get("retCode") == 0:
             log(f"✅ Vendita completata per {symbol}")
         else:
