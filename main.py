@@ -229,17 +229,11 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
 
 def force_buy(symbol: str, usdt_amount: float):
     log(f"🚨 Acquisto forzato per {symbol}")
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}")
-        return
-
-    qty = calculate_quantity(symbol, usdt_amount, price)
+    qty = calculate_quantity(symbol, usdt_amount)
     if qty is None:
         log(f"❌ Quantità non valida per {symbol}")
         return
 
-    # Invia ordine buy con qty fissa calcolata al momento
     response = market_buy(symbol, qty)
     if response:
         time.sleep(1)
