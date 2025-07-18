@@ -222,8 +222,11 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     return qty_str
 
 def market_buy(symbol: str, usdt_amount: float):
-    qty_str = calculate_quantity(symbol, usdt_amount)
-    if qty_str is None:
+    info = get_instrument_info(symbol)
+    min_notional = float(info["min_order_value"])  # soglia minima in USDT
+
+    if usdt_amount < min_notional:
+        log(f"❌ Importo troppo basso per {symbol}: {usdt_amount:.2f} USDT")
         return None
 
     body = {
@@ -231,7 +234,7 @@ def market_buy(symbol: str, usdt_amount: float):
         "symbol": symbol,
         "side": "Buy",
         "orderType": "Market",
-        "qty": qty_str
+        "quoteOrderQty": f"{usdt_amount:.2f}"
     }
 
     ts = str(int(time.time() * 1000))
@@ -520,7 +523,7 @@ while True:
             strength = strategy_strength.get(strategy, 0.5)  # default prudente
 
             max_invest = usdt_balance * strength
-            order_amount = min(max_invest, usdt_balance, 250)  # tetto massimo se vuoi
+            order_amount = min(max_invest, usdt_balance, 250)  # tetto massimo 250 USDT
 
             resp = market_buy(symbol, order_amount)
 
