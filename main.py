@@ -293,8 +293,19 @@ def market_sell(symbol: str, qty: float):
     precision = info["precision"]
 
     try:
-        dec_qty = Decimal(str(qty)).to_integral_value(rounding=ROUND_DOWN)
-        qty_str = str(int(dec_qty))
+        dec_qty = Decimal(str(qty))
+        step = Decimal(str(qty_step))
+        rounded_qty = (dec_qty // step) * step
+
+        if rounded_qty <= 0:
+            log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
+            return
+
+        # Usa decimali solo se consentito
+        if step >= 1:
+            qty_str = str(int(rounded_qty))
+        else:
+            qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
 
     except Exception as e:
         log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
