@@ -227,20 +227,6 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         log(f"❌ Errore calcolo quantità per {symbol}: {e}")
         return None
 
-def force_buy(symbol: str, usdt_amount: float):
-    log(f"🚨 Acquisto forzato per {symbol}")
-    qty = calculate_quantity(symbol, usdt_amount)
-    if qty is None:
-        log(f"❌ Quantità non valida per {symbol}")
-        return
-
-    response = market_buy(symbol, qty)
-    if response:
-        time.sleep(1)
-        balance = get_free_qty(symbol)
-        log(f"📦 Saldo trovato per {symbol.split('USDT')[0]}: {balance}")
-        log(f"🟢 Acquisto forzato registrato per {symbol}")
-
 def market_buy(symbol: str, usdt_amount: float):
     qty_str = calculate_quantity(symbol, usdt_amount)
     if not qty_str:
@@ -518,10 +504,6 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
     except Exception as e:
         log(f"❌ Errore log su Google Sheets: {e}")
 
-if __name__ == "__main__":
-    for symbol in ["BTCUSDT", "XRPUSDT", "TONUSDT"]:
-        force_buy(symbol, usdt_amount=50.0)
-
 while True:
     for symbol in ASSETS:
         signal, strategy, price = analyze_asset(symbol)
@@ -590,7 +572,7 @@ while True:
                 "entry_price": price,
                 "tp": tp,
                 "sl": sl,
-                "entry_cost": ORDER_USDT,
+                "entry_cost": order_amount,
                 "qty": qty,
                 "entry_time": time.time(),
                 "trailing_active": False,
