@@ -205,28 +205,28 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     precision = info["precision"]
 
     raw_qty = Decimal(str(usdt_amount)) / Decimal(str(price))
-
-    # Arrotonda per difetto al multiplo di qty_step
     qty = (raw_qty // qty_step) * qty_step
 
     if qty <= 0:
         log(f"❌ Quantità calcolata troppo piccola per {symbol}: {qty}")
         return None
 
-    # Applica precisione corretta
     if precision == 0:
         qty_str = str(int(qty))
     else:
-        qty_str = f"{qty:.{precision}f}".rstrip('0').rstrip('.')  # niente zeri inutili
+        qty_str = f"{qty:.{precision}f}".rstrip('0').rstrip('.')
 
     return qty_str
 
 def market_buy(symbol: str, usdt_amount: float):
-    info = get_instrument_info(symbol)
-    min_notional = 5.0  # valore minimo fisso in USDT per gli ordini spot Bybit
+    min_notional = 5.0  # valore minimo in USDT per ordine spot
 
     if usdt_amount < min_notional:
         log(f"❌ Importo troppo basso per {symbol}: {usdt_amount:.2f} USDT")
+        return None
+
+    qty_str = calculate_quantity(symbol, usdt_amount)
+    if qty_str is None:
         return None
 
     body = {
@@ -234,7 +234,7 @@ def market_buy(symbol: str, usdt_amount: float):
         "symbol": symbol,
         "side": "Buy",
         "orderType": "Market",
-        "quoteOrderQty": f"{usdt_amount:.2f}"
+        "qty": qty_str  # ✅ CORRETTO: NON quoteOrderQty!
     }
 
     ts = str(int(time.time() * 1000))
@@ -259,7 +259,7 @@ def market_buy(symbol: str, usdt_amount: float):
     log(f"BUY BODY: {body}")
     log(f"RESPONSE: {response.status_code} {response.text}")
 
-    if response.status_code != 200 or '"retCode":0' not in response.text:
+    if response.status_code != 200 or '"ret_code":0' not in response.text and '"retCode":0' not in response.text:
         log(f"❌ Acquisto fallito per {symbol}")
         return None
 
