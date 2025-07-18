@@ -104,6 +104,20 @@ def send_signed_request(method, endpoint, params=None):
 
     return response.json()
 
+def get_last_price(symbol: str) -> Optional[float]:
+    try:
+        response = requests.get(
+            f"{BYBIT_BASE_URL}/v5/market/tickers",
+            params={"category": "spot", "symbol": symbol},
+            timeout=10
+        )
+        data = response.json()
+        last_price = data["result"]["list"][0]["lastPrice"]
+        return float(last_price)
+    except Exception as e:
+        log(f"❌ Errore in get_last_price: {e}")
+        return None
+    
 def get_instrument_info(symbol: str) -> dict:
     url = f"{BYBIT_BASE_URL}/v5/market/instruments-info?category=spot&symbol={symbol}"
     try:
@@ -126,19 +140,110 @@ def get_instrument_info(symbol: str) -> dict:
         log(f"❌ Errore get_instrument_info: {e}")
         return {}
 
-def get_last_price(symbol: str) -> Optional[float]:
+def get_free_qty(symbol: str) -> float:
+    if symbol.endswith("USDT") and len(symbol) > 4:
+        coin = symbol.replace("USDT", "")
+    elif symbol == "USDT":
+        coin = "USDT"
+    else:
+        coin = symbol
+
+    url = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
+    params = {"accountType": BYBIT_ACCOUNT_TYPE}
+
+    from urllib.parse import urlencode
+    query_string = urlencode(params)
+    timestamp = str(int(time.time() * 1000))
+    sign_payload = f"{timestamp}{KEY}5000{query_string}"
+    sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
+
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": "5000"
+    }
+
     try:
-        response = requests.get(
-            f"{BYBIT_BASE_URL}/v5/market/tickers",
-            params={"category": "spot", "symbol": symbol},
-            timeout=10
-        )
-        data = response.json()
-        last_price = data["result"]["list"][0]["lastPrice"]
-        return float(last_price)
+        resp = requests.get(url, headers=headers, params=params)
+        data = resp.json()
+
+        if "result" not in data or "list" not in data["result"]:
+            log(f"❗ Struttura inattesa da Bybit per {symbol}: {resp.text}")
+            return 0.0
+
+        coin_list = data["result"]["list"][0].get("coin", [])
+        for c in coin_list:
+            if c["coin"] == coin:
+                raw = c.get("walletBalance", "0")
+                try:
+                    qty = float(raw) if raw else 0.0
+                    if qty > 0:
+                        log(f"📦 Saldo trovato per {coin}: {qty}")
+                    else:
+                        log(f"🟡 Nessun saldo disponibile per {coin}")
+                    return qty
+                except Exception as e:
+                    log(f"⚠️ Errore conversione quantità {coin}: {e}")
+                    return 0.0
+
+        log(f"🔍 Coin {coin} non trovata nel saldo.")
+        return 0.0
+
     except Exception as e:
-        log(f"❌ Errore in get_last_price: {e}")
-        return None
+        log(f"❌ Errore nel recupero saldo per {symbol}: {e}")
+        return 0.0
+
+def force_buy(symbols, amount_usdt=50.0):
+    for symbol in symbols:
+        log(f"🚨 Acquisto forzato per {symbol}")
+        price = get_last_price(symbol)
+        if not price:
+            log(f"❌ Prezzo non disponibile per {symbol}")
+            continue
+
+        usdt_balance = get_usdt_balance()
+        if usdt_balance < amount_usdt:
+            log(f"💸 Saldo USDT insufficiente per {symbol}: {usdt_balance:.2f}")
+            continue
+
+        qty_str = calculate_quantity(symbol, amount_usdt)
+        if not qty_str:
+            log(f"❌ Quantità non valida per {symbol}")
+            continue
+
+        qty = Decimal(qty_str)
+        resp = market_buy(symbol, float(amount_usdt))
+        if not resp:
+            log(f"❌ Acquisto fallito per {symbol}")
+            continue
+
+        df = fetch_history(symbol)
+        if df is None or "Close" not in df.columns:
+            log(f"❌ Dati storici mancanti per {symbol}")
+            continue
+
+        atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
+        last = df.iloc[-1]
+        atr_val = last["atr"] if "atr" in last else atr.iloc[-1]
+
+        tp = price + (atr_val * TP_FACTOR)
+        sl = price - (atr_val * SL_FACTOR)
+
+        position_data[symbol] = {
+            "entry_price": price,
+            "tp": tp,
+            "sl": sl,
+            "entry_cost": amount_usdt,
+            "qty": float(qty),
+            "entry_time": time.time(),
+            "trailing_active": False,
+            "p_max": price
+        }
+
+        open_positions.add(symbol)
+        log(f"🟢 Acquisto forzato registrato per {symbol} | Entry: {price:.4f} | TP: {tp:.4f} | SL: {sl:.4f}")
+        notify_telegram(f"🟢📈 Acquisto *forzato* per {symbol}\nPrezzo: {price:.4f}\nInvestito: {amount_usdt:.2f} USDT")
 
 def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     price = get_last_price(symbol)
@@ -414,60 +519,6 @@ last_exit_time = {}
 def get_usdt_balance() -> float:
     return get_free_qty("USDT")
 
-def get_free_qty(symbol: str) -> float:
-    if symbol.endswith("USDT") and len(symbol) > 4:
-        coin = symbol.replace("USDT", "")
-    elif symbol == "USDT":
-        coin = "USDT"
-    else:
-        coin = symbol
-
-    url = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
-    params = {"accountType": BYBIT_ACCOUNT_TYPE}
-
-    from urllib.parse import urlencode
-    query_string = urlencode(params)
-    timestamp = str(int(time.time() * 1000))
-    sign_payload = f"{timestamp}{KEY}5000{query_string}"
-    sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
-
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": "5000"
-    }
-
-    try:
-        resp = requests.get(url, headers=headers, params=params)
-        data = resp.json()
-
-        if "result" not in data or "list" not in data["result"]:
-            log(f"❗ Struttura inattesa da Bybit per {symbol}: {resp.text}")
-            return 0.0
-
-        coin_list = data["result"]["list"][0].get("coin", [])
-        for c in coin_list:
-            if c["coin"] == coin:
-                raw = c.get("walletBalance", "0")
-                try:
-                    qty = float(raw) if raw else 0.0
-                    if qty > 0:
-                        log(f"📦 Saldo trovato per {coin}: {qty}")
-                    else:
-                        log(f"🟡 Nessun saldo disponibile per {coin}")
-                    return qty
-                except Exception as e:
-                    log(f"⚠️ Errore conversione quantità {coin}: {e}")
-                    return 0.0
-
-        log(f"🔍 Coin {coin} non trovata nel saldo.")
-        return 0.0
-
-    except Exception as e:
-        log(f"❌ Errore nel recupero saldo per {symbol}: {e}")
-        return 0.0
-
 def calculate_stop_loss(entry_price, current_price, p_max, trailing_active):
     if not trailing_active:
         return entry_price * (1 - INITIAL_STOP_LOSS_PCT)
@@ -521,6 +572,8 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
         ])
     except Exception as e:
         log(f"❌ Errore log su Google Sheets: {e}")
+
+force_buy(["BTCUSDT", "XRPUSDT", "TONUSDT"], amount_usdt=50.0)
 
 while True:
     for symbol in ASSETS:
