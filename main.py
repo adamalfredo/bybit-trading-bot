@@ -342,6 +342,24 @@ def market_sell(symbol: str, qty: float):
         log(f"❌ Errore invio ordine SELL: {e}")
         return None
 
+# 🔬 TEST ACQUISTO E VENDITA MANUALE
+TEST_SYMBOLS = [("XRPUSDT", 50.0), ("LINKUSDT", 50.0)]
+
+for symbol, amount in TEST_SYMBOLS:
+    log(f"🧪 Test acquisto di {amount} USDT in {symbol}")
+    qty = market_buy(symbol, amount)
+    if qty:
+        log(f"✅ Acquisto completato: {qty} {symbol.replace('USDT','')}")
+        time.sleep(3)
+        log(f"🧪 Test vendita di {qty} {symbol.replace('USDT','')}")
+        resp = market_sell(symbol, qty)
+        if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+            log(f"✅ Vendita completata per {symbol}")
+        else:
+            log(f"❌ Vendita fallita per {symbol}")
+    else:
+        log(f"❌ Acquisto fallito per {symbol}")
+
 def fetch_history(symbol: str):
     endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
     params = {
@@ -442,6 +460,7 @@ def analyze_asset(symbol: str):
 
 log("🔄 Avvio sistema di monitoraggio segnali reali")
 notify_telegram("🤖 BOT AVVIATO - In ascolto per segnali di ingresso/uscita")
+exit()  # 🔒 Disabilita il ciclo automatico per test manuali
 
 # Inizializza struttura base
 open_positions = set()
