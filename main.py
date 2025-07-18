@@ -201,36 +201,29 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         return None
 
     info = get_instrument_info(symbol)
-    qty_step = info["qty_step"]
+    qty_step = Decimal(str(info["qty_step"]))
     precision = info["precision"]
 
-    try:
-        raw_qty = Decimal(str(usdt_amount)) / Decimal(str(price))
-        step = Decimal(str(qty_step))
-        rounded_qty = (raw_qty // step) * step
+    raw_qty = Decimal(str(usdt_amount)) / Decimal(str(price))
 
-        if rounded_qty <= 0:
-            log(f"❌ Quantità calcolata troppo piccola per {symbol}")
-            return None
+    # Arrotonda per difetto al multiplo di qty_step
+    qty = (raw_qty // qty_step) * qty_step
 
-        # 🔥 Verifica valore reale in USDT dell’ordine
-        order_value = rounded_qty * Decimal(str(price))
-        if order_value < Decimal("5"):
-            log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
-            return None
-
-        if precision == 0:
-            return str(int(rounded_qty))
-        return f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
-
-    except Exception as e:
-        log(f"❌ Errore calcolo quantità per {symbol}: {e}")
+    if qty <= 0:
+        log(f"❌ Quantità calcolata troppo piccola per {symbol}: {qty}")
         return None
+
+    # Applica precisione corretta
+    if precision == 0:
+        qty_str = str(int(qty))
+    else:
+        qty_str = f"{qty:.{precision}f}".rstrip('0').rstrip('.')  # niente zeri inutili
+
+    return qty_str
 
 def market_buy(symbol: str, usdt_amount: float):
     qty_str = calculate_quantity(symbol, usdt_amount)
-    if not qty_str:
-        log(f"❌ Quantità non valida per acquisto di {symbol}")
+    if qty_str is None:
         return None
 
     body = {
@@ -242,40 +235,32 @@ def market_buy(symbol: str, usdt_amount: float):
     }
 
     ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))
+    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
     payload = f"{ts}{KEY}5000{body_json}"
     sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
     headers = {
         "X-BAPI-API-KEY": KEY,
         "X-BAPI-SIGN": sign,
         "X-BAPI-TIMESTAMP": ts,
         "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
         "Content-Type": "application/json"
     }
 
-    try:
-        response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"BUY BODY: {body_json}")
-        log(f"RESPONSE: {response.status_code} {response.json()}")
+    response = requests.post(
+        "https://api.bybit.com/spot/v1/order",
+        headers=headers,
+        data=body_json
+    )
 
-        if response.status_code == 200 and response.json().get("retCode") == 0:
-            time.sleep(2)
-            qty = get_free_qty(symbol)
-            if not qty or qty == 0:
-                time.sleep(3)
-                qty = get_free_qty(symbol)
+    log(f"BUY BODY: {body}")
+    log(f"RESPONSE: {response.status_code} {response.text}")
 
-            if qty and qty > 0:
-                log(f"🟢 Acquisto registrato per {symbol}")
-                return qty
-            else:
-                log(f"⚠️ Acquisto riuscito ma saldo non aggiornato per {symbol}")
+    if response.status_code != 200 or '"retCode":0' not in response.text:
+        log(f"❌ Acquisto fallito per {symbol}")
         return None
 
-    except Exception as e:
-        log(f"❌ Errore invio ordine market per {symbol}: {e}")
-        return None
+    return response
 
 def market_sell(symbol: str, qty: float):
     price = get_last_price(symbol)
