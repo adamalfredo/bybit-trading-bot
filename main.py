@@ -211,20 +211,13 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         log(f"❌ Quantità calcolata troppo piccola per {symbol}: {qty}")
         return None
 
+    # Applica precisione corretta
     if precision == 0:
-        qty_str = str(int(qty))
+        return str(int(qty))
     else:
-        qty_str = f"{qty:.{precision}f}".rstrip('0').rstrip('.')
-
-    return qty_str
+        return f"{qty:.{precision}f}".rstrip('0').rstrip('.')
 
 def market_buy(symbol: str, usdt_amount: float):
-    min_notional = 5.0  # valore minimo in USDT per ordine spot
-
-    if usdt_amount < min_notional:
-        log(f"❌ Importo troppo basso per {symbol}: {usdt_amount:.2f} USDT")
-        return None
-
     qty_str = calculate_quantity(symbol, usdt_amount)
     if qty_str is None:
         return None
@@ -234,7 +227,7 @@ def market_buy(symbol: str, usdt_amount: float):
         "symbol": symbol,
         "side": "Buy",
         "orderType": "Market",
-        "qty": qty_str  # ✅ CORRETTO: NON quoteOrderQty!
+        "qty": qty_str  # ✅ Non usare quoteOrderQty!
     }
 
     ts = str(int(time.time() * 1000))
@@ -250,16 +243,12 @@ def market_buy(symbol: str, usdt_amount: float):
         "Content-Type": "application/json"
     }
 
-    response = requests.post(
-        "https://api.bybit.com/spot/v1/order",
-        headers=headers,
-        data=body_json
-    )
+    response = requests.post("https://api.bybit.com/spot/v1/order", headers=headers, data=body_json)
 
     log(f"BUY BODY: {body}")
     log(f"RESPONSE: {response.status_code} {response.text}")
 
-    if response.status_code != 200 or '"ret_code":0' not in response.text and '"retCode":0' not in response.text:
+    if response.status_code != 200 or '"retCode":0' not in response.text:
         log(f"❌ Acquisto fallito per {symbol}")
         return None
 
