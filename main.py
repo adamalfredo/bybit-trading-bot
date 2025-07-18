@@ -223,7 +223,7 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
 
 def market_buy(symbol: str, usdt_amount: float):
     info = get_instrument_info(symbol)
-    min_notional = float(info["min_order_value"])  # soglia minima in USDT
+    min_notional = 5.0  # valore minimo fisso in USDT per gli ordini spot Bybit
 
     if usdt_amount < min_notional:
         log(f"❌ Importo troppo basso per {symbol}: {usdt_amount:.2f} USDT")
