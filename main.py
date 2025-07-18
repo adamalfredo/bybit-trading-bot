@@ -174,19 +174,41 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     return qty_str
 
 def market_buy(symbol: str, usdt_amount: float):
+    price = get_last_price(symbol)
+    if not price:
+        log(f"❌ Prezzo non disponibile per {symbol}, impossibile acquistare")
+        return None
+
+    info = get_instrument_info(symbol)
+    qty_step = info["qty_step"]
+    precision = info["precision"]
+
+    try:
+        qty = Decimal(str(usdt_amount)) / Decimal(str(price))
+        step = Decimal(str(qty_step))
+        rounded_qty = (qty // step) * step
+
+        if rounded_qty <= 0:
+            log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
+            return None
+
+        qty_str = str(int(rounded_qty)) if precision == 0 else f"{rounded_qty:.{precision}f}"
+    except Exception as e:
+        log(f"❌ Errore calcolo quantità per {symbol}: {e}")
+        return None
+
     body = {
         "category": "spot",
         "symbol": symbol,
         "side": "Buy",
         "orderType": "Market",
-        "quoteOrderQty": f"{usdt_amount:.2f}"
+        "qty": qty_str
     }
 
     ts = str(int(time.time() * 1000))
     body_json = json.dumps(body, separators=(",", ":"))
     payload = f"{ts}{KEY}5000{body_json}"
     sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-
     headers = {
         "X-BAPI-API-KEY": KEY,
         "X-BAPI-SIGN": sign,
@@ -197,8 +219,7 @@ def market_buy(symbol: str, usdt_amount: float):
     }
 
     try:
-        url = f"{BYBIT_BASE_URL}/v5/order/create"
-        resp = requests.post(url, headers=headers, data=body_json)
+        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"BUY BODY: {body_json}")
         log(f"RESPONSE: {resp.status_code} {resp.json()}")
 
