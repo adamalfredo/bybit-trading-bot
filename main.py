@@ -205,85 +205,50 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     precision = info["precision"]
 
     try:
-        qty = Decimal(str(usdt_amount)) / Decimal(str(price))
+        raw_qty = Decimal(str(usdt_amount)) / Decimal(str(price))
         step = Decimal(str(qty_step))
-        rounded_qty = (qty // step) * step
+        rounded_qty = (raw_qty // step) * step
 
         if rounded_qty <= 0:
             log(f"❌ Quantità calcolata troppo piccola per {symbol}")
             return None
 
-        # Verifica che l'ordine valga almeno 5 USDT
+        # 🔥 Verifica valore reale in USDT dell’ordine
         order_value = rounded_qty * Decimal(str(price))
         if order_value < Decimal("5"):
             log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
             return None
 
         if precision == 0:
-            qty_str = str(int(rounded_qty))
-        else:
-            qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
-        return qty_str
+            return str(int(rounded_qty))
+        return f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
 
     except Exception as e:
-        log(f"❌ Errore nel calcolo della quantità per {symbol}: {e}")
+        log(f"❌ Errore calcolo quantità per {symbol}: {e}")
         return None
 
-def force_buy(symbols, amount_usdt=50.0):
-    for symbol in symbols:
-        log(f"🚨 Acquisto forzato per {symbol}")
-        price = get_last_price(symbol)
-        if not price:
-            log(f"❌ Prezzo non disponibile per {symbol}")
-            continue
-
-        usdt_balance = get_usdt_balance()
-        if usdt_balance < amount_usdt:
-            log(f"💸 Saldo USDT insufficiente per {symbol}: {usdt_balance:.2f}")
-            continue
-
-        qty_str = calculate_quantity(symbol, amount_usdt)
-        if not qty_str:
-            log(f"❌ Quantità non valida per {symbol}")
-            continue
-
-        qty = Decimal(qty_str)
-        resp = market_buy(symbol, float(amount_usdt))
-        if not resp:
-            log(f"❌ Acquisto fallito per {symbol}")
-            continue
-
-        df = fetch_history(symbol)
-        if df is None or "Close" not in df.columns:
-            log(f"❌ Dati storici mancanti per {symbol}")
-            continue
-
-        atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
-        last = df.iloc[-1]
-        atr_val = last["atr"] if "atr" in last else atr.iloc[-1]
-
-        tp = price + (atr_val * TP_FACTOR)
-        sl = price - (atr_val * SL_FACTOR)
-
-        position_data[symbol] = {
-            "entry_price": price,
-            "tp": tp,
-            "sl": sl,
-            "entry_cost": amount_usdt,
-            "qty": float(qty),
-            "entry_time": time.time(),
-            "trailing_active": False,
-            "p_max": price
-        }
-
-        open_positions.add(symbol)
-        log(f"🟢 Acquisto forzato registrato per {symbol} | Entry: {price:.4f} | TP: {tp:.4f} | SL: {sl:.4f}")
-        notify_telegram(f"🟢📈 Acquisto *forzato* per {symbol}\nPrezzo: {price:.4f}\nInvestito: {amount_usdt:.2f} USDT")
+def force_buy(symbol: str, usdt_amount: float = 50.0):
+    log(f"🚨 Acquisto forzato per {symbol}")
+    qty = market_buy(symbol, usdt_amount)
+    if qty:
+        entry_price = get_last_price(symbol)
+        if entry_price:
+            tp_price = round(entry_price * (1 + TAKE_PROFIT_PCT), 4)
+            sl_price = round(entry_price * (1 - STOP_LOSS_PCT), 4)
+            position_data[symbol] = {
+                "entry_price": entry_price,
+                "qty": qty,
+                "tp_price": tp_price,
+                "sl_price": sl_price
+            }
+            open_positions.add(symbol)
+            last_exit_time[symbol] = 0
+            log(f"🟢 Acquisto forzato registrato per {symbol} | Entry: {entry_price:.4f} | TP: {tp_price:.4f} | SL: {sl_price:.4f}")
 
 def market_buy(symbol: str, usdt_amount: float):
     qty_str = calculate_quantity(symbol, usdt_amount)
     if not qty_str:
-        log(f"❌ Impossibile calcolare la quantità per l'acquisto di {symbol}")
+        log(f"❌ Quantità non valida per acquisto di {symbol}")
         return None
 
     body = {
@@ -308,26 +273,26 @@ def market_buy(symbol: str, usdt_amount: float):
     }
 
     try:
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+        response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"BUY BODY: {body_json}")
-        log(f"RESPONSE: {resp.status_code} {resp.json()}")
+        log(f"RESPONSE: {response.status_code} {response.json()}")
 
-        if resp.status_code == 200 and resp.json().get("retCode") == 0:
+        if response.status_code == 200 and response.json().get("retCode") == 0:
             time.sleep(2)
-            new_qty = get_free_qty(symbol)
-            if not new_qty or new_qty == 0:
+            qty = get_free_qty(symbol)
+            if not qty or qty == 0:
                 time.sleep(3)
-                new_qty = get_free_qty(symbol)
+                qty = get_free_qty(symbol)
 
-            if new_qty and new_qty > 0:
+            if qty and qty > 0:
                 log(f"🟢 Acquisto registrato per {symbol}")
-                return new_qty
+                return qty
             else:
-                log(f"⚠️ Acquisto eseguito ma saldo ancora non aggiornato per {symbol}")
+                log(f"⚠️ Acquisto riuscito ma saldo non aggiornato per {symbol}")
         return None
 
     except Exception as e:
-        log(f"❌ Errore invio ordine BUY: {e}")
+        log(f"❌ Errore invio ordine market per {symbol}: {e}")
         return None
 
 def market_sell(symbol: str, qty: float):
