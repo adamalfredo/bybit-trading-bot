@@ -342,121 +342,106 @@ def market_sell(symbol: str, qty: float):
         log(f"❌ Errore invio ordine SELL: {e}")
         return None
 
-# 🔬 TEST ACQUISTO E VENDITA MANUALE
-TEST_SYMBOLS = [("XRPUSDT", 50.0), ("LINKUSDT", 50.0)]
+def run_test_buy_and_sell():
+    from decimal import Decimal
+    TEST_SYMBOLS = [("XRPUSDT", 50.0), ("LINKUSDT", 50.0)]
 
-for symbol, amount in TEST_SYMBOLS:
-    log(f"🧪 Test acquisto di {amount} USDT in {symbol}")
-    qty = market_buy(symbol, amount)
-    if qty:
-        log(f"✅ Acquisto completato: {qty} {symbol.replace('USDT','')}")
-        time.sleep(3)
-        log(f"🧪 Test vendita di {qty} {symbol.replace('USDT','')}")
-        resp = market_sell(symbol, qty)
-        if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
-            log(f"✅ Vendita completata per {symbol}")
-        else:
-            log(f"❌ Vendita fallita per {symbol}")
-    else:
-        log(f"❌ Acquisto fallito per {symbol}")
+    for symbol, amount in TEST_SYMBOLS:
+        log(f"🧪 Test acquisto di {amount} USDT in {symbol}")
 
-# 🔬 TEST ACQUISTO E VENDITA CON TRONCAMENTO QUANTITÀ
-def get_decimal_places(step: float) -> int:
-    s = str(step)
-    if '.' in s:
-        return len(s.split('.')[-1].rstrip('0'))
-    return 0
-
-TEST_SYMBOLS = [("XRPUSDT", 50.0), ("LINKUSDT", 50.0)]
-
-for symbol, amount in TEST_SYMBOLS:
-    log(f"🧪 Test acquisto di {amount} USDT in {symbol}")
-
-    # Calcolo quantità con prezzo fissato al momento dell'acquisto
-    qty_str = calculate_quantity(symbol, amount)
-    if not qty_str:
-        log(f"❌ Quantità non valida per acquisto di {symbol}")
-        continue
-
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Buy",
-        "orderType": "Market",
-        "qty": qty_str
-    }
-
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
-
-    response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-    log(f"BUY BODY: {body_json}")
-    log(f"RESPONSE: {response.status_code} {response.json()}")
-
-    if response.status_code == 200 and response.json().get("retCode") == 0:
-        log(f"🟢 Acquisto registrato per {symbol} con qty {qty_str}")
-        time.sleep(3)
-
-        # ↓↓↓ INIZIO VENDITA basata sulla qty appena usata ↓↓↓
+        # --- Calcolo quantità come nel tuo market_buy ---
+        price = get_last_price(symbol)
+        if not price:
+            log(f"❌ Prezzo non disponibile per {symbol}")
+            continue
 
         info = get_instrument_info(symbol)
         qty_step = info["qty_step"]
-        precision = get_decimal_places(qty_step)
+        precision = info["precision"]
 
-        from decimal import Decimal
-        dec_qty = Decimal(qty_str)
+        raw_qty = Decimal(str(amount)) / Decimal(str(price))
         step = Decimal(str(qty_step))
-        rounded_qty = (dec_qty // step) * step
+        rounded_qty = (raw_qty // step) * step
 
         if rounded_qty <= 0:
-            log(f"⚠️ Quantità troncata troppo piccola per {symbol}, niente vendita")
+            log(f"❌ Quantità troppo piccola per {symbol}")
             continue
 
-        # ⚠️ Usa SOLO il valore troncato, senza residui
-        precision = get_decimal_places(qty_step)
         if precision == 0:
-            sell_qty_str = str(int(rounded_qty))
+            qty_str = str(int(rounded_qty))
         else:
-            sell_qty_str = f"{rounded_qty:.{precision}f}"
+            qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
 
-        log(f"🧪 Test vendita di {sell_qty_str} {symbol.replace('USDT','')}")
-
-        sell_body = {
+        body = {
             "category": "spot",
             "symbol": symbol,
-            "side": "Sell",
+            "side": "Buy",
             "orderType": "Market",
-            "qty": sell_qty_str
+            "qty": qty_str
         }
 
         ts = str(int(time.time() * 1000))
-        sell_json = json.dumps(sell_body, separators=(",", ":"))
-        payload = f"{ts}{KEY}5000{sell_json}"
+        body_json = json.dumps(body, separators=(",", ":"))
+        payload = f"{ts}{KEY}5000{body_json}"
         sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-SIGN-TYPE": "2",
+            "Content-Type": "application/json"
+        }
 
-        headers["X-BAPI-SIGN"] = sign
-        headers["X-BAPI-TIMESTAMP"] = ts
+        response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+        log(f"BUY BODY: {body_json}")
+        log(f"RESPONSE: {response.status_code} {response.json()}")
 
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=sell_json)
-        log(f"SELL BODY: {sell_json}")
-        log(f"RESPONSE: {resp.status_code} {resp.json()}")
+        if response.status_code == 200 and response.json().get("retCode") == 0:
+            log(f"🟢 Acquisto registrato per {symbol} con qty {qty_str}")
+            time.sleep(3)
 
-        if resp.status_code == 200 and resp.json().get("retCode") == 0:
-            log(f"✅ Vendita completata per {symbol}")
+            # --- Preparazione quantità per vendita (uguale logica) ---
+            dec_qty = Decimal(qty_str)
+            rounded_qty = (dec_qty // step) * step
+
+            if rounded_qty <= 0:
+                log(f"⚠️ Quantità troncata troppo piccola per {symbol}, niente vendita")
+                continue
+
+            if precision == 0:
+                sell_qty_str = str(int(rounded_qty))
+            else:
+                sell_qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+
+            log(f"🧪 Test vendita di {sell_qty_str} {symbol.replace('USDT','')}")
+
+            sell_body = {
+                "category": "spot",
+                "symbol": symbol,
+                "side": "Sell",
+                "orderType": "Market",
+                "qty": sell_qty_str
+            }
+
+            ts = str(int(time.time() * 1000))
+            sell_json = json.dumps(sell_body, separators=(",", ":"))
+            payload = f"{ts}{KEY}5000{sell_json}"
+            sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+            headers["X-BAPI-SIGN"] = sign
+            headers["X-BAPI-TIMESTAMP"] = ts
+
+            resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=sell_json)
+            log(f"SELL BODY: {sell_json}")
+            log(f"RESPONSE: {resp.status_code} {resp.json()}")
+
+            if resp.status_code == 200 and resp.json().get("retCode") == 0:
+                log(f"✅ Vendita completata per {symbol}")
+            else:
+                log(f"❌ Vendita fallita per {symbol}")
         else:
-            log(f"❌ Vendita fallita per {symbol}")
-    else:
-        log(f"❌ Acquisto fallito per {symbol}")
+            log(f"❌ Acquisto fallito per {symbol}")
+
 
 def fetch_history(symbol: str):
     endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
@@ -558,7 +543,11 @@ def analyze_asset(symbol: str):
 
 log("🔄 Avvio sistema di monitoraggio segnali reali")
 notify_telegram("🤖 BOT AVVIATO - In ascolto per segnali di ingresso/uscita")
-exit()  # 🔒 Disabilita il ciclo automatico per test manuali
+
+############################################################################################################
+run_test_buy_and_sell()
+exit()
+############################################################################################################
 
 # Inizializza struttura base
 open_positions = set()
