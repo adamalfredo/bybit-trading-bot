@@ -422,10 +422,12 @@ for symbol, amount in TEST_SYMBOLS:
             log(f"⚠️ Quantità troncata troppo piccola per {symbol}, niente vendita")
             continue
 
+        # ⚠️ Usa SOLO il valore troncato, senza residui
+        precision = get_decimal_places(qty_step)
         if precision == 0:
             sell_qty_str = str(int(rounded_qty))
         else:
-            sell_qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+            sell_qty_str = f"{rounded_qty:.{precision}f}"
 
         log(f"🧪 Test vendita di {sell_qty_str} {symbol.replace('USDT','')}")
 
