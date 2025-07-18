@@ -568,11 +568,13 @@ while True:
             tp = price + (atr_val * TP_FACTOR)
             sl = price - (atr_val * SL_FACTOR)
 
+            actual_cost = price * qty
+            
             position_data[symbol] = {
                 "entry_price": price,
                 "tp": tp,
                 "sl": sl,
-                "entry_cost": price * qty,
+                "entry_cost": actual_cost,
                 "qty": qty,
                 "entry_time": time.time(),
                 "trailing_active": False,
