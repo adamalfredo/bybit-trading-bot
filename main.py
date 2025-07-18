@@ -522,7 +522,8 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
     except Exception as e:
         log(f"❌ Errore log su Google Sheets: {e}")
 
-force_buy(["BTCUSDT", "XRPUSDT", "TONUSDT"], amount_usdt=50.0)
+for symbol in ["BTCUSDT", "XRPUSDT", "TONUSDT"]:
+    force_buy(symbol, usdt_amount=50.0)
 
 while True:
     for symbol in ASSETS:
