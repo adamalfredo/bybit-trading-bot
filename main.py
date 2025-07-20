@@ -363,6 +363,7 @@ def market_sell(symbol: str, qty: float):
         log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
         return
 
+
     # Recupera qty_step e precision con fallback robusto
     info = get_instrument_info(symbol)
     qty_step = info.get("qty_step", 0.0001)
@@ -370,6 +371,12 @@ def market_sell(symbol: str, qty: float):
     if not qty_step or qty_step <= 0:
         qty_step = 0.0001
         precision = 4
+
+    def count_decimals(step):
+        s = str(step)
+        if '.' in s:
+            return len(s.split('.')[1].rstrip('0'))
+        return 0
 
     try:
         dec_qty = Decimal(str(qty))
@@ -381,14 +388,15 @@ def market_sell(symbol: str, qty: float):
             log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
             return
 
-        # Formatta la quantità secondo la precisione
-        if precision == 0:
+        # Usa i decimali derivati da qty_step, non da precision
+        decimals = count_decimals(qty_step)
+        if decimals == 0:
             qty_str = str(int(rounded_qty))
         else:
-            qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+            qty_str = f"{rounded_qty:.{decimals}f}".rstrip('0').rstrip('.')
 
         # Log di debug
-        log(f"[DEBUG] market_sell {symbol}: qty={qty}, step={qty_step}, rounded={rounded_qty}, qty_str={qty_str}, precision={precision}")
+        log(f"[DEBUG] market_sell {symbol}: qty={qty}, step={qty_step}, rounded={rounded_qty}, qty_str={qty_str}, decimali={decimals}")
 
     except Exception as e:
         log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
