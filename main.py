@@ -382,18 +382,20 @@ def market_sell(symbol: str, qty: float):
         dec_qty = Decimal(str(qty))
         step = Decimal(str(qty_step))
         decimals = count_decimals(qty_step)
+
         # Se qty_step >= 1, vendi solo la parte intera
         if step >= 1:
             rounded_qty = dec_qty.to_integral_value(rounding=ROUND_DOWN)
             qty_str = str(int(rounded_qty))
         else:
-            # Altrimenti arrotonda per difetto al multiplo di step
+            # Arrotonda per difetto al multiplo di step
             rounded_qty = (dec_qty // step) * step
-            # Formatta con il numero corretto di decimali
-            qty_str = f"{rounded_qty:.{decimals}f}".rstrip('0').rstrip('.')
-            # Se il risultato è tipo '0.' togli il punto
-            if qty_str.endswith('.'):
-                qty_str = qty_str[:-1]
+            # Forza massimo 2 decimali (troncando, non arrotondando)
+            qty_str = f"{rounded_qty:.2f}"
+            # Rimuovi eventuali zeri e punto finale
+            qty_str = qty_str.rstrip('0').rstrip('.')
+            if qty_str == '':
+                qty_str = '0'
 
         if Decimal(qty_str) <= 0:
             log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
