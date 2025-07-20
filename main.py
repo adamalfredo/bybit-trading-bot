@@ -291,7 +291,17 @@ def market_buy(symbol: str, usdt_amount: float):
         }
         response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"BUY BODY: {body_json}")
-        log(f"RESPONSE: {response.status_code} {response.json()}")
+        try:
+            resp_json = response.json()
+        except Exception:
+            resp_json = {}
+        log(f"RESPONSE: {response.status_code} {resp_json}")
+        # Logga dettagli filled/cumExecQty/orderStatus se presenti
+        if 'result' in resp_json:
+            result = resp_json['result']
+            filled = result.get('cumExecQty') or result.get('execQty') or result.get('qty')
+            order_status = result.get('orderStatus')
+            log(f"[BYBIT ORDER RESULT] filled: {filled}, orderStatus: {order_status}, result: {result}")
         return response
 
     try:
