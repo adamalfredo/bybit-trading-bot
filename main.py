@@ -381,19 +381,23 @@ def market_sell(symbol: str, qty: float):
     try:
         dec_qty = Decimal(str(qty))
         step = Decimal(str(qty_step))
-        # Arrotonda verso il basso al multiplo più vicino di step
-        rounded_qty = (dec_qty // step) * step
-
-        if rounded_qty <= 0:
-            log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
-            return
-
-        # Usa i decimali derivati da qty_step, non da precision
         decimals = count_decimals(qty_step)
-        if decimals == 0:
+        # Se qty_step >= 1, vendi solo la parte intera
+        if step >= 1:
+            rounded_qty = dec_qty.to_integral_value(rounding=ROUND_DOWN)
             qty_str = str(int(rounded_qty))
         else:
+            # Altrimenti arrotonda per difetto al multiplo di step
+            rounded_qty = (dec_qty // step) * step
+            # Formatta con il numero corretto di decimali
             qty_str = f"{rounded_qty:.{decimals}f}".rstrip('0').rstrip('.')
+            # Se il risultato è tipo '0.' togli il punto
+            if qty_str.endswith('.'):
+                qty_str = qty_str[:-1]
+
+        if Decimal(qty_str) <= 0:
+            log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
+            return
 
         # Log di debug
         log(f"[DEBUG] market_sell {symbol}: qty={qty}, step={qty_step}, rounded={rounded_qty}, qty_str={qty_str}, decimali={decimals}")
