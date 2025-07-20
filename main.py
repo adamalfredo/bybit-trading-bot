@@ -35,6 +35,39 @@ VOLATILE_ASSETS = [
     "SEIUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "TONUSDT", "DOGEUSDT", "MATICUSDT"
 ]
 
+# =====================
+# ⚠️ FUNZIONE DI TEST: VENDI TUTTO ALL'AVVIO (rimuovere dopo i test!)
+# =====================
+TEST_MODE = True  # ⚠️ Disabilita acquisti durante i test
+
+def test_sell_all():
+    test_coins = ["XRPUSDT", "AVAXUSDT", "INJUSDT", "LINKUSDT", "OPUSDT"]
+    log("\n====================\n⚠️ TEST: VENDO TUTTO IL PORTAFOGLIO\n====================")
+    for symbol in test_coins:
+        qty = get_free_qty(symbol)
+        if qty and qty > 0:
+            info = get_instrument_info(symbol)
+            qty_step = info.get("qty_step", 0.0001)
+            precision = info.get("precision", 4)
+            log(f"[TEST] {symbol}: saldo={qty}, qty_step={qty_step}, precision={precision}")
+            resp = market_sell(symbol, qty)
+            if resp is not None:
+                try:
+                    log(f"[TEST] Risposta Bybit: {resp.status_code} {resp.json()}")
+                except Exception:
+                    log(f"[TEST] Risposta Bybit: {resp.status_code} (no json)")
+            else:
+                log(f"[TEST] Errore invio ordine di vendita per {symbol}")
+        else:
+            log(f"[TEST] Nessun saldo da vendere per {symbol}")
+    log("====================\n⚠️ FINE TEST VENDITA\n====================\n")
+
+if __name__ == "__main__":
+    test_sell_all()
+# =====================
+# FINE BLOCCO TEST
+# =====================
+
 INTERVAL_MINUTES = 15
 ATR_WINDOW = 14
 TP_FACTOR = 2.0
@@ -629,8 +662,12 @@ while True:
             max_invest = usdt_balance * strength
             order_amount = min(max_invest, usdt_balance, 250)  # tetto massimo se vuoi
 
-            resp = market_buy(symbol, order_amount)
+            # ⚠️ INIBISCI GLI ACQUISTI DURANTE IL TEST
+            if TEST_MODE:
+                log(f"[TEST_MODE] Acquisti inibiti per {symbol}")
+                continue
 
+            resp = market_buy(symbol, order_amount)
             if resp is None:
                 log(f"❌ Acquisto fallito per {symbol}")
                 continue
