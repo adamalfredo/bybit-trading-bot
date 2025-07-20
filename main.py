@@ -210,50 +210,39 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         raw_qty = Decimal(str(usdt_amount)) / Decimal(str(price))
         step = Decimal(str(qty_step))
         min_qty_dec = Decimal(str(min_qty))
-        # Arrotonda la quantità verso il basso al multiplo di step
-        rounded_qty = (raw_qty // step) * step
-
-        # Assicura che la quantità sia almeno min_qty
-        if rounded_qty < min_qty_dec:
-            rounded_qty = (min_qty_dec // step) * step
-            if rounded_qty < min_qty_dec:
-                rounded_qty += step
-            log(f"⚠️ Quantità aumentata a min_qty per {symbol}: {rounded_qty}")
-
-        order_value = rounded_qty * Decimal(str(price))
-        # Se il valore ordine è troppo basso, aumenta la quantità al minimo accettabile
+        # Arrotonda per difetto al multiplo di step
+        floored_qty = (raw_qty // step) * step
+        # Forza massimo 2 decimali (troncando, non arrotondando)
+        floored_qty = floored_qty.quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+        # Se troppo piccola, porta a min_qty
+        if floored_qty < min_qty_dec:
+            floored_qty = min_qty_dec
+        order_value = floored_qty * Decimal(str(price))
+        # Se valore troppo basso, porta a min_qty per min_order_amt
         if order_value < Decimal(str(min_order_amt)):
             min_qty_for_amt = (Decimal(str(min_order_amt)) / Decimal(str(price)))
-            min_qty_for_amt_rounded = (min_qty_for_amt // step) * step
-            if min_qty_for_amt_rounded < min_qty_dec:
-                min_qty_for_amt_rounded = min_qty_dec
-            if min_qty_for_amt_rounded > rounded_qty:
-                rounded_qty = min_qty_for_amt_rounded
-                order_value = rounded_qty * Decimal(str(price))
-                log(f"⚠️ Quantità aumentata per rispettare min_order_amt per {symbol}: {rounded_qty} (valore: {order_value:.2f} USDT)")
-            else:
+            min_qty_for_amt = (min_qty_for_amt // step) * step
+            if min_qty_for_amt < min_qty_dec:
+                min_qty_for_amt = min_qty_dec
+            floored_qty = min_qty_for_amt
+            order_value = floored_qty * Decimal(str(price))
+            if order_value < Decimal(str(min_order_amt)):
                 log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
                 return None
-
         # Verifica che la quantità sia multiplo esatto di qty_step
-        if (rounded_qty % step) != 0:
-            log(f"❌ Quantità {rounded_qty} non multiplo di qty_step {qty_step} per {symbol}")
+        if (floored_qty % step) != 0:
+            log(f"❌ Quantità {floored_qty} non multiplo di qty_step {qty_step} per {symbol}")
             return None
-
-        if rounded_qty <= 0:
+        if floored_qty <= 0:
             log(f"❌ Quantità calcolata troppo piccola per {symbol}")
             return None
-
-        investito_effettivo = float(rounded_qty) * float(price)
+        investito_effettivo = float(floored_qty) * float(price)
         if investito_effettivo < 0.95 * usdt_amount:
             log(f"⚠️ Attenzione: valore effettivo investito ({investito_effettivo:.2f} USDT) molto inferiore a quello richiesto ({usdt_amount:.2f} USDT)")
-
-        log(f"[DEBUG] {symbol} - price: {price}, qty_step: {qty_step}, min_qty: {min_qty}, min_order_amt: {min_order_amt}, richiesto: {usdt_amount}, calcolato: {rounded_qty}, valore ordine: {order_value:.2f}")
-
+        log(f"[DEBUG] {symbol} - price: {price}, qty_step: {qty_step}, min_qty: {min_qty}, min_order_amt: {min_order_amt}, richiesto: {usdt_amount}, calcolato: {floored_qty}, valore ordine: {order_value:.2f}")
         if precision == 0:
-            return str(int(rounded_qty))
-        return f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
-
+            return str(int(floored_qty))
+        return f"{floored_qty:.{precision}f}".rstrip('0').rstrip('.')
     except Exception as e:
         log(f"❌ Errore calcolo quantità per {symbol}: {e}")
         return None
@@ -527,38 +516,7 @@ log("🔄 Avvio sistema di monitoraggio segnali reali")
 notify_telegram("🤖 BOT AVVIATO - In ascolto per segnali di ingresso/uscita")
 
 
-# =====================
-# ⚠️ FUNZIONE DI TEST: VENDI TUTTO ALL'AVVIO (rimuovere dopo i test!)
-# =====================
-TEST_MODE = True  # ⚠️ Disabilita acquisti durante i test
-
-def test_sell_all():
-    test_coins = ["XRPUSDT", "AVAXUSDT", "INJUSDT", "LINKUSDT", "OPUSDT"]
-    log("\n====================\n⚠️ TEST: VENDO TUTTO IL PORTAFOGLIO\n====================")
-    for symbol in test_coins:
-        qty = get_free_qty(symbol)
-        if qty and qty > 0:
-            info = get_instrument_info(symbol)
-            qty_step = info.get("qty_step", 0.0001)
-            precision = info.get("precision", 4)
-            log(f"[TEST] {symbol}: saldo={qty}, qty_step={qty_step}, precision={precision}")
-            resp = market_sell(symbol, qty)
-            if resp is not None:
-                try:
-                    log(f"[TEST] Risposta Bybit: {resp.status_code} {resp.json()}")
-                except Exception:
-                    log(f"[TEST] Risposta Bybit: {resp.status_code} (no json)")
-            else:
-                log(f"[TEST] Errore invio ordine di vendita per {symbol}")
-        else:
-            log(f"[TEST] Nessun saldo da vendere per {symbol}")
-    log("====================\n⚠️ FINE TEST VENDITA\n====================\n")
-
-if __name__ == "__main__":
-    test_sell_all()
-# =====================
-# FINE BLOCCO TEST
-# =====================
+TEST_MODE = False  # Acquisti e vendite normali abilitati
 
 
 # Inizializza struttura base
