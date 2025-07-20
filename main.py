@@ -35,39 +35,6 @@ VOLATILE_ASSETS = [
     "SEIUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "TONUSDT", "DOGEUSDT", "MATICUSDT"
 ]
 
-# =====================
-# ⚠️ FUNZIONE DI TEST: VENDI TUTTO ALL'AVVIO (rimuovere dopo i test!)
-# =====================
-TEST_MODE = True  # ⚠️ Disabilita acquisti durante i test
-
-def test_sell_all():
-    test_coins = ["XRPUSDT", "AVAXUSDT", "INJUSDT", "LINKUSDT", "OPUSDT"]
-    log("\n====================\n⚠️ TEST: VENDO TUTTO IL PORTAFOGLIO\n====================")
-    for symbol in test_coins:
-        qty = get_free_qty(symbol)
-        if qty and qty > 0:
-            info = get_instrument_info(symbol)
-            qty_step = info.get("qty_step", 0.0001)
-            precision = info.get("precision", 4)
-            log(f"[TEST] {symbol}: saldo={qty}, qty_step={qty_step}, precision={precision}")
-            resp = market_sell(symbol, qty)
-            if resp is not None:
-                try:
-                    log(f"[TEST] Risposta Bybit: {resp.status_code} {resp.json()}")
-                except Exception:
-                    log(f"[TEST] Risposta Bybit: {resp.status_code} (no json)")
-            else:
-                log(f"[TEST] Errore invio ordine di vendita per {symbol}")
-        else:
-            log(f"[TEST] Nessun saldo da vendere per {symbol}")
-    log("====================\n⚠️ FINE TEST VENDITA\n====================\n")
-
-if __name__ == "__main__":
-    test_sell_all()
-# =====================
-# FINE BLOCCO TEST
-# =====================
-
 INTERVAL_MINUTES = 15
 ATR_WINDOW = 14
 TP_FACTOR = 2.0
@@ -558,6 +525,41 @@ def analyze_asset(symbol: str):
 
 log("🔄 Avvio sistema di monitoraggio segnali reali")
 notify_telegram("🤖 BOT AVVIATO - In ascolto per segnali di ingresso/uscita")
+
+
+# =====================
+# ⚠️ FUNZIONE DI TEST: VENDI TUTTO ALL'AVVIO (rimuovere dopo i test!)
+# =====================
+TEST_MODE = True  # ⚠️ Disabilita acquisti durante i test
+
+def test_sell_all():
+    test_coins = ["XRPUSDT", "AVAXUSDT", "INJUSDT", "LINKUSDT", "OPUSDT"]
+    log("\n====================\n⚠️ TEST: VENDO TUTTO IL PORTAFOGLIO\n====================")
+    for symbol in test_coins:
+        qty = get_free_qty(symbol)
+        if qty and qty > 0:
+            info = get_instrument_info(symbol)
+            qty_step = info.get("qty_step", 0.0001)
+            precision = info.get("precision", 4)
+            log(f"[TEST] {symbol}: saldo={qty}, qty_step={qty_step}, precision={precision}")
+            resp = market_sell(symbol, qty)
+            if resp is not None:
+                try:
+                    log(f"[TEST] Risposta Bybit: {resp.status_code} {resp.json()}")
+                except Exception:
+                    log(f"[TEST] Risposta Bybit: {resp.status_code} (no json)")
+            else:
+                log(f"[TEST] Errore invio ordine di vendita per {symbol}")
+        else:
+            log(f"[TEST] Nessun saldo da vendere per {symbol}")
+    log("====================\n⚠️ FINE TEST VENDITA\n====================\n")
+
+if __name__ == "__main__":
+    test_sell_all()
+# =====================
+# FINE BLOCCO TEST
+# =====================
+
 
 # Inizializza struttura base
 open_positions = set()
