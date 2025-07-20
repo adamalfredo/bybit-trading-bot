@@ -201,23 +201,37 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         return None
 
     info = get_instrument_info(symbol)
-    qty_step = info["qty_step"]
-    precision = info["precision"]
+    qty_step = info.get("qty_step", 0.0001)
+    precision = info.get("precision", 4)
+    min_order_amt = info.get("min_order_amt", 5)
 
     try:
         raw_qty = Decimal(str(usdt_amount)) / Decimal(str(price))
         step = Decimal(str(qty_step))
         rounded_qty = (raw_qty // step) * step
 
+        # Se la quantità arrotondata è troppo piccola, prova ad aumentare al minimo accettabile
+        order_value = rounded_qty * Decimal(str(price))
+        if order_value < Decimal(str(min_order_amt)):
+            # Prova a calcolare la quantità minima accettabile
+            min_qty = Decimal(str(min_order_amt)) / Decimal(str(price))
+            min_qty_rounded = (min_qty // step) * step
+            if min_qty_rounded > rounded_qty and min_qty_rounded > 0:
+                rounded_qty = min_qty_rounded
+                order_value = rounded_qty * Decimal(str(price))
+                log(f"⚠️ Quantità aumentata al minimo accettabile per {symbol}: {rounded_qty} (valore: {order_value:.2f} USDT)")
+            else:
+                log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
+                return None
+
         if rounded_qty <= 0:
             log(f"❌ Quantità calcolata troppo piccola per {symbol}")
             return None
 
-        # 🔥 Verifica valore reale in USDT dell’ordine
-        order_value = rounded_qty * Decimal(str(price))
-        if order_value < Decimal("5"):
-            log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
-            return None
+        # Controllo che l'investito effettivo sia vicino a quello richiesto (almeno 95%)
+        investito_effettivo = float(rounded_qty) * float(price)
+        if investito_effettivo < 0.95 * usdt_amount:
+            log(f"⚠️ Attenzione: valore effettivo investito ({investito_effettivo:.2f} USDT) molto inferiore a quello richiesto ({usdt_amount:.2f} USDT)")
 
         if precision == 0:
             return str(int(rounded_qty))
