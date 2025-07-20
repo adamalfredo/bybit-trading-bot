@@ -288,20 +288,32 @@ def market_sell(symbol: str, qty: float):
         log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
         return
 
-    qty_step, precision = get_instrument_info(symbol)
+    # Recupera qty_step e precision con fallback robusto
+    info = get_instrument_info(symbol)
+    qty_step = info.get("qty_step", 0.0001)
+    precision = info.get("precision", 4)
+    if not qty_step or qty_step <= 0:
+        qty_step = 0.0001
+        precision = 4
+
     try:
         dec_qty = Decimal(str(qty))
         step = Decimal(str(qty_step))
+        # Arrotonda verso il basso al multiplo più vicino di step
         rounded_qty = (dec_qty // step) * step
 
         if rounded_qty <= 0:
             log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
             return
 
+        # Formatta la quantità secondo la precisione
         if precision == 0:
             qty_str = str(int(rounded_qty))
         else:
             qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
+
+        # Log di debug
+        log(f"[DEBUG] market_sell {symbol}: qty={qty}, step={qty_step}, rounded={rounded_qty}, qty_str={qty_str}, precision={precision}")
 
     except Exception as e:
         log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
@@ -316,7 +328,7 @@ def market_sell(symbol: str, qty: float):
     }
 
     ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+    body_json = json.dumps(body, separators=(",", ":"))
     payload = f"{ts}{KEY}5000{body_json}"
     sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
@@ -331,114 +343,12 @@ def market_sell(symbol: str, qty: float):
 
     try:
         resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        data = resp.json()
         log(f"SELL BODY: {body_json}")
-        log(f"RESPONSE: {resp.status_code} {data}")
+        log(f"RESPONSE: {resp.status_code} {resp.json()}")
         return resp
     except Exception as e:
-        log(f"Errore invio ordine SELL: {e}")
+        log(f"❌ Errore invio ordine SELL: {e}")
         return None
-
-def run_test_buy_and_sell():
-    from decimal import Decimal
-    TEST_SYMBOLS = [("XRPUSDT", 50.0), ("LINKUSDT", 50.0)]
-
-    for symbol, amount in TEST_SYMBOLS:
-        log(f"🧪 Test acquisto di {amount} USDT in {symbol}")
-
-        # --- Calcolo quantità come nel tuo market_buy ---
-        price = get_last_price(symbol)
-        if not price:
-            log(f"❌ Prezzo non disponibile per {symbol}")
-            continue
-
-        info = get_instrument_info(symbol)
-        qty_step = info["qty_step"]
-        precision = info["precision"]
-
-        raw_qty = Decimal(str(amount)) / Decimal(str(price))
-        step = Decimal(str(qty_step))
-        rounded_qty = (raw_qty // step) * step
-
-        if rounded_qty <= 0:
-            log(f"❌ Quantità troppo piccola per {symbol}")
-            continue
-
-        if precision == 0:
-            qty_str = str(int(rounded_qty))
-        else:
-            qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
-
-        body = {
-            "category": "spot",
-            "symbol": symbol,
-            "side": "Buy",
-            "orderType": "Market",
-            "qty": qty_str
-        }
-
-        ts = str(int(time.time() * 1000))
-        body_json = json.dumps(body, separators=(",", ":"))
-        payload = f"{ts}{KEY}5000{body_json}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json"
-        }
-
-        response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"BUY BODY: {body_json}")
-        log(f"RESPONSE: {response.status_code} {response.json()}")
-
-        if response.status_code == 200 and response.json().get("retCode") == 0:
-            log(f"🟢 Acquisto registrato per {symbol} con qty {qty_str}")
-            time.sleep(3)
-
-            # --- Preparazione quantità per vendita (uguale logica) ---
-            dec_qty = Decimal(qty_str)
-            rounded_qty = (dec_qty // step) * step
-
-            if rounded_qty <= 0:
-                log(f"⚠️ Quantità troncata troppo piccola per {symbol}, niente vendita")
-                continue
-
-            if precision == 0:
-                sell_qty_str = str(int(rounded_qty))
-            else:
-                sell_qty_str = f"{rounded_qty:.{precision}f}".rstrip('0').rstrip('.')
-
-            log(f"🧪 Test vendita di {sell_qty_str} {symbol.replace('USDT','')}")
-
-            sell_body = {
-                "category": "spot",
-                "symbol": symbol,
-                "side": "Sell",
-                "orderType": "Market",
-                "qty": sell_qty_str
-            }
-
-            ts = str(int(time.time() * 1000))
-            sell_json = json.dumps(sell_body, separators=(",", ":"))
-            payload = f"{ts}{KEY}5000{sell_json}"
-            sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-            headers["X-BAPI-SIGN"] = sign
-            headers["X-BAPI-TIMESTAMP"] = ts
-
-            resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=sell_json)
-            log(f"SELL BODY: {sell_json}")
-            log(f"RESPONSE: {resp.status_code} {resp.json()}")
-
-            if resp.status_code == 200 and resp.json().get("retCode") == 0:
-                log(f"✅ Vendita completata per {symbol}")
-            else:
-                log(f"❌ Vendita fallita per {symbol}")
-        else:
-            log(f"❌ Acquisto fallito per {symbol}")
-
 
 def fetch_history(symbol: str):
     endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
@@ -540,11 +450,6 @@ def analyze_asset(symbol: str):
 
 log("🔄 Avvio sistema di monitoraggio segnali reali")
 notify_telegram("🤖 BOT AVVIATO - In ascolto per segnali di ingresso/uscita")
-
-############################################################################################################
-run_test_buy_and_sell()
-exit()
-############################################################################################################
 
 # Inizializza struttura base
 open_positions = set()
