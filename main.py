@@ -363,7 +363,6 @@ def market_sell(symbol: str, qty: float):
         log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
         return
 
-
     # Recupera qty_step e precision con fallback robusto
     info = get_instrument_info(symbol)
     qty_step = info.get("qty_step", 0.0001)
@@ -372,37 +371,24 @@ def market_sell(symbol: str, qty: float):
         qty_step = 0.0001
         precision = 4
 
-    def count_decimals(step):
-        s = str(step)
-        if '.' in s:
-            return len(s.split('.')[1].rstrip('0'))
-        return 0
-
     try:
         dec_qty = Decimal(str(qty))
         step = Decimal(str(qty_step))
-        decimals = count_decimals(qty_step)
-
-        # Se qty_step >= 1, vendi solo la parte intera
-        if step >= 1:
-            rounded_qty = dec_qty.to_integral_value(rounding=ROUND_DOWN)
-            qty_str = str(int(rounded_qty))
-        else:
-            # Arrotonda per difetto al multiplo di step
-            rounded_qty = (dec_qty // step) * step
-            # Forza massimo 2 decimali (troncando, non arrotondando)
-            qty_str = f"{rounded_qty:.2f}"
-            # Rimuovi eventuali zeri e punto finale
-            qty_str = qty_str.rstrip('0').rstrip('.')
-            if qty_str == '':
-                qty_str = '0'
+        # Arrotonda per difetto al multiplo di step, MAI supera il saldo
+        floored_qty = (dec_qty // step) * step
+        # Forza massimo 2 decimali (troncando, non arrotondando)
+        floored_qty = floored_qty.quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+        # Rimuovi eventuali zeri e punto finale
+        qty_str = f"{floored_qty:.2f}".rstrip('0').rstrip('.')
+        if qty_str == '':
+            qty_str = '0'
 
         if Decimal(qty_str) <= 0:
             log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
             return
 
         # Log di debug
-        log(f"[DEBUG] market_sell {symbol}: qty={qty}, step={qty_step}, rounded={rounded_qty}, qty_str={qty_str}, decimali={decimals}")
+        log(f"[DEBUG] market_sell {symbol}: qty={qty}, step={qty_step}, floored={floored_qty}, qty_str={qty_str}")
 
     except Exception as e:
         log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
