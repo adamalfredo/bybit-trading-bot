@@ -204,34 +204,51 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     qty_step = info.get("qty_step", 0.0001)
     precision = info.get("precision", 4)
     min_order_amt = info.get("min_order_amt", 5)
+    min_qty = info.get("min_qty", 0.0)
 
     try:
         raw_qty = Decimal(str(usdt_amount)) / Decimal(str(price))
         step = Decimal(str(qty_step))
+        min_qty_dec = Decimal(str(min_qty))
+        # Arrotonda la quantità verso il basso al multiplo di step
         rounded_qty = (raw_qty // step) * step
 
-        # Se la quantità arrotondata è troppo piccola, prova ad aumentare al minimo accettabile
+        # Assicura che la quantità sia almeno min_qty
+        if rounded_qty < min_qty_dec:
+            rounded_qty = (min_qty_dec // step) * step
+            if rounded_qty < min_qty_dec:
+                rounded_qty += step
+            log(f"⚠️ Quantità aumentata a min_qty per {symbol}: {rounded_qty}")
+
         order_value = rounded_qty * Decimal(str(price))
+        # Se il valore ordine è troppo basso, aumenta la quantità al minimo accettabile
         if order_value < Decimal(str(min_order_amt)):
-            # Prova a calcolare la quantità minima accettabile
-            min_qty = Decimal(str(min_order_amt)) / Decimal(str(price))
-            min_qty_rounded = (min_qty // step) * step
-            if min_qty_rounded > rounded_qty and min_qty_rounded > 0:
-                rounded_qty = min_qty_rounded
+            min_qty_for_amt = (Decimal(str(min_order_amt)) / Decimal(str(price)))
+            min_qty_for_amt_rounded = (min_qty_for_amt // step) * step
+            if min_qty_for_amt_rounded < min_qty_dec:
+                min_qty_for_amt_rounded = min_qty_dec
+            if min_qty_for_amt_rounded > rounded_qty:
+                rounded_qty = min_qty_for_amt_rounded
                 order_value = rounded_qty * Decimal(str(price))
-                log(f"⚠️ Quantità aumentata al minimo accettabile per {symbol}: {rounded_qty} (valore: {order_value:.2f} USDT)")
+                log(f"⚠️ Quantità aumentata per rispettare min_order_amt per {symbol}: {rounded_qty} (valore: {order_value:.2f} USDT)")
             else:
                 log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
                 return None
+
+        # Verifica che la quantità sia multiplo esatto di qty_step
+        if (rounded_qty % step) != 0:
+            log(f"❌ Quantità {rounded_qty} non multiplo di qty_step {qty_step} per {symbol}")
+            return None
 
         if rounded_qty <= 0:
             log(f"❌ Quantità calcolata troppo piccola per {symbol}")
             return None
 
-        # Controllo che l'investito effettivo sia vicino a quello richiesto (almeno 95%)
         investito_effettivo = float(rounded_qty) * float(price)
         if investito_effettivo < 0.95 * usdt_amount:
             log(f"⚠️ Attenzione: valore effettivo investito ({investito_effettivo:.2f} USDT) molto inferiore a quello richiesto ({usdt_amount:.2f} USDT)")
+
+        log(f"[DEBUG] {symbol} - price: {price}, qty_step: {qty_step}, min_qty: {min_qty}, min_order_amt: {min_order_amt}, richiesto: {usdt_amount}, calcolato: {rounded_qty}, valore ordine: {order_value:.2f}")
 
         if precision == 0:
             return str(int(rounded_qty))
@@ -247,42 +264,76 @@ def market_buy(symbol: str, usdt_amount: float):
         log(f"❌ Quantità non valida per acquisto di {symbol}")
         return None
 
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Buy",
-        "orderType": "Market",
-        "qty": qty_str
-    }
+    info = get_instrument_info(symbol)
+    min_qty = info.get("min_qty", 0.0)
+    min_order_amt = info.get("min_order_amt", 5)
+    precision = info.get("precision", 4)
 
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
-
-    try:
+    def _send_order(qty_str):
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": "Buy",
+            "orderType": "Market",
+            "qty": qty_str
+        }
+        ts = str(int(time.time() * 1000))
+        body_json = json.dumps(body, separators=(",", ":"))
+        payload = f"{ts}{KEY}5000{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-SIGN-TYPE": "2",
+            "Content-Type": "application/json"
+        }
         response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"BUY BODY: {body_json}")
         log(f"RESPONSE: {response.status_code} {response.json()}")
+        return response
 
+    try:
+        response = _send_order(qty_str)
         if response.status_code == 200 and response.json().get("retCode") == 0:
             time.sleep(2)
-            qty = get_free_qty(symbol)
-            if not qty or qty == 0:
+            qty_after = get_free_qty(symbol)
+            if not qty_after or qty_after == 0:
                 time.sleep(3)
-                qty = get_free_qty(symbol)
+                qty_after = get_free_qty(symbol)
 
-            if qty and qty > 0:
+            # Calcola la quantità richiesta in float
+            try:
+                qty_requested = float(qty_str)
+            except Exception:
+                qty_requested = None
+
+            # Se la quantità effettiva è molto inferiore a quella richiesta, logga e notifica
+            if qty_requested and qty_after < 0.8 * qty_requested:
+                log(f"⚠️ Quantità acquistata ({qty_after}) molto inferiore a quella richiesta ({qty_requested}) per {symbol}")
+                notify_telegram(f"⚠️ Ordine parzialmente eseguito per {symbol}: richiesto {qty_requested}, ottenuto {qty_after}")
+                # Tenta un solo riacquisto della differenza se supera i minimi
+                diff = qty_requested - qty_after
+                price = get_last_price(symbol)
+                if diff > min_qty and price and (diff * price) > min_order_amt:
+                    diff_str = f"{diff:.{precision}f}".rstrip('0').rstrip('.')
+                    log(f"🔁 TENTO RIACQUISTO della differenza: {diff_str} {symbol}")
+                    response2 = _send_order(diff_str)
+                    if response2.status_code == 200 and response2.json().get("retCode") == 0:
+                        time.sleep(2)
+                        qty_final = get_free_qty(symbol)
+                        log(f"🟢 Acquisto finale per {symbol}: {qty_final}")
+                        return qty_final
+                    else:
+                        log(f"❌ Riacquisto fallito per {symbol}")
+                        return qty_after
+                else:
+                    log(f"❌ Differenza troppo piccola per riacquisto su {symbol}")
+                    return qty_after
+            if qty_after and qty_after > 0:
                 log(f"🟢 Acquisto registrato per {symbol}")
-                return qty
+                return qty_after
             else:
                 log(f"⚠️ Acquisto riuscito ma saldo non aggiornato per {symbol}")
         return None
