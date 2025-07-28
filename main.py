@@ -50,25 +50,93 @@ cooldown = {}
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
 
+# --- FUNZIONI DI SUPPORTO BYBIT E TELEGRAM ---
+def get_last_price(symbol):
+    try:
+        endpoint = f"{BYBIT_BASE_URL}/v5/market/ticker"
+        params = {"category": "spot", "symbol": symbol}
+        resp = requests.get(endpoint, params=params, timeout=10)
+        data = resp.json()
+        if data.get("retCode") == 0:
+            price = data["result"]["list"][0]["lastPrice"]
+            return float(price)
+        else:
+            log(f"[BYBIT] Errore get_last_price {symbol}: {data}")
+            return None
+    except Exception as e:
+        log(f"[BYBIT] Errore get_last_price {symbol}: {e}")
+        return None
 
-    sign_payload = f"{timestamp}{KEY}5000{query_string}"
+def get_instrument_info(symbol):
+    try:
+        endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
+        params = {"category": "spot", "symbol": symbol}
+        resp = requests.get(endpoint, params=params, timeout=10)
+        data = resp.json()
+        if data.get("retCode") == 0:
+            info = data["result"]["list"][0]
+            return {
+                "qty_step": float(info.get("lotSizeFilter", {}).get("qtyStep", 0.0001)),
+                "precision": int(info.get("basePrecision", 4)),
+                "min_order_amt": float(info.get("minOrderAmt", 5)),
+                "min_qty": float(info.get("lotSizeFilter", {}).get("minOrderQty", 0.0)),
+            }
+        else:
+            log(f"[BYBIT] Errore get_instrument_info {symbol}: {data}")
+            return {"qty_step": 0.0001, "precision": 4, "min_order_amt": 5, "min_qty": 0.0}
+    except Exception as e:
+        log(f"[BYBIT] Errore get_instrument_info {symbol}: {e}")
+        return {"qty_step": 0.0001, "precision": 4, "min_order_amt": 5, "min_qty": 0.0}
+
+def get_free_qty(symbol):
+    try:
+        endpoint = f"{BYBIT_BASE_URL}/v5/asset/transfer/query-account-coins-balance"
+        params = {"accountType": BYBIT_ACCOUNT_TYPE, "coin": symbol.replace("USDT", "")}
+        ts = str(int(time.time() * 1000))
+        sign_payload = f"{ts}{KEY}5000"
+        sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000"
+        }
+        resp = requests.get(endpoint, headers=headers, params=params, timeout=10)
+        data = resp.json()
+        if data.get("retCode") == 0:
+            coin_list = data["result"]["balanceList"]
+            for c in coin_list:
+                if c["coin"].upper() == params["coin"].upper():
+                    return float(c.get("free", 0))
+        return 0.0
+    except Exception as e:
+        log(f"[BYBIT] Errore get_free_qty {symbol}: {e}")
+        return 0.0
+
+def notify_telegram(msg):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        log("[TELEGRAM] Token o chat_id non configurati")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
+    try:
+        requests.post(url, data=payload, timeout=10)
+    except Exception as e:
+        log(f"[TELEGRAM] Errore invio messaggio: {e}")
+
+def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     price = get_last_price(symbol)
     if not price:
         log(f"❌ Prezzo non disponibile per {symbol}")
         return None
-
-    # Applica maggiorazione al prezzo ask
     limit_price = price * (1 + price_increase_pct)
-    # Arrotonda il prezzo alla precisione della coin
     info = get_instrument_info(symbol)
     precision = info.get("precision", 4)
     price_str = f"{limit_price:.{precision}f}".rstrip('0').rstrip('.')
-
     qty_str = calculate_quantity(symbol, usdt_amount)
     if not qty_str:
         log(f"❌ Quantità non valida per acquisto di {symbol}")
         return None
-
     body = {
         "category": "spot",
         "symbol": symbol,
@@ -99,48 +167,12 @@ def log(msg):
     log(f"RESPONSE: {response.status_code} {resp_json}")
     if response.status_code == 200 and resp_json.get("retCode") == 0:
         log(f"🟢 Ordine LIMIT inviato per {symbol} qty={qty_str} price={price_str}")
+        notify_telegram(f"🟢 Ordine LIMIT inviato per {symbol} qty={qty_str} price={price_str}")
         return resp_json
     else:
         log(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
+        notify_telegram(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
         return None
-    sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
-
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": "5000"
-    }
-
-    try:
-        resp = requests.get(url, headers=headers, params=params)
-        data = resp.json()
-
-        if "result" not in data or "list" not in data["result"]:
-            log(f"❗ Struttura inattesa da Bybit per {symbol}: {resp.text}")
-            return 0.0
-
-        coin_list = data["result"]["list"][0].get("coin", [])
-        for c in coin_list:
-            if c["coin"] == coin:
-                raw = c.get("walletBalance", "0")
-                try:
-                    qty = float(raw) if raw else 0.0
-                    if qty > 0:
-                        log(f"📦 Saldo trovato per {coin}: {qty}")
-                    else:
-                        log(f"🟡 Nessun saldo disponibile per {coin}")
-                    return qty
-                except Exception as e:
-                    log(f"⚠️ Errore conversione quantità {coin}: {e}")
-                    return 0.0
-
-        log(f"🔍 Coin {coin} non trovata nel saldo.")
-        return 0.0
-
-    except Exception as e:
-        log(f"❌ Errore nel recupero saldo per {symbol}: {e}")
-        return 0.0
 
 def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     price = get_last_price(symbol)
