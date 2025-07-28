@@ -53,7 +53,7 @@ def log(msg):
 # --- FUNZIONI DI SUPPORTO BYBIT E TELEGRAM ---
 def get_last_price(symbol):
     try:
-        endpoint = f"{BYBIT_BASE_URL}/v5/market/ticker"
+        endpoint = f"{BYBIT_BASE_URL}/v5/market/tickers"
         params = {"category": "spot", "symbol": symbol}
         resp = requests.get(endpoint, params=params, timeout=10)
         data = resp.json()
@@ -75,11 +75,15 @@ def get_instrument_info(symbol):
         data = resp.json()
         if data.get("retCode") == 0:
             info = data["result"]["list"][0]
+            qty_step = float(info.get("lotSizeFilter", {}).get("qtyStep", 0.0001))
+            precision = int(info.get("basePrecision", 4))
+            min_order_amt = float(info.get("minOrderAmt", 5))
+            min_qty = float(info.get("lotSizeFilter", {}).get("minOrderQty", 0.0))
             return {
-                "qty_step": float(info.get("lotSizeFilter", {}).get("qtyStep", 0.0001)),
-                "precision": int(info.get("basePrecision", 4)),
-                "min_order_amt": float(info.get("minOrderAmt", 5)),
-                "min_qty": float(info.get("lotSizeFilter", {}).get("minOrderQty", 0.0)),
+                "qty_step": qty_step,
+                "precision": precision,
+                "min_order_amt": min_order_amt,
+                "min_qty": min_qty
             }
         else:
             log(f"[BYBIT] Errore get_instrument_info {symbol}: {data}")
