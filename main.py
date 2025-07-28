@@ -238,46 +238,47 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         raw_qty = Decimal(str(usdt_amount)) / Decimal(str(price))
         step = Decimal(str(qty_step))
         min_qty_dec = Decimal(str(min_qty))
-        # Arrotonda per difetto al multiplo di step
-        floored_qty = (raw_qty // step) * step
-        # Arrotonda alla precisione di qty_step
+        # Calcola i decimali di qty_step
         s = str(qty_step)
         if '.' in s:
             qty_decimals = len(s.split('.')[-1].rstrip('0'))
         else:
             qty_decimals = 0
-        precision_str = '0.' + '0' * (qty_decimals - 1) + '1' if qty_decimals > 0 else '1'
-        floored_qty = floored_qty.quantize(Decimal(precision_str), rounding=ROUND_DOWN)
+        # Calcola la quantità come intero di step
+        qty_int = int(raw_qty // step)
+        floored_qty = qty_int * float(qty_step)
+        floored_qty_dec = Decimal(str(floored_qty)).quantize(Decimal('1.' + '0'*qty_decimals)) if qty_decimals > 0 else Decimal(int(floored_qty))
         # Se troppo piccola, porta a min_qty
-        if floored_qty < min_qty_dec:
-            floored_qty = min_qty_dec
-        order_value = floored_qty * Decimal(str(price))
+        if floored_qty_dec < min_qty_dec:
+            floored_qty_dec = Decimal(str(min_qty)).quantize(Decimal('1.' + '0'*qty_decimals)) if qty_decimals > 0 else Decimal(int(min_qty))
+        order_value = floored_qty_dec * Decimal(str(price))
         # Se valore troppo basso, porta a min_qty per min_order_amt
         if order_value < Decimal(str(min_order_amt)):
             min_qty_for_amt = (Decimal(str(min_order_amt)) / Decimal(str(price)))
-            min_qty_for_amt = (min_qty_for_amt // step) * step
-            min_qty_for_amt = min_qty_for_amt.quantize(Decimal(precision_str), rounding=ROUND_DOWN)
-            if min_qty_for_amt < min_qty_dec:
-                min_qty_for_amt = min_qty_dec
-            floored_qty = min_qty_for_amt
-            order_value = floored_qty * Decimal(str(price))
+            min_qty_int = int(min_qty_for_amt // step)
+            min_qty_for_amt = min_qty_int * float(qty_step)
+            min_qty_for_amt_dec = Decimal(str(min_qty_for_amt)).quantize(Decimal('1.' + '0'*qty_decimals)) if qty_decimals > 0 else Decimal(int(min_qty_for_amt))
+            if min_qty_for_amt_dec < min_qty_dec:
+                min_qty_for_amt_dec = min_qty_dec
+            floored_qty_dec = min_qty_for_amt_dec
+            order_value = floored_qty_dec * Decimal(str(price))
             if order_value < Decimal(str(min_order_amt)):
                 log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
                 return None
         # Verifica che la quantità sia multiplo esatto di qty_step
-        if (floored_qty % step) != 0:
-            log(f"❌ Quantità {floored_qty} non multiplo di qty_step {qty_step} per {symbol}")
+        if (floored_qty_dec / Decimal(str(qty_step))) % 1 != 0:
+            log(f"❌ Quantità {floored_qty_dec} non multiplo di qty_step {qty_step} per {symbol}")
             return None
-        if floored_qty <= 0:
+        if floored_qty_dec <= 0:
             log(f"❌ Quantità calcolata troppo piccola per {symbol}")
             return None
-        investito_effettivo = float(floored_qty) * float(price)
+        investito_effettivo = float(floored_qty_dec) * float(price)
         if investito_effettivo < 0.95 * usdt_amount:
             log(f"⚠️ Attenzione: valore effettivo investito ({investito_effettivo:.2f} USDT) molto inferiore a quello richiesto ({usdt_amount:.2f} USDT)")
-        log(f"[DEBUG] {symbol} - price: {price}, qty_step: {qty_step}, min_qty: {min_qty}, min_order_amt: {min_order_amt}, richiesto: {usdt_amount}, calcolato: {floored_qty}, valore ordine: {order_value:.2f}")
+        log(f"[DEBUG] {symbol} - price: {price}, qty_step: {qty_step}, min_qty: {min_qty}, min_order_amt: {min_order_amt}, richiesto: {usdt_amount}, calcolato: {floored_qty_dec}, valore ordine: {order_value:.2f}")
         if qty_decimals == 0:
-            return str(int(floored_qty))
-        return f"{floored_qty:.{qty_decimals}f}"
+            return str(int(floored_qty_dec))
+        return f"{floored_qty_dec:.{qty_decimals}f}"
     except Exception as e:
         log(f"❌ Errore calcolo quantità per {symbol}: {e}")
         return None
