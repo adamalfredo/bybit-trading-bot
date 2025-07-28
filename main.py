@@ -181,12 +181,8 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     if not qty:
         log(f"❌ Quantità non valida per acquisto di {symbol}")
         return None
-    try:
-        qty_float = float(qty)
-    except Exception:
-        log(f"❌ Errore conversione qty per {symbol}")
-        return None
-    qty_str = f"{qty_float:.{qty_decimals}f}"
+    # qty è già una stringa multiplo esatto di qty_step, non serve float né rifare il formatting
+    qty_str = str(qty)
     price_str = f"{limit_price:.{price_decimals}f}"
     body = {
         "category": "spot",
