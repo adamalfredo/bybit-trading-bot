@@ -265,8 +265,13 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         if investito_effettivo < 0.95 * usdt_amount:
             log(f"⚠️ Attenzione: valore effettivo investito ({investito_effettivo:.2f} USDT) molto inferiore a quello richiesto ({usdt_amount:.2f} USDT)")
         log(f"[DEBUG] {symbol} - price: {price}, qty_step: {qty_step}, min_qty: {min_qty}, min_order_amt: {min_order_amt}, richiesto: {usdt_amount}, calcolato: {floored_qty}, valore ordine: {order_value:.2f}")
-        # Format con esattamente 'precision' decimali (basePrecision)
-        fmt = f"{{0:.{precision}f}}"
+        # Format con esattamente i decimali di qty_step (non precision!)
+        s = str(qty_step)
+        if '.' in s:
+            qty_decimals = len(s.split('.')[-1].rstrip('0'))
+        else:
+            qty_decimals = 0
+        fmt = f"{{0:.{qty_decimals}f}}"
         qty_str = fmt.format(floored_qty)
         # Rimuovi eventuali zeri finali e punto se intero
         if '.' in qty_str:
