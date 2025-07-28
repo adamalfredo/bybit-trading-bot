@@ -50,111 +50,59 @@ cooldown = {}
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
 
-def notify_telegram(message: str):
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-        try:
-            requests.post(url, data=data, timeout=10)
-        except Exception as e:
-            log(f"Errore invio Telegram: {e}")
 
-def is_bullish_breakout_confirmed(df: pd.DataFrame) -> bool:
-    if len(df) < 2:
-        return False
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    body = abs(last["Close"] - last["Open"])
-    full_range = last["High"] - last["Low"]
-    if last["Close"] > last["Open"] and full_range > 0 and body > 0.6 * full_range and last["Close"] > prev["Close"]:
-        return True
-    return False
-
-def send_signed_request(method, endpoint, params=None):
-    import time, hmac, hashlib
-    if params is None:
-        params = {}
-
-    api_key = BYBIT_API_KEY
-    api_secret = BYBIT_API_SECRET
-    timestamp = str(int(time.time() * 1000))
-    recv_window = "5000"
-
-    body = json.dumps(params, separators=(",", ":")) if method == "POST" else ""
-
-    payload = f"{timestamp}{api_key}{recv_window}{body}"
-    signature = hmac.new(
-        api_secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
-    ).hexdigest()
-
-    headers = {
-        "X-BAPI-API-KEY": api_key,
-        "X-BAPI-SIGN": signature,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": recv_window,
-        "Content-Type": "application/json",
-    }
-
-    url = f"https://api.bybit.com{endpoint}"
-
-    if method == "POST":
-        response = requests.post(url, headers=headers, data=body)
-    else:
-        response = requests.get(url, headers=headers, params=params)
-
-    return response.json()
-
-def get_last_price(symbol: str) -> Optional[float]:
-    try:
-        response = requests.get(
-            f"{BYBIT_BASE_URL}/v5/market/tickers",
-            params={"category": "spot", "symbol": symbol},
-            timeout=10
-        )
-        data = response.json()
-        last_price = data["result"]["list"][0]["lastPrice"]
-        return float(last_price)
-    except Exception as e:
-        log(f"❌ Errore in get_last_price: {e}")
-        return None
-    
-def get_instrument_info(symbol: str) -> dict:
-    url = f"{BYBIT_BASE_URL}/v5/market/instruments-info?category=spot&symbol={symbol}"
-    try:
-        resp = requests.get(url)
-        data = resp.json()
-        if data["retCode"] != 0:
-            log(f"❌ Errore fetch info strumento: {data['retMsg']}")
-            return {}
-
-        info = data["result"]["list"][0]
-        lot = info["lotSizeFilter"]
-        return {
-            "min_qty": float(lot.get("minOrderQty", 0)),
-            "qty_step": float(lot.get("qtyStep", 0.0001)),
-            "precision": int(info.get("priceScale", 4)),
-            "min_order_amt": float(info.get("minOrderAmt", 5))
-        }
-
-    except Exception as e:
-        log(f"❌ Errore get_instrument_info: {e}")
-        return {}
-
-def get_free_qty(symbol: str) -> float:
-    if symbol.endswith("USDT") and len(symbol) > 4:
-        coin = symbol.replace("USDT", "")
-    elif symbol == "USDT":
-        coin = "USDT"
-    else:
-        coin = symbol
-
-    url = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
-    params = {"accountType": BYBIT_ACCOUNT_TYPE}
-
-    from urllib.parse import urlencode
-    query_string = urlencode(params)
-    timestamp = str(int(time.time() * 1000))
     sign_payload = f"{timestamp}{KEY}5000{query_string}"
+    price = get_last_price(symbol)
+    if not price:
+        log(f"❌ Prezzo non disponibile per {symbol}")
+        return None
+
+    # Applica maggiorazione al prezzo ask
+    limit_price = price * (1 + price_increase_pct)
+    # Arrotonda il prezzo alla precisione della coin
+    info = get_instrument_info(symbol)
+    precision = info.get("precision", 4)
+    price_str = f"{limit_price:.{precision}f}".rstrip('0').rstrip('.')
+
+    qty_str = calculate_quantity(symbol, usdt_amount)
+    if not qty_str:
+        log(f"❌ Quantità non valida per acquisto di {symbol}")
+        return None
+
+    body = {
+        "category": "spot",
+        "symbol": symbol,
+        "side": "Buy",
+        "orderType": "Limit",
+        "qty": qty_str,
+        "price": price_str,
+        "timeInForce": "GTC"
+    }
+    ts = str(int(time.time() * 1000))
+    body_json = json.dumps(body, separators=(",", ":"))
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json"
+    }
+    response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+    log(f"LIMIT BUY BODY: {body_json}")
+    try:
+        resp_json = response.json()
+    except Exception:
+        resp_json = {}
+    log(f"RESPONSE: {response.status_code} {resp_json}")
+    if response.status_code == 200 and resp_json.get("retCode") == 0:
+        log(f"🟢 Ordine LIMIT inviato per {symbol} qty={qty_str} price={price_str}")
+        return resp_json
+    else:
+        log(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
+        return None
     sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
 
     headers = {
@@ -647,21 +595,24 @@ while True:
                 log(f"[TEST_MODE] Acquisti inibiti per {symbol}")
                 continue
 
-            # Esegui l'acquisto effettivo
-            resp = market_buy(symbol, order_amount)
+
+            # Esegui l'acquisto effettivo con ordine LIMIT
+            resp = limit_buy(symbol, order_amount)
             if resp is None:
-                log(f"❌ Acquisto fallito per {symbol}")
+                log(f"❌ Acquisto LIMIT fallito per {symbol}")
                 continue
 
+            log(f"🟢 Ordine LIMIT piazzato per {symbol}. Attendi esecuzione.")
+
+            # Dopo l'esecuzione dell'ordine, aggiorna qty e actual_cost
+            time.sleep(2)
             qty = get_free_qty(symbol)
-            log(f"[DEBUG-ENTRY] Quantità effettivamente acquistata per {symbol}: {qty}")
-            if qty == 0:
-                log(f"❌ Nessuna quantità acquistata per {symbol}")
-                continue
-
-            # Calcola il valore effettivo investito
-            actual_cost = price * qty
-            log(f"[DEBUG-ENTRY] Valore effettivo investito per {symbol}: {actual_cost:.4f} USDT (prezzo: {price:.4f} × qty: {qty})")
+            actual_cost = 0.0
+            last_price = get_last_price(symbol)
+            if qty and last_price:
+                actual_cost = qty * last_price
+            else:
+                actual_cost = order_amount
 
             df = fetch_history(symbol)
             if df is None or "Close" not in df.columns:
