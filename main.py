@@ -90,8 +90,9 @@ def get_instrument_info(symbol):
 
 def get_free_qty(symbol):
     try:
-        endpoint = f"{BYBIT_BASE_URL}/v5/asset/transfer/query-account-coins-balance"
-        params = {"accountType": BYBIT_ACCOUNT_TYPE, "coin": symbol.replace("USDT", "")}
+        # Per USDT, usa endpoint /v5/asset/coin/balance
+        endpoint = f"{BYBIT_BASE_URL}/v5/asset/coin/balance"
+        params = {"accountType": BYBIT_ACCOUNT_TYPE, "coin": symbol.replace("USDT", "USDT")}
         ts = str(int(time.time() * 1000))
         sign_payload = f"{ts}{KEY}5000"
         sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
@@ -103,11 +104,11 @@ def get_free_qty(symbol):
         }
         resp = requests.get(endpoint, headers=headers, params=params, timeout=10)
         data = resp.json()
-        if data.get("retCode") == 0:
-            coin_list = data["result"]["balanceList"]
-            for c in coin_list:
-                if c["coin"].upper() == params["coin"].upper():
-                    return float(c.get("free", 0))
+        if data.get("retCode") == 0 and "result" in data and "balance" in data["result"]:
+            balance = data["result"]["balance"]
+            for c in balance:
+                if c["coin"].upper() == "USDT":
+                    return float(c.get("availableToWithdraw", c.get("walletBalance", 0)))
         return 0.0
     except Exception as e:
         log(f"[BYBIT] Errore get_free_qty {symbol}: {e}")
