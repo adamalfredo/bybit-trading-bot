@@ -250,98 +250,109 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         return None
 
 def market_buy(symbol: str, usdt_amount: float):
-    qty_str = calculate_quantity(symbol, usdt_amount)
-    if not qty_str:
-        log(f"❌ Quantità non valida per acquisto di {symbol}")
-        return None
+    retry = 0
+    max_retry = 1
+    while retry <= max_retry:
+        qty_str = calculate_quantity(symbol, usdt_amount)
+        if not qty_str:
+            log(f"❌ Quantità non valida per acquisto di {symbol}")
+            return None
 
-    info = get_instrument_info(symbol)
-    min_qty = info.get("min_qty", 0.0)
-    min_order_amt = info.get("min_order_amt", 5)
-    precision = info.get("precision", 4)
+        info = get_instrument_info(symbol)
+        min_qty = info.get("min_qty", 0.0)
+        min_order_amt = info.get("min_order_amt", 5)
+        precision = info.get("precision", 4)
 
-    def _send_order(qty_str):
-        body = {
-            "category": "spot",
-            "symbol": symbol,
-            "side": "Buy",
-            "orderType": "Market",
-            "qty": qty_str
-        }
-        ts = str(int(time.time() * 1000))
-        body_json = json.dumps(body, separators=(",", ":"))
-        payload = f"{ts}{KEY}5000{body_json}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json"
-        }
-        response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"BUY BODY: {body_json}")
-        try:
-            resp_json = response.json()
-        except Exception:
-            resp_json = {}
-        log(f"RESPONSE: {response.status_code} {resp_json}")
-        # Logga dettagli filled/cumExecQty/orderStatus se presenti
-        if 'result' in resp_json:
-            result = resp_json['result']
-            filled = result.get('cumExecQty') or result.get('execQty') or result.get('qty')
-            order_status = result.get('orderStatus')
-            log(f"[BYBIT ORDER RESULT] filled: {filled}, orderStatus: {order_status}, result: {result}")
-        return response
-
-    try:
-        response = _send_order(qty_str)
-        if response.status_code == 200 and response.json().get("retCode") == 0:
-            time.sleep(2)
-            qty_after = get_free_qty(symbol)
-            if not qty_after or qty_after == 0:
-                time.sleep(3)
-                qty_after = get_free_qty(symbol)
-
-            # Calcola la quantità richiesta in float
+        def _send_order(qty_str):
+            body = {
+                "category": "spot",
+                "symbol": symbol,
+                "side": "Buy",
+                "orderType": "Market",
+                "qty": qty_str
+            }
+            ts = str(int(time.time() * 1000))
+            body_json = json.dumps(body, separators=(",", ":"))
+            payload = f"{ts}{KEY}5000{body_json}"
+            sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+            headers = {
+                "X-BAPI-API-KEY": KEY,
+                "X-BAPI-SIGN": sign,
+                "X-BAPI-TIMESTAMP": ts,
+                "X-BAPI-RECV-WINDOW": "5000",
+                "X-BAPI-SIGN-TYPE": "2",
+                "Content-Type": "application/json"
+            }
+            response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+            log(f"BUY BODY: {body_json}")
             try:
-                qty_requested = float(qty_str)
+                resp_json = response.json()
             except Exception:
-                qty_requested = None
+                resp_json = {}
+            log(f"RESPONSE: {response.status_code} {resp_json}")
+            # Logga dettagli filled/cumExecQty/orderStatus se presenti
+            if 'result' in resp_json:
+                result = resp_json['result']
+                filled = result.get('cumExecQty') or result.get('execQty') or result.get('qty')
+                order_status = result.get('orderStatus')
+                log(f"[BYBIT ORDER RESULT] filled: {filled}, orderStatus: {order_status}, result: {result}")
+            return response, resp_json
 
-            # Se la quantità effettiva è molto inferiore a quella richiesta, logga e notifica
-            if qty_requested and qty_after < 0.8 * qty_requested:
-                log(f"⚠️ Quantità acquistata ({qty_after}) molto inferiore a quella richiesta ({qty_requested}) per {symbol}")
-                notify_telegram(f"⚠️ Ordine parzialmente eseguito per {symbol}: richiesto {qty_requested}, ottenuto {qty_after}")
-                # Tenta un solo riacquisto della differenza se supera i minimi
-                diff = qty_requested - qty_after
-                price = get_last_price(symbol)
-                if diff > min_qty and price and (diff * price) > min_order_amt:
-                    diff_str = f"{diff:.{precision}f}".rstrip('0').rstrip('.')
-                    log(f"🔁 TENTO RIACQUISTO della differenza: {diff_str} {symbol}")
-                    response2 = _send_order(diff_str)
-                    if response2.status_code == 200 and response2.json().get("retCode") == 0:
-                        time.sleep(2)
-                        qty_final = get_free_qty(symbol)
-                        log(f"🟢 Acquisto finale per {symbol}: {qty_final}")
-                        return qty_final
+        try:
+            response, resp_json = _send_order(qty_str)
+            if response.status_code == 200 and resp_json.get("retCode") == 0:
+                time.sleep(2)
+                qty_after = get_free_qty(symbol)
+                if not qty_after or qty_after == 0:
+                    time.sleep(3)
+                    qty_after = get_free_qty(symbol)
+
+                # Calcola la quantità richiesta in float
+                try:
+                    qty_requested = float(qty_str)
+                except Exception:
+                    qty_requested = None
+
+                # Se la quantità effettiva è molto inferiore a quella richiesta, logga e notifica
+                if qty_requested and qty_after < 0.8 * qty_requested:
+                    log(f"⚠️ Quantità acquistata ({qty_after}) molto inferiore a quella richiesta ({qty_requested}) per {symbol}")
+                    notify_telegram(f"⚠️ Ordine parzialmente eseguito per {symbol}: richiesto {qty_requested}, ottenuto {qty_after}")
+                    # Tenta un solo riacquisto della differenza se supera i minimi
+                    diff = qty_requested - qty_after
+                    price = get_last_price(symbol)
+                    if diff > min_qty and price and (diff * price) > min_order_amt:
+                        diff_str = f"{diff:.{precision}f}".rstrip('0').rstrip('.')
+                        log(f"🔁 TENTO RIACQUISTO della differenza: {diff_str} {symbol}")
+                        response2, resp_json2 = _send_order(diff_str)
+                        if response2.status_code == 200 and resp_json2.get("retCode") == 0:
+                            time.sleep(2)
+                            qty_final = get_free_qty(symbol)
+                            log(f"🟢 Acquisto finale per {symbol}: {qty_final}")
+                            return qty_final
+                        else:
+                            log(f"❌ Riacquisto fallito per {symbol}")
+                            return qty_after
                     else:
-                        log(f"❌ Riacquisto fallito per {symbol}")
+                        log(f"❌ Differenza troppo piccola per riacquisto su {symbol}")
                         return qty_after
-                else:
-                    log(f"❌ Differenza troppo piccola per riacquisto su {symbol}")
+                if qty_after and qty_after > 0:
+                    log(f"🟢 Acquisto registrato per {symbol}")
                     return qty_after
-            if qty_after and qty_after > 0:
-                log(f"🟢 Acquisto registrato per {symbol}")
-                return qty_after
+                else:
+                    log(f"⚠️ Acquisto riuscito ma saldo non aggiornato per {symbol}")
             else:
-                log(f"⚠️ Acquisto riuscito ma saldo non aggiornato per {symbol}")
-        return None
-
-    except Exception as e:
-        log(f"❌ Errore invio ordine market per {symbol}: {e}")
-        return None
+                # Se errore Bybit, ricalcola e riprova una sola volta
+                if retry < max_retry:
+                    log(f"🔄 Retry acquisto per {symbol} dopo errore Bybit: {resp_json.get('retMsg')}")
+                    retry += 1
+                    continue
+                else:
+                    log(f"❌ Acquisto fallito per {symbol} dopo retry: {resp_json.get('retMsg')}")
+                    return None
+        except Exception as e:
+            log(f"❌ Errore invio ordine market per {symbol}: {e}")
+            return None
+        break
 
 def market_sell(symbol: str, qty: float):
     price = get_last_price(symbol)
