@@ -76,11 +76,13 @@ def get_instrument_info(symbol):
         if data.get("retCode") == 0:
             info = data["result"]["list"][0]
             qty_step = float(info.get("lotSizeFilter", {}).get("qtyStep", 0.0001))
+            price_step = float(info.get("priceFilter", {}).get("tickSize", 0.0001))
             precision = int(info.get("basePrecision", 4))
             min_order_amt = float(info.get("minOrderAmt", 5))
             min_qty = float(info.get("lotSizeFilter", {}).get("minOrderQty", 0.0))
             return {
                 "qty_step": qty_step,
+                "price_step": price_step,
                 "precision": precision,
                 "min_order_amt": min_order_amt,
                 "min_qty": min_qty
@@ -165,14 +167,15 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     limit_price = price * (1 + price_increase_pct)
     info = get_instrument_info(symbol)
     qty_step = info.get("qty_step", 0.0001)
-    precision = info.get("precision", 4)
-    # Calcola i decimali per qty_step (es: 0.0001 -> 4 decimali)
+    price_step = info.get("price_step", 0.0001)
+    # Calcola i decimali per qty_step e price_step (es: 0.0001 -> 4 decimali)
     def step_decimals(step):
         s = str(step)
         if '.' in s:
             return len(s.split('.')[-1].rstrip('0'))
         return 0
     qty_decimals = step_decimals(qty_step)
+    price_decimals = step_decimals(price_step)
     # Formatta quantità e prezzo con i decimali corretti
     qty = calculate_quantity(symbol, usdt_amount)
     if not qty:
@@ -184,7 +187,7 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
         log(f"❌ Errore conversione qty per {symbol}")
         return None
     qty_str = f"{qty_float:.{qty_decimals}f}"
-    price_str = f"{limit_price:.{precision}f}"
+    price_str = f"{limit_price:.{price_decimals}f}"
     body = {
         "category": "spot",
         "symbol": symbol,
