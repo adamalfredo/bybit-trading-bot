@@ -212,8 +212,9 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         min_qty_dec = Decimal(str(min_qty))
         # Arrotonda per difetto al multiplo di step
         floored_qty = (raw_qty // step) * step
-        # Forza massimo 2 decimali (troncando, non arrotondando)
-        floored_qty = floored_qty.quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+        # Arrotonda alla precisione corretta per la coin
+        precision_str = '0.' + '0' * (precision - 1) + '1' if precision > 0 else '1'
+        floored_qty = floored_qty.quantize(Decimal(precision_str), rounding=ROUND_DOWN)
         # Se troppo piccola, porta a min_qty
         if floored_qty < min_qty_dec:
             floored_qty = min_qty_dec
@@ -222,6 +223,7 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         if order_value < Decimal(str(min_order_amt)):
             min_qty_for_amt = (Decimal(str(min_order_amt)) / Decimal(str(price)))
             min_qty_for_amt = (min_qty_for_amt // step) * step
+            min_qty_for_amt = min_qty_for_amt.quantize(Decimal(precision_str), rounding=ROUND_DOWN)
             if min_qty_for_amt < min_qty_dec:
                 min_qty_for_amt = min_qty_dec
             floored_qty = min_qty_for_amt
