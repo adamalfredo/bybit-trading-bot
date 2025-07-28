@@ -582,6 +582,7 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
         log(f"❌ Errore log su Google Sheets: {e}")
 
 while True:
+
     for symbol in ASSETS:
         signal, strategy, price = analyze_asset(symbol)
         log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
@@ -604,6 +605,7 @@ while True:
                 continue
 
             usdt_balance = get_usdt_balance()
+            log(f"[DEBUG-ENTRY] Saldo USDT prima dell'acquisto per {symbol}: {usdt_balance:.4f}")
             if usdt_balance < ORDER_USDT:
                 log(f"💸 Saldo USDT insufficiente per {symbol} ({usdt_balance:.2f})")
                 continue
@@ -621,21 +623,32 @@ while True:
 
             max_invest = usdt_balance * strength
             order_amount = min(max_invest, usdt_balance, 250)  # tetto massimo se vuoi
+            log(f"[FORZA] {symbol} - Strategia: {strategy}, Strength: {strength}, Investo: {order_amount:.2f} USDT (Saldo: {usdt_balance:.2f})")
+
+            # Logga la quantità calcolata PRIMA dell'acquisto
+            qty_str = calculate_quantity(symbol, order_amount)
+            log(f"[DEBUG-ENTRY] Quantità calcolata per {symbol} con {order_amount:.2f} USDT: {qty_str}")
 
             # ⚠️ INIBISCI GLI ACQUISTI DURANTE IL TEST
             if TEST_MODE:
                 log(f"[TEST_MODE] Acquisti inibiti per {symbol}")
                 continue
 
+            # Esegui l'acquisto effettivo
             resp = market_buy(symbol, order_amount)
             if resp is None:
                 log(f"❌ Acquisto fallito per {symbol}")
                 continue
 
             qty = get_free_qty(symbol)
+            log(f"[DEBUG-ENTRY] Quantità effettivamente acquistata per {symbol}: {qty}")
             if qty == 0:
                 log(f"❌ Nessuna quantità acquistata per {symbol}")
                 continue
+
+            # Calcola il valore effettivo investito
+            actual_cost = price * qty
+            log(f"[DEBUG-ENTRY] Valore effettivo investito per {symbol}: {actual_cost:.4f} USDT (prezzo: {price:.4f} × qty: {qty})")
 
             df = fetch_history(symbol)
             if df is None or "Close" not in df.columns:
@@ -649,8 +662,6 @@ while True:
             tp = price + (atr_val * TP_FACTOR)
             sl = price - (atr_val * SL_FACTOR)
 
-            actual_cost = price * qty
-            
             position_data[symbol] = {
                 "entry_price": price,
                 "tp": tp,
