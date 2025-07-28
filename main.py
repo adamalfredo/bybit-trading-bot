@@ -240,8 +240,13 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         min_qty_dec = Decimal(str(min_qty))
         # Arrotonda per difetto al multiplo di step
         floored_qty = (raw_qty // step) * step
-        # Arrotonda alla precisione corretta per la coin
-        precision_str = '0.' + '0' * (precision - 1) + '1' if precision > 0 else '1'
+        # Arrotonda alla precisione di qty_step
+        s = str(qty_step)
+        if '.' in s:
+            qty_decimals = len(s.split('.')[-1].rstrip('0'))
+        else:
+            qty_decimals = 0
+        precision_str = '0.' + '0' * (qty_decimals - 1) + '1' if qty_decimals > 0 else '1'
         floored_qty = floored_qty.quantize(Decimal(precision_str), rounding=ROUND_DOWN)
         # Se troppo piccola, porta a min_qty
         if floored_qty < min_qty_dec:
@@ -270,9 +275,9 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         if investito_effettivo < 0.95 * usdt_amount:
             log(f"⚠️ Attenzione: valore effettivo investito ({investito_effettivo:.2f} USDT) molto inferiore a quello richiesto ({usdt_amount:.2f} USDT)")
         log(f"[DEBUG] {symbol} - price: {price}, qty_step: {qty_step}, min_qty: {min_qty}, min_order_amt: {min_order_amt}, richiesto: {usdt_amount}, calcolato: {floored_qty}, valore ordine: {order_value:.2f}")
-        if precision == 0:
+        if qty_decimals == 0:
             return str(int(floored_qty))
-        return f"{floored_qty:.{precision}f}".rstrip('0').rstrip('.')
+        return f"{floored_qty:.{qty_decimals}f}"
     except Exception as e:
         log(f"❌ Errore calcolo quantità per {symbol}: {e}")
         return None
