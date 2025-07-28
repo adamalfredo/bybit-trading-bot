@@ -177,13 +177,10 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     qty_decimals = step_decimals(qty_step)
     price_decimals = step_decimals(price_step)
     # Formatta quantità e prezzo con i decimali corretti
-    qty = calculate_quantity(symbol, usdt_amount)
-    if not qty:
+    qty_str = calculate_quantity(symbol, usdt_amount)
+    if not qty_str:
         log(f"❌ Quantità non valida per acquisto di {symbol}")
         return None
-    # qty DEVE essere formattata con esattamente qty_decimals decimali (anche zeri finali)
-    from decimal import Decimal
-    qty_str = f"{Decimal(str(qty)):.{qty_decimals}f}"
     price_str = f"{limit_price:.{price_decimals}f}"
     body = {
         "category": "spot",
@@ -278,7 +275,9 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         log(f"[DEBUG] {symbol} - price: {price}, qty_step: {qty_step}, min_qty: {min_qty}, min_order_amt: {min_order_amt}, richiesto: {usdt_amount}, calcolato: {floored_qty_dec}, valore ordine: {order_value:.2f}")
         if qty_decimals == 0:
             return str(int(floored_qty_dec))
-        return f"{floored_qty_dec:.{qty_decimals}f}"
+        else:
+            fmt = f"{{0:.{qty_decimals}f}}"
+            return fmt.format(floored_qty_dec)
     except Exception as e:
         log(f"❌ Errore calcolo quantità per {symbol}: {e}")
         return None
@@ -669,7 +668,7 @@ while True:
             strength = strategy_strength.get(strategy, 0.5)  # default prudente
 
             max_invest = usdt_balance * strength
-            order_amount = min(max_invest, usdt_balance, 250)  # tetto massimo se vuoi
+            order_amount = min(max_invest, usdt_balance, 250) # tetto massimo se vuoi
             log(f"[FORZA] {symbol} - Strategia: {strategy}, Strength: {strength}, Investo: {order_amount:.2f} USDT (Saldo: {usdt_balance:.2f})")
 
             # Logga la quantità calcolata PRIMA dell'acquisto
