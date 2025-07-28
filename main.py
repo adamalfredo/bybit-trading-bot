@@ -177,47 +177,73 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     qty_decimals = step_decimals(qty_step)
     price_decimals = step_decimals(price_step)
     # Formatta quantità e prezzo con i decimali corretti
+    # Fallback: se errore decimali, riduci la quantità di uno step e riprova (max 10 tentativi)
+    max_attempts = 10
+    attempt = 0
     qty_str = calculate_quantity(symbol, usdt_amount)
     if not qty_str:
         log(f"❌ Quantità non valida per acquisto di {symbol}")
         return None
-    price_str = f"{limit_price:.{price_decimals}f}"
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Buy",
-        "orderType": "Limit",
-        "qty": qty_str,
-        "price": price_str,
-        "timeInForce": "GTC"
-    }
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
-    response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-    log(f"LIMIT BUY BODY: {body_json}")
-    try:
-        resp_json = response.json()
-    except Exception:
-        resp_json = {}
-    log(f"RESPONSE: {response.status_code} {resp_json}")
-    if response.status_code == 200 and resp_json.get("retCode") == 0:
-        log(f"🟢 Ordine LIMIT inviato per {symbol} qty={qty_str} price={price_str}")
-        notify_telegram(f"🟢 Ordine LIMIT inviato per {symbol} qty={qty_str} price={price_str}")
-        return resp_json
-    else:
-        log(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
-        notify_telegram(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
-        return None
+    qty_decimal = Decimal(qty_str)
+    info = get_instrument_info(symbol)
+    qty_step = Decimal(str(info.get("qty_step", 0.0001)))
+    min_qty = Decimal(str(info.get("min_qty", 0.0)))
+    min_order_amt = Decimal(str(info.get("min_order_amt", 5)))
+    while attempt < max_attempts:
+        price_str = f"{limit_price:.{price_decimals}f}"
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": "Buy",
+            "orderType": "Limit",
+            "qty": str(qty_decimal.normalize()),
+            "price": price_str,
+            "timeInForce": "GTC"
+        }
+        ts = str(int(time.time() * 1000))
+        body_json = json.dumps(body, separators=(",", ":"))
+        payload = f"{ts}{KEY}5000{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-SIGN-TYPE": "2",
+            "Content-Type": "application/json"
+        }
+        response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+        log(f"LIMIT BUY BODY: {body_json}")
+        try:
+            resp_json = response.json()
+        except Exception:
+            resp_json = {}
+        log(f"RESPONSE: {response.status_code} {resp_json}")
+        if response.status_code == 200 and resp_json.get("retCode") == 0:
+            log(f"🟢 Ordine LIMIT inviato per {symbol} qty={qty_decimal} price={price_str}")
+            notify_telegram(f"🟢 Ordine LIMIT inviato per {symbol} qty={qty_decimal} price={price_str}")
+            return resp_json
+        elif resp_json.get("retMsg", "").lower().find("too many decimals") >= 0:
+            # Riduci la quantità di uno step e riprova
+            qty_decimal -= qty_step
+            qty_decimal = qty_decimal.quantize(qty_step, rounding=ROUND_DOWN)
+            if qty_decimal < min_qty:
+                log(f"❌ Quantità scesa sotto il minimo per {symbol} durante i tentativi fallback")
+                break
+            order_value = qty_decimal * Decimal(str(price))
+            if order_value < min_order_amt:
+                log(f"❌ Valore ordine sceso sotto il minimo per {symbol} durante i tentativi fallback")
+                break
+            attempt += 1
+            log(f"🔄 Tentativo fallback {attempt}: provo qty={qty_decimal}")
+            continue
+        else:
+            log(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
+            notify_telegram(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
+            return None
+    log(f"❌ Tutti i tentativi fallback falliti per {symbol}")
+    notify_telegram(f"❌ Tutti i tentativi fallback falliti per {symbol}")
+    return None
 
 def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     price = get_last_price(symbol)
