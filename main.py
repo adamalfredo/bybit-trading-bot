@@ -164,12 +164,27 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
         return None
     limit_price = price * (1 + price_increase_pct)
     info = get_instrument_info(symbol)
+    qty_step = info.get("qty_step", 0.0001)
     precision = info.get("precision", 4)
-    price_str = f"{limit_price:.{precision}f}".rstrip('0').rstrip('.')
-    qty_str = calculate_quantity(symbol, usdt_amount)
-    if not qty_str:
+    # Calcola i decimali per qty_step (es: 0.0001 -> 4 decimali)
+    def step_decimals(step):
+        s = str(step)
+        if '.' in s:
+            return len(s.split('.')[-1].rstrip('0'))
+        return 0
+    qty_decimals = step_decimals(qty_step)
+    # Formatta quantità e prezzo con i decimali corretti
+    qty = calculate_quantity(symbol, usdt_amount)
+    if not qty:
         log(f"❌ Quantità non valida per acquisto di {symbol}")
         return None
+    try:
+        qty_float = float(qty)
+    except Exception:
+        log(f"❌ Errore conversione qty per {symbol}")
+        return None
+    qty_str = f"{qty_float:.{qty_decimals}f}"
+    price_str = f"{limit_price:.{precision}f}"
     body = {
         "category": "spot",
         "symbol": symbol,
