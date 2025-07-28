@@ -181,8 +181,9 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     if not qty:
         log(f"❌ Quantità non valida per acquisto di {symbol}")
         return None
-    # qty è già una stringa multiplo esatto di qty_step, non serve float né rifare il formatting
-    qty_str = str(qty)
+    # qty DEVE essere formattata con esattamente qty_decimals decimali (anche zeri finali)
+    from decimal import Decimal
+    qty_str = f"{Decimal(str(qty)):.{qty_decimals}f}"
     price_str = f"{limit_price:.{price_decimals}f}"
     body = {
         "category": "spot",
