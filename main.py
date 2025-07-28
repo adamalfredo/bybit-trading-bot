@@ -89,29 +89,57 @@ def get_instrument_info(symbol):
         return {"qty_step": 0.0001, "precision": 4, "min_order_amt": 5, "min_qty": 0.0}
 
 def get_free_qty(symbol):
+    if symbol.endswith("USDT") and len(symbol) > 4:
+        coin = symbol.replace("USDT", "")
+    elif symbol == "USDT":
+        coin = "USDT"
+    else:
+        coin = symbol
+
+    url = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
+    params = {"accountType": BYBIT_ACCOUNT_TYPE}
+
+    from urllib.parse import urlencode
+    query_string = urlencode(params)
+    timestamp = str(int(time.time() * 1000))
+    sign_payload = f"{timestamp}{KEY}5000{query_string}"
+    sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
+
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": "5000"
+    }
+
     try:
-        # Per USDT, usa endpoint /v5/asset/coin/balance
-        endpoint = f"{BYBIT_BASE_URL}/v5/asset/coin/balance"
-        params = {"accountType": BYBIT_ACCOUNT_TYPE, "coin": symbol.replace("USDT", "USDT")}
-        ts = str(int(time.time() * 1000))
-        sign_payload = f"{ts}{KEY}5000"
-        sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": "5000"
-        }
-        resp = requests.get(endpoint, headers=headers, params=params, timeout=10)
+        resp = requests.get(url, headers=headers, params=params)
         data = resp.json()
-        if data.get("retCode") == 0 and "result" in data and "balance" in data["result"]:
-            balance = data["result"]["balance"]
-            for c in balance:
-                if c["coin"].upper() == "USDT":
-                    return float(c.get("availableToWithdraw", c.get("walletBalance", 0)))
+
+        if "result" not in data or "list" not in data["result"]:
+            log(f"❗ Struttura inattesa da Bybit per {symbol}: {resp.text}")
+            return 0.0
+
+        coin_list = data["result"]["list"][0].get("coin", [])
+        for c in coin_list:
+            if c["coin"] == coin:
+                raw = c.get("walletBalance", "0")
+                try:
+                    qty = float(raw) if raw else 0.0
+                    if qty > 0:
+                        log(f"📦 Saldo trovato per {coin}: {qty}")
+                    else:
+                        log(f"🟡 Nessun saldo disponibile per {coin}")
+                    return qty
+                except Exception as e:
+                    log(f"⚠️ Errore conversione quantità {coin}: {e}")
+                    return 0.0
+
+        log(f"🔍 Coin {coin} non trovata nel saldo.")
         return 0.0
+
     except Exception as e:
-        log(f"[BYBIT] Errore get_free_qty {symbol}: {e}")
+        log(f"❌ Errore nel recupero saldo per {symbol}: {e}")
         return 0.0
 
 def notify_telegram(msg):
