@@ -671,17 +671,34 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
         log(f"❌ Errore log su Google Sheets: {e}")
 
 
-# --- LOGICA 70/30 FISSA: 70% budget volatili, 30% stabili ---
-while True:
+
+# --- LOGICA 70/30 SU VALORE TOTALE PORTAFOGLIO (USDT + coin) ---
+def get_portfolio_value():
     usdt_balance = get_usdt_balance()
-    volatile_budget = usdt_balance * 0.7
-    stable_budget = usdt_balance * 0.3
-    # Calcola capitale già investito in ogni gruppo
+    total = usdt_balance
+    coin_values = {}
+    for symbol in ASSETS:
+        if symbol == "USDT":
+            continue
+        qty = get_free_qty(symbol)
+        if qty and qty > 0:
+            price = get_last_price(symbol)
+            if price:
+                value = qty * price
+                coin_values[symbol] = value
+                total += value
+    return total, usdt_balance, coin_values
+
+while True:
+    portfolio_value, usdt_balance, coin_values = get_portfolio_value()
+    volatile_budget = portfolio_value * 0.7
+    stable_budget = portfolio_value * 0.3
+    # Calcola capitale già investito in ogni gruppo (valore attuale delle posizioni)
     volatile_invested = sum(
-        position_data[s]['entry_cost'] for s in open_positions if s in VOLATILE_ASSETS and 'entry_cost' in position_data[s]
+        coin_values.get(s, 0) for s in open_positions if s in VOLATILE_ASSETS
     )
     stable_invested = sum(
-        position_data[s]['entry_cost'] for s in open_positions if s not in VOLATILE_ASSETS and 'entry_cost' in position_data[s]
+        coin_values.get(s, 0) for s in open_positions if s not in VOLATILE_ASSETS
     )
 
     for symbol in ASSETS:
