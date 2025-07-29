@@ -603,10 +603,55 @@ notify_telegram("🤖 BOT AVVIATO - In ascolto per segnali di ingresso/uscita")
 TEST_MODE = False  # Acquisti e vendite normali abilitati
 
 
-# Inizializza struttura base
+
+# --- SYNC POSIZIONI APERTE DA WALLET ALL'AVVIO ---
 open_positions = set()
 position_data = {}
 last_exit_time = {}
+
+def sync_positions_from_wallet():
+    """
+    Popola open_positions e position_data con tutte le coin con saldo > 0 all'avvio.
+    """
+    for symbol in ASSETS:
+        if symbol == "USDT":
+            continue
+        qty = get_free_qty(symbol)
+        if qty and qty > 0:
+            price = get_last_price(symbol)
+            if not price:
+                continue
+            open_positions.add(symbol)
+            # Stima entry_price come prezzo attuale, entry_cost come qty*prezzo
+            entry_price = price
+            entry_cost = qty * price
+            # Calcola ATR e SL/TP di default
+            df = fetch_history(symbol)
+            if df is not None and "Close" in df.columns:
+                try:
+                    atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
+                    last = df.iloc[-1]
+                    atr_val = last["atr"] if "atr" in last else atr.iloc[-1]
+                except Exception:
+                    atr_val = price * 0.02
+            else:
+                atr_val = price * 0.02
+            tp = price + (atr_val * TP_FACTOR)
+            sl = price - (atr_val * SL_FACTOR)
+            position_data[symbol] = {
+                "entry_price": entry_price,
+                "tp": tp,
+                "sl": sl,
+                "entry_cost": entry_cost,
+                "qty": qty,
+                "entry_time": time.time(),
+                "trailing_active": False,
+                "p_max": price
+            }
+            log(f"[SYNC] Posizione trovata in wallet: {symbol} qty={qty} entry={entry_price:.4f} SL={sl:.4f} TP={tp:.4f}")
+
+# --- Esegui sync all'avvio ---
+sync_positions_from_wallet()
 
 def get_usdt_balance() -> float:
     return get_free_qty("USDT")
