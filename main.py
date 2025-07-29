@@ -194,9 +194,8 @@ def notify_telegram(msg):
 
 def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     price = get_last_price(symbol)
-    if not price or price <= 0 or price is None:
-        log(f"❌ [LIMIT_BUY] Prezzo non disponibile o nullo per {symbol}. Non invio ordine.")
-        notify_telegram(f"❌ [LIMIT_BUY] Prezzo non disponibile o nullo per {symbol}. Non invio ordine.")
+    if not price or price <= 0:
+        log(f"❌ Prezzo non disponibile o nullo per {symbol}")
         return None
     limit_price = price * (1 + price_increase_pct)
     info = get_instrument_info(symbol)
@@ -212,9 +211,8 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     max_attempts = 10
     attempt = 0
     qty_str = calculate_quantity(symbol, usdt_amount)
-    if not qty_str or float(qty_str) <= 0:
-        log(f"❌ [LIMIT_BUY] Quantità non valida per acquisto di {symbol}: {qty_str}")
-        notify_telegram(f"❌ [LIMIT_BUY] Quantità non valida per acquisto di {symbol}: {qty_str}")
+    if not qty_str:
+        log(f"❌ Quantità non valida per acquisto di {symbol}")
         return None
     qty_decimal = Decimal(qty_str)
     qty_step_dec = Decimal(str(qty_step))
@@ -225,8 +223,6 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
         price_fmt = f"{{0:.{price_decimals}f}}"
         price_str = price_fmt.format(limit_price)
         qty_str_fallback = format_quantity_bybit(float(qty_decimal), float(qty_step), precision=precision)
-        # Logga tutti i parametri inviati
-        log(f"[LIMIT_BUY][TRY {attempt}] BODY: symbol={symbol}, qty={qty_str_fallback}, price={price_str}, qty_step={qty_step}, precision={precision}")
         log(f"[DECIMALI][LIMIT_BUY][TRY {attempt}] {symbol} | qty_step={qty_step} | precision={precision} | qty_decimal={qty_decimal} | qty_str_fallback={qty_str_fallback}")
         body = {
             "category": "spot",
@@ -238,7 +234,7 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
             "timeInForce": "GTC"
         }
         ts = str(int(time.time() * 1000))
-        body_json = json.dumps(body, separators=(',', ':'))
+        body_json = json.dumps(body, separators=(",", ":"))
         payload = f"{ts}{KEY}5000{body_json}"
         sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
         headers = {
@@ -267,22 +263,20 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
             log(f"[DECIMALI][LIMIT_BUY][FALLBACK] {symbol} | nuovo qty_decimal={qty_decimal} | qty_step={qty_step} | precision={precision}")
             if qty_decimal < min_qty:
                 log(f"❌ Quantità scesa sotto il minimo per {symbol} durante i tentativi fallback")
-                notify_telegram(f"❌ [LIMIT_BUY] Tutti i fallback falliti per {symbol}: qty troppo piccola. Ultimo tentativo: {qty_decimal}")
                 break
             order_value = qty_decimal * Decimal(str(price))
             if order_value < min_order_amt:
                 log(f"❌ Valore ordine sceso sotto il minimo per {symbol} durante i tentativi fallback")
-                notify_telegram(f"❌ [LIMIT_BUY] Tutti i fallback falliti per {symbol}: valore ordine troppo basso. Ultimo tentativo: {order_value}")
                 break
             attempt += 1
             log(f"🔄 Tentativo fallback {attempt}: provo qty={format_quantity_bybit(float(qty_decimal), float(qty_step), precision=precision)}")
             continue
         else:
             log(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
-            notify_telegram(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}\nBODY: {body_json}")
+            notify_telegram(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
             return None
     log(f"❌ Tutti i tentativi fallback falliti per {symbol}")
-    notify_telegram(f"❌ Tutti i tentativi fallback falliti per {symbol}. Ultimo qty tentato: {qty_decimal}")
+    notify_telegram(f"❌ Tutti i tentativi fallback falliti per {symbol}")
     return None
 
 def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
@@ -668,17 +662,151 @@ def sync_positions_from_wallet():
                 atr_val = price * 0.02
             tp = price + (atr_val * TP_FACTOR)
             sl = price - (atr_val * SL_FACTOR)
+            position_data[symbol] = {
+                "entry_price": entry_price,
+                "tp": tp,
+                "sl": sl,
+                "entry_cost": entry_cost,
+                "qty": qty,
+                "entry_time": time.time(),
+                "trailing_active": False,
+                "p_max": price
+            }
+            log(f"[SYNC] Posizione trovata in wallet: {symbol} qty={qty} entry={entry_price:.4f} SL={sl:.4f} TP={tp:.4f}")
 
-            # --- LOGICA 70/30: assegna valori di default per nuove posizioni ---
+# --- Esegui sync all'avvio ---
+sync_positions_from_wallet()
+
+def get_usdt_balance() -> float:
+    return get_free_qty("USDT")
+
+def calculate_stop_loss(entry_price, current_price, p_max, trailing_active):
+    if not trailing_active:
+        return entry_price * (1 - INITIAL_STOP_LOSS_PCT)
+    else:
+        return p_max * (1 - TRAILING_DISTANCE)
+
+import gspread
+from google.oauth2.service_account import Credentials
+
+# Config
+SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"  # copia da URL: https://docs.google.com/spreadsheets/d/<QUESTO>/edit
+SHEET_NAME = "Foglio1"  # o quello che hai scelto
+
+# Setup una sola volta
+def setup_gspread():
+    scope = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_file("gspread-creds.json", scopes=scope)
+    client = gspread.authorize(creds)
+    return client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
+
+# Salva una riga nel foglio
+def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
+    try:
+        import base64
+
+        SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"
+        SHEET_NAME = "Foglio1"
+
+        # Decodifica la variabile base64 in file temporaneo
+        encoded = os.getenv("GSPREAD_CREDS_B64")
+        if not encoded:
+            log("❌ Variabile GSPREAD_CREDS_B64 non trovata")
+            return
+
+        creds_path = "/tmp/gspread-creds.json"
+        with open(creds_path, "wb") as f:
+            f.write(base64.b64decode(encoded))
+
+        scope = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_file(creds_path, scopes=scope)
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
+        sheet.append_row([
+            time.strftime("%Y-%m-%d %H:%M:%S"),
+            symbol,
+            round(entry, 6),
+            round(exit, 6),
+            f"{pnl_pct:.2f}%",
+            strategy,
+            result_type
+        ])
+    except Exception as e:
+        log(f"❌ Errore log su Google Sheets: {e}")
+
+
+
+# --- LOGICA 70/30 SU VALORE TOTALE PORTAFOGLIO (USDT + coin) ---
+def get_portfolio_value():
+    usdt_balance = get_usdt_balance()
+    total = usdt_balance
+    coin_values = {}
+    for symbol in ASSETS:
+        if symbol == "USDT":
+            continue
+        qty = get_free_qty(symbol)
+        if qty and qty > 0:
+            price = get_last_price(symbol)
+            if price:
+                value = qty * price
+                coin_values[symbol] = value
+                total += value
+    return total, usdt_balance, coin_values
+
+low_balance_alerted = False  # Deve essere fuori dal ciclo per persistere tra i cicli
+while True:
+    portfolio_value, usdt_balance, coin_values = get_portfolio_value()
+    volatile_budget = portfolio_value * 0.7
+    stable_budget = portfolio_value * 0.3
+    volatile_invested = sum(
+        coin_values.get(s, 0) for s in open_positions if s in VOLATILE_ASSETS
+    )
+    stable_invested = sum(
+        coin_values.get(s, 0) for s in open_positions if s in LESS_VOLATILE_ASSETS
+    )
+    # Log dettagliato bilanciamento
+    tot_invested = volatile_invested + stable_invested
+    perc_volatile = (volatile_invested / portfolio_value * 100) if portfolio_value > 0 else 0
+    perc_stable = (stable_invested / portfolio_value * 100) if portfolio_value > 0 else 0
+    log(f"[PORTAFOGLIO] Totale: {portfolio_value:.2f} USDT | Volatili: {volatile_invested:.2f} ({perc_volatile:.1f}%) | Meno volatili: {stable_invested:.2f} ({perc_stable:.1f}%) | USDT: {usdt_balance:.2f}")
+
+    # --- Avviso saldo basso: invia solo una volta finché non torna sopra soglia ---
+    # low_balance_alerted ora è globale rispetto al ciclo
+
+    for symbol in ASSETS:
+        signal, strategy, price = analyze_asset(symbol)
+        log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
+
+        # ❌ Filtra segnali nulli
+        if signal is None or strategy is None or price is None:
+            continue
+
+        # ✅ ENTRATA
+        if signal == "entry":
+            # Cooldown
+            if symbol in last_exit_time:
+                elapsed = time.time() - last_exit_time[symbol]
+                if elapsed < COOLDOWN_MINUTES * 60:
+                    log(f"⏳ Cooldown attivo per {symbol} ({elapsed:.0f}s), salto ingresso")
+                    continue
+
+            if symbol in open_positions:
+                log(f"⏩ Ignoro acquisto: già in posizione su {symbol}")
+                continue
+
+            # --- LOGICA 70/30: verifica budget disponibile ---
             is_volatile = symbol in VOLATILE_ASSETS
             if is_volatile:
                 group_budget = volatile_budget
                 group_invested = volatile_invested
+                group_label = "VOLATILE"
             else:
                 group_budget = stable_budget
                 group_invested = stable_invested
+                group_label = "MENO VOLATILE"
 
             group_available = group_budget - group_invested
+            log(f"[BUDGET] {symbol} ({group_label}) - Budget gruppo: {group_budget:.2f}, Già investito: {group_invested:.2f}, Disponibile: {group_available:.2f}")
             if group_available < ORDER_USDT:
                 log(f"💸 Budget {group_label} insufficiente per {symbol} (disponibile: {group_available:.2f})")
                 continue
@@ -859,45 +987,5 @@ def sync_positions_from_wallet():
                     log(f"❌ Vendita fallita con {sl_type} per {symbol}")
             else:
                 log(f"❌ Quantità nulla o troppo piccola per vendita {sl_type} su {symbol}")
-
-if __name__ == "__main__":
-    while True:
-        # --- SYNC POSIZIONI APERTE DA WALLET ALL'AVVIO (solo al primo ciclo) ---
-        if not open_positions:
-            for symbol in ASSETS:
-                if symbol == "USDT":
-                    continue
-                qty = get_free_qty(symbol)
-                if qty and qty > 0:
-                    price = get_last_price(symbol)
-                    if not price:
-                        continue
-                    open_positions.add(symbol)
-                    entry_price = price
-                    entry_cost = qty * price
-                    df = fetch_history(symbol)
-                    if df is not None and "Close" in df.columns:
-                        try:
-                            atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
-                            last = df.iloc[-1]
-                            atr_val = last["atr"] if "atr" in last else atr.iloc[-1]
-                        except Exception:
-                            atr_val = price * 0.02
-                    else:
-                        atr_val = price * 0.02
-                    tp = price + (atr_val * TP_FACTOR)
-                    sl = price - (atr_val * SL_FACTOR)
-                    position_data[symbol] = {
-                        "entry_price": entry_price,
-                        "tp": tp,
-                        "sl": sl,
-                        "entry_cost": entry_cost,
-                        "qty": qty,
-                        "entry_time": time.time(),
-                        "trailing_active": False,
-                        "p_max": entry_price
-                    }
-                    log(f"[SYNC WALLET] {symbol} | qty={qty} | entry={entry_price:.4f} | TP={tp:.4f} | SL={sl:.4f}")
-        # --- LOGICA DI TRADING (come già presente) ---
-        # ...existing code...
-        time.sleep(INTERVAL_MINUTES * 60)
+    # Sicurezza: attesa tra i cicli principali
+    time.sleep(INTERVAL_MINUTES * 60)
