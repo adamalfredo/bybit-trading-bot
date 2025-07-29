@@ -670,7 +670,19 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
     except Exception as e:
         log(f"❌ Errore log su Google Sheets: {e}")
 
+
+# --- LOGICA 70/30 FISSA: 70% budget volatili, 30% stabili ---
 while True:
+    usdt_balance = get_usdt_balance()
+    volatile_budget = usdt_balance * 0.7
+    stable_budget = usdt_balance * 0.3
+    # Calcola capitale già investito in ogni gruppo
+    volatile_invested = sum(
+        position_data[s]['entry_cost'] for s in open_positions if s in VOLATILE_ASSETS and 'entry_cost' in position_data[s]
+    )
+    stable_invested = sum(
+        position_data[s]['entry_cost'] for s in open_positions if s not in VOLATILE_ASSETS and 'entry_cost' in position_data[s]
+    )
 
     for symbol in ASSETS:
         signal, strategy, price = analyze_asset(symbol)
@@ -693,10 +705,21 @@ while True:
                 log(f"⏩ Ignoro acquisto: già in posizione su {symbol}")
                 continue
 
-            usdt_balance = get_usdt_balance()
-            log(f"[DEBUG-ENTRY] Saldo USDT prima dell'acquisto per {symbol}: {usdt_balance:.4f}")
-            if usdt_balance < ORDER_USDT:
-                log(f"💸 Saldo USDT insufficiente per {symbol} ({usdt_balance:.2f})")
+            # --- LOGICA 70/30: verifica budget disponibile ---
+            is_volatile = symbol in VOLATILE_ASSETS
+            if is_volatile:
+                group_budget = volatile_budget
+                group_invested = volatile_invested
+                group_label = "VOLATILE"
+            else:
+                group_budget = stable_budget
+                group_invested = stable_invested
+                group_label = "STABILE"
+
+            group_available = group_budget - group_invested
+            log(f"[BUDGET] {symbol} ({group_label}) - Budget gruppo: {group_budget:.2f}, Già investito: {group_invested:.2f}, Disponibile: {group_available:.2f}")
+            if group_available < ORDER_USDT:
+                log(f"💸 Budget {group_label} insufficiente per {symbol} (disponibile: {group_available:.2f})")
                 continue
 
             # 📊 Valuta la forza del segnale in base alla strategia
@@ -710,8 +733,8 @@ while True:
             }
             strength = strategy_strength.get(strategy, 0.5)  # default prudente
 
-            max_invest = usdt_balance * strength
-            order_amount = min(max_invest, usdt_balance, 250) # tetto massimo se vuoi
+            max_invest = min(group_available, usdt_balance) * strength
+            order_amount = min(max_invest, group_available, usdt_balance, 250)
             log(f"[FORZA] {symbol} - Strategia: {strategy}, Strength: {strength}, Investo: {order_amount:.2f} USDT (Saldo: {usdt_balance:.2f})")
 
             # Logga la quantità calcolata PRIMA dell'acquisto
@@ -722,7 +745,6 @@ while True:
             if TEST_MODE:
                 log(f"[TEST_MODE] Acquisti inibiti per {symbol}")
                 continue
-
 
             # Esegui l'acquisto effettivo con ordine LIMIT
             resp = limit_buy(symbol, order_amount)
