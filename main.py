@@ -321,6 +321,79 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         log(f"❌ Errore calcolo quantità per {symbol}: {e}")
         return None
 
+def market_buy(symbol: str, usdt_amount: float):
+    retry = 0
+    max_retry = 2
+    while retry <= max_retry:
+        qty_str = calculate_quantity(symbol, usdt_amount)
+        if not qty_str or float(qty_str) <= 0:
+            log(f"❌ [MARKET_BUY] Quantità non valida per acquisto di {symbol}: {qty_str}")
+            notify_telegram(f"❌ [MARKET_BUY] Quantità non valida per acquisto di {symbol}: {qty_str}")
+            return None
+        info = get_instrument_info(symbol)
+        qty_step = info.get("qty_step", 0.0001)
+        min_qty = info.get("min_qty", 0.0)
+        min_order_amt = info.get("min_order_amt", 5)
+        precision = info.get("precision", 4)
+        log(f"[DECIMALI][MARKET_BUY] {symbol} | qty_step={qty_step} | precision={precision} | qty_richiesta={qty_str}")
+        qty_str_finale = format_quantity_bybit(float(qty_str), float(qty_step), precision=precision)
+        # Logga tutti i parametri inviati
+        log(f"[MARKET_BUY][TRY {retry}] BODY: symbol={symbol}, qty={qty_str_finale}, qty_step={qty_step}, precision={precision}")
+        log(f"[DECIMALI][MARKET_BUY][TRY {retry}] {symbol} | qty_step={qty_step} | precision={precision} | qty_str_finale={qty_str_finale}")
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": "Buy",
+            "orderType": "Market",
+            "qty": qty_str_finale
+        }
+        ts = str(int(time.time() * 1000))
+        body_json = json.dumps(body, separators=(",", ":"))
+        payload = f"{ts}{KEY}5000{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-SIGN-TYPE": "2",
+            "Content-Type": "application/json"
+        }
+        try:
+            response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+            log(f"MARKET BUY BODY: {body_json}")
+            resp_json = response.json()
+            log(f"RESPONSE: {response.status_code} {resp_json}")
+            if response.status_code == 200 and resp_json.get("retCode") == 0:
+                log(f"🟢 Ordine MARKET inviato per {symbol} qty={body['qty']}")
+                notify_telegram(f"🟢 Ordine MARKET inviato per {symbol} qty={body['qty']}")
+                return resp_json
+            elif resp_json.get("retMsg", "").lower().find("too many decimals") >= 0:
+                qty_step_dec = Decimal(str(qty_step))
+                qty_decimal = Decimal(qty_str) - qty_step_dec
+                qty_decimal = (qty_decimal // qty_step_dec) * qty_step_dec
+                qty_decimal = qty_decimal.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
+                if qty_decimal < Decimal(str(min_qty)):
+                    log(f"❌ Quantità scesa sotto il minimo per {symbol} durante fallback BUY")
+                    notify_telegram(f"❌ [MARKET_BUY] Tutti i fallback falliti per {symbol}: qty troppo piccola. Ultimo tentativo: {qty_decimal}")
+                    break
+                qty_str = format_quantity_bybit(float(qty_decimal), float(qty_step), precision=precision)
+                log(f"[DECIMALI][MARKET_BUY][FALLBACK] {symbol} | nuovo qty_decimal={qty_decimal} | qty_step={qty_step} | precision={precision} | qty_str_fallback={qty_str}")
+                retry += 1
+                log(f"🔄 Tentativo fallback BUY {retry}: provo qty={qty_str}")
+                continue
+            else:
+                log(f"❌ Ordine MARKET fallito per {symbol}: {resp_json.get('retMsg')}")
+                notify_telegram(f"❌ Ordine MARKET fallito per {symbol}: {resp_json.get('retMsg')}\nBODY: {body_json}")
+                retry += 1
+        except Exception as e:
+            log(f"❌ Errore invio ordine MARKET BUY: {e}")
+            notify_telegram(f"❌ Errore invio ordine MARKET BUY: {e}")
+            retry += 1
+    log(f"❌ Tutti i tentativi MARKET BUY falliti per {symbol}")
+    notify_telegram(f"❌ Tutti i tentativi MARKET BUY falliti per {symbol}. Ultimo qty tentato: {qty_str}")
+    return None
+
 def market_sell(symbol: str, qty: float):
     info = get_instrument_info(symbol)
     qty_step = info.get("qty_step", 0.0001)
