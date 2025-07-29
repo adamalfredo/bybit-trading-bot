@@ -1,3 +1,5 @@
+from typing import Optional
+
 def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] = None) -> str:
     """
     Restituisce la quantità formattata secondo i decimali accettati da Bybit per qty_step e basePrecision, troncando senza arrotondare.
