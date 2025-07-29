@@ -326,9 +326,8 @@ def market_buy(symbol: str, usdt_amount: float):
     max_retry = 2
     while retry <= max_retry:
         qty_str = calculate_quantity(symbol, usdt_amount)
-        if not qty_str or float(qty_str) <= 0:
-            log(f"❌ [MARKET_BUY] Quantità non valida per acquisto di {symbol}: {qty_str}")
-            notify_telegram(f"❌ [MARKET_BUY] Quantità non valida per acquisto di {symbol}: {qty_str}")
+        if not qty_str:
+            log(f"❌ Quantità non valida per acquisto di {symbol}")
             return None
         info = get_instrument_info(symbol)
         qty_step = info.get("qty_step", 0.0001)
@@ -337,8 +336,6 @@ def market_buy(symbol: str, usdt_amount: float):
         precision = info.get("precision", 4)
         log(f"[DECIMALI][MARKET_BUY] {symbol} | qty_step={qty_step} | precision={precision} | qty_richiesta={qty_str}")
         qty_str_finale = format_quantity_bybit(float(qty_str), float(qty_step), precision=precision)
-        # Logga tutti i parametri inviati
-        log(f"[MARKET_BUY][TRY {retry}] BODY: symbol={symbol}, qty={qty_str_finale}, qty_step={qty_step}, precision={precision}")
         log(f"[DECIMALI][MARKET_BUY][TRY {retry}] {symbol} | qty_step={qty_step} | precision={precision} | qty_str_finale={qty_str_finale}")
         body = {
             "category": "spot",
@@ -375,7 +372,6 @@ def market_buy(symbol: str, usdt_amount: float):
                 qty_decimal = qty_decimal.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
                 if qty_decimal < Decimal(str(min_qty)):
                     log(f"❌ Quantità scesa sotto il minimo per {symbol} durante fallback BUY")
-                    notify_telegram(f"❌ [MARKET_BUY] Tutti i fallback falliti per {symbol}: qty troppo piccola. Ultimo tentativo: {qty_decimal}")
                     break
                 qty_str = format_quantity_bybit(float(qty_decimal), float(qty_step), precision=precision)
                 log(f"[DECIMALI][MARKET_BUY][FALLBACK] {symbol} | nuovo qty_decimal={qty_decimal} | qty_step={qty_step} | precision={precision} | qty_str_fallback={qty_str}")
@@ -384,14 +380,13 @@ def market_buy(symbol: str, usdt_amount: float):
                 continue
             else:
                 log(f"❌ Ordine MARKET fallito per {symbol}: {resp_json.get('retMsg')}")
-                notify_telegram(f"❌ Ordine MARKET fallito per {symbol}: {resp_json.get('retMsg')}\nBODY: {body_json}")
+                notify_telegram(f"❌ Ordine MARKET fallito per {symbol}: {resp_json.get('retMsg')}")
                 retry += 1
         except Exception as e:
             log(f"❌ Errore invio ordine MARKET BUY: {e}")
-            notify_telegram(f"❌ Errore invio ordine MARKET BUY: {e}")
             retry += 1
     log(f"❌ Tutti i tentativi MARKET BUY falliti per {symbol}")
-    notify_telegram(f"❌ Tutti i tentativi MARKET BUY falliti per {symbol}. Ultimo qty tentato: {qty_str}")
+    notify_telegram(f"❌ Tutti i tentativi MARKET BUY falliti per {symbol}")
     return None
 
 def market_sell(symbol: str, qty: float):
@@ -401,9 +396,8 @@ def market_sell(symbol: str, qty: float):
     min_order_amt = info.get("min_order_amt", 5)
     precision = info.get("precision", 4)
     price = get_last_price(symbol)
-    if not price or price <= 0 or price is None:
-        log(f"❌ [MARKET_SELL] Prezzo non disponibile o nullo per {symbol}, impossibile vendere")
-        notify_telegram(f"❌ [MARKET_SELL] Prezzo non disponibile o nullo per {symbol}, impossibile vendere")
+    if not price or price <= 0:
+        log(f"❌ Prezzo non disponibile o nullo per {symbol}, impossibile vendere")
         return None
     try:
         dec_qty = Decimal(str(qty))
@@ -411,29 +405,26 @@ def market_sell(symbol: str, qty: float):
         min_qty_dec = Decimal(str(min_qty))
         qty_str = format_quantity_bybit(float(dec_qty), float(qty_step), precision=precision)
         floored_qty = Decimal(qty_str)
-        if floored_qty < min_qty_dec or floored_qty <= 0:
-            log(f"❌ [MARKET_SELL] Quantità da vendere troppo piccola per {symbol}: {floored_qty} < min_qty {min_qty}")
-            notify_telegram(f"❌ [MARKET_SELL] Quantità da vendere troppo piccola per {symbol}: {floored_qty} < min_qty {min_qty}")
+        if floored_qty < min_qty_dec:
+            log(f"❌ Quantità da vendere troppo piccola per {symbol}: {floored_qty} < min_qty {min_qty}")
             return None
         order_value = floored_qty * Decimal(str(price))
         log(f"[DECIMALI][MARKET_SELL] {symbol} | qty_step={qty_step} | precision={precision} | qty_richiesta={qty} | floored_qty={floored_qty} | qty_str={qty_str} | order_value={order_value}")
         if order_value < Decimal(str(min_order_amt)):
-            log(f"❌ [MARKET_SELL] Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
-            notify_telegram(f"❌ [MARKET_SELL] Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
+            log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
             return None
         if (floored_qty / step) % 1 != 0:
-            log(f"❌ [MARKET_SELL] Quantità {floored_qty} non multiplo di qty_step {qty_step} per {symbol}")
-            notify_telegram(f"❌ [MARKET_SELL] Quantità {floored_qty} non multiplo di qty_step {qty_step} per {symbol}")
+            log(f"❌ Quantità {floored_qty} non multiplo di qty_step {qty_step} per {symbol}")
+            return None
+        if floored_qty <= 0:
+            log(f"❌ Quantità calcolata troppo piccola per {symbol}")
             return None
     except Exception as e:
-        log(f"❌ [MARKET_SELL] Errore calcolo quantità vendita {symbol}: {e}")
-        notify_telegram(f"❌ [MARKET_SELL] Errore calcolo quantità vendita {symbol}: {e}")
+        log(f"❌ Errore calcolo quantità vendita {symbol}: {e}")
         return None
     retry = 0
     max_retry = 2
     while retry <= max_retry:
-        # Logga tutti i parametri inviati
-        log(f"[MARKET_SELL][TRY {retry}] BODY: symbol={symbol}, qty={qty_str}, qty_step={qty_step}, precision={precision}")
         body = {
             "category": "spot",
             "symbol": symbol,
@@ -467,9 +458,8 @@ def market_sell(symbol: str, qty: float):
                 floored_qty = (floored_qty // step) * step
                 floored_qty = floored_qty.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
                 log(f"[DECIMALI][MARKET_SELL][FALLBACK] {symbol} | nuovo floored_qty={floored_qty} | qty_step={qty_step} | precision={precision}")
-                if floored_qty < min_qty_dec or floored_qty <= 0:
-                    log(f"❌ [MARKET_SELL] Quantità scesa sotto il minimo per {symbol} durante fallback SELL")
-                    notify_telegram(f"❌ [MARKET_SELL] Tutti i fallback falliti per {symbol}: qty troppo piccola. Ultimo tentativo: {floored_qty}")
+                if floored_qty < min_qty_dec:
+                    log(f"❌ Quantità scesa sotto il minimo per {symbol} durante fallback SELL")
                     break
                 qty_str = format_quantity_bybit(float(floored_qty), float(qty_step), precision=precision)
                 retry += 1
@@ -477,14 +467,13 @@ def market_sell(symbol: str, qty: float):
                 continue
             else:
                 log(f"❌ Ordine MARKET SELL fallito per {symbol}: {resp_json.get('retMsg')}")
-                notify_telegram(f"❌ Ordine MARKET SELL fallito per {symbol}: {resp_json.get('retMsg')}\nBODY: {body_json}")
+                notify_telegram(f"❌ Ordine MARKET SELL fallito per {symbol}: {resp_json.get('retMsg')}")
                 return response
         except Exception as e:
             log(f"❌ Errore invio ordine MARKET SELL: {e}")
-            notify_telegram(f"❌ Errore invio ordine MARKET SELL: {e}")
             retry += 1
     log(f"❌ Tutti i tentativi MARKET SELL falliti per {symbol}")
-    notify_telegram(f"❌ Tutti i tentativi MARKET SELL falliti per {symbol}. Ultimo qty tentato: {qty_str}")
+    notify_telegram(f"❌ Tutti i tentativi MARKET SELL falliti per {symbol}")
     return None
     retry = 0
     max_retry = 1
@@ -870,5 +859,45 @@ def sync_positions_from_wallet():
                     log(f"❌ Vendita fallita con {sl_type} per {symbol}")
             else:
                 log(f"❌ Quantità nulla o troppo piccola per vendita {sl_type} su {symbol}")
-    # Sicurezza: attesa tra i cicli principali
-    time.sleep(INTERVAL_MINUTES * 60)
+
+if __name__ == "__main__":
+    while True:
+        # --- SYNC POSIZIONI APERTE DA WALLET ALL'AVVIO (solo al primo ciclo) ---
+        if not open_positions:
+            for symbol in ASSETS:
+                if symbol == "USDT":
+                    continue
+                qty = get_free_qty(symbol)
+                if qty and qty > 0:
+                    price = get_last_price(symbol)
+                    if not price:
+                        continue
+                    open_positions.add(symbol)
+                    entry_price = price
+                    entry_cost = qty * price
+                    df = fetch_history(symbol)
+                    if df is not None and "Close" in df.columns:
+                        try:
+                            atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
+                            last = df.iloc[-1]
+                            atr_val = last["atr"] if "atr" in last else atr.iloc[-1]
+                        except Exception:
+                            atr_val = price * 0.02
+                    else:
+                        atr_val = price * 0.02
+                    tp = price + (atr_val * TP_FACTOR)
+                    sl = price - (atr_val * SL_FACTOR)
+                    position_data[symbol] = {
+                        "entry_price": entry_price,
+                        "tp": tp,
+                        "sl": sl,
+                        "entry_cost": entry_cost,
+                        "qty": qty,
+                        "entry_time": time.time(),
+                        "trailing_active": False,
+                        "p_max": entry_price
+                    }
+                    log(f"[SYNC WALLET] {symbol} | qty={qty} | entry={entry_price:.4f} | TP={tp:.4f} | SL={sl:.4f}")
+        # --- LOGICA DI TRADING (come già presente) ---
+        # ...existing code...
+        time.sleep(INTERVAL_MINUTES * 60)
