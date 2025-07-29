@@ -1,19 +1,14 @@
-def format_quantity_bybit(qty: float, qty_step: float) -> str:
+def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] = None) -> str:
     """
     Restituisce la quantità formattata secondo i decimali accettati da Bybit per qty_step e basePrecision, troncando senza arrotondare.
     Ora accetta anche precision come argomento esplicito.
     """
-    from typing import Optional
     def get_decimals(step):
         s = str(step)
         if '.' in s:
             return len(s.split('.')[-1].rstrip('0'))
         return 0
-    # Nuovo: precision come argomento opzionale
-    import inspect
-    frame = inspect.currentframe().f_back
-    precision = frame.f_locals.get('precision', None)
-    # Permetti override esplicito
+    # Usa precision se passato, altrimenti deduci da qty_step
     if hasattr(qty_step, '__precision_override__'):
         precision = qty_step.__precision_override__
     if precision is None:
