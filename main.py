@@ -171,7 +171,6 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     info = get_instrument_info(symbol)
     qty_step = info.get("qty_step", 0.0001)
     price_step = info.get("price_step", 0.0001)
-    # Calcola i decimali per qty_step e price_step (es: 0.0001 -> 4 decimali)
     def step_decimals(step):
         s = str(step)
         if '.' in s:
@@ -179,8 +178,6 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
         return 0
     qty_decimals = step_decimals(qty_step)
     price_decimals = step_decimals(price_step)
-    # Formatta quantità e prezzo con i decimali corretti
-    # Fallback: se errore decimali, riduci la quantità di uno step e riprova (max 10 tentativi)
     max_attempts = 10
     attempt = 0
     qty_str = calculate_quantity(symbol, usdt_amount)
@@ -194,12 +191,20 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     min_order_amt = Decimal(str(info.get("min_order_amt", 5)))
     while attempt < max_attempts:
         price_str = f"{limit_price:.{price_decimals}f}"
+        # Formatta la quantità con il numero esatto di decimali richiesto da qty_step
+        s = str(qty_step)
+        if '.' in s:
+            decimali = len(s.split('.')[-1].rstrip('0'))
+        else:
+            decimali = 0
+        fmt = f"{{0:.{decimali}f}}"
+        qty_str_fallback = fmt.format(qty_decimal)
         body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Limit",
-            "qty": str(qty_decimal.normalize()),
+            "qty": qty_str_fallback,
             "price": price_str,
             "timeInForce": "GTC"
         }
@@ -223,11 +228,10 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
             resp_json = {}
         log(f"RESPONSE: {response.status_code} {resp_json}")
         if response.status_code == 200 and resp_json.get("retCode") == 0:
-            log(f"🟢 Ordine LIMIT inviato per {symbol} qty={qty_decimal} price={price_str}")
-            notify_telegram(f"🟢 Ordine LIMIT inviato per {symbol} qty={qty_decimal} price={price_str}")
+            log(f"🟢 Ordine LIMIT inviato per {symbol} qty={qty_str_fallback} price={price_str}")
+            notify_telegram(f"🟢 Ordine LIMIT inviato per {symbol} qty={qty_str_fallback} price={price_str}")
             return resp_json
         elif resp_json.get("retMsg", "").lower().find("too many decimals") >= 0:
-            # Riduci la quantità di uno step e riprova
             qty_decimal -= qty_step
             qty_decimal = qty_decimal.quantize(qty_step, rounding=ROUND_DOWN)
             if qty_decimal < min_qty:
@@ -295,30 +299,14 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
             log(f"⚠️ Attenzione: valore effettivo investito ({investito_effettivo:.2f} USDT) molto inferiore a quello richiesto ({usdt_amount:.2f} USDT)")
         log(f"[DEBUG] {symbol} - price: {price}, qty_step: {qty_step}, min_qty: {min_qty}, min_order_amt: {min_order_amt}, richiesto: {usdt_amount}, calcolato: {floored_qty}, valore ordine: {order_value:.2f}")
 
-        # Logica adattiva: prova a formattare la quantità con decimali decrescenti fino a 0
+        # Formatta la quantità con il numero esatto di decimali richiesto da qty_step
         s = str(qty_step)
         if '.' in s:
-            max_decimals = len(s.split('.')[-1].rstrip('0'))
+            decimali = len(s.split('.')[-1].rstrip('0'))
         else:
-            max_decimals = 0
-        for d in range(max_decimals, -1, -1):
-            fmt = f"{{0:.{d}f}}"
-            qty_str = fmt.format(floored_qty)
-            # Rimuovi eventuali zeri finali e punto se intero
-            if '.' in qty_str:
-                qty_str = qty_str.rstrip('0').rstrip('.')
-            # Verifica che la stringa sia ancora multiplo esatto di qty_step
-            try:
-                if Decimal(qty_str) % step == 0:
-                    return qty_str
-            except Exception:
-                # Se la conversione fallisce, passa al prossimo d
-                continue
-        # Se nessuna stringa valida trovata, ritorna comunque quella con max_decimals
-        fmt = f"{{0:.{max_decimals}f}}"
+            decimali = 0
+        fmt = f"{{0:.{decimali}f}}"
         qty_str = fmt.format(floored_qty)
-        if '.' in qty_str:
-            qty_str = qty_str.rstrip('0').rstrip('.')
         return qty_str
     except Exception as e:
         log(f"❌ Errore calcolo quantità per {symbol}: {e}")
