@@ -196,9 +196,6 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
         # Formatta quantità con esattamente i decimali richiesti da qty_step (anche zeri finali)
         qty_fmt = f"{{0:.{qty_decimals}f}}"
         qty_str_fallback = qty_fmt.format(qty_decimal)
-        # Rimuovi eventuali zeri finali e punto se intero
-        if '.' in qty_str_fallback:
-            qty_str_fallback = qty_str_fallback.rstrip('0').rstrip('.')
         body = {
             "category": "spot",
             "symbol": symbol,
@@ -302,13 +299,11 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         # Formatta la quantità con il numero esatto di decimali richiesto da qty_step (anche zeri finali)
         s = str(qty_step)
         if '.' in s:
-            decimali = len(s.split('.')[-1].rstrip('0'))  # solo decimali effettivi
+            decimali = len(s.split('.')[-1])  # esattamente i decimali di qty_step
         else:
             decimali = 0
         fmt = f"{{0:.{decimali}f}}"
         qty_str = fmt.format(floored_qty)
-        if '.' in qty_str:
-            qty_str = qty_str.rstrip('0').rstrip('.')
         return qty_str
     except Exception as e:
         log(f"❌ Errore calcolo quantità per {symbol}: {e}")
@@ -447,13 +442,11 @@ def market_sell(symbol: str, qty: float):
         # Formatta la quantità con i decimali esatti richiesti da qty_step
         s = str(qty_step)
         if '.' in s:
-            decimali = len(s.split('.')[-1].rstrip('0'))
+            decimali = len(s.split('.')[-1])
         else:
             decimali = 0
         fmt = f"{{0:.{decimali}f}}"
         qty_str = fmt.format(floored_qty)
-        if '.' in qty_str:
-            qty_str = qty_str.rstrip('0').rstrip('.')
         order_value = floored_qty * Decimal(str(price))
         if order_value < min_order_amt:
             log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
