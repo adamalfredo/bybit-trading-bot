@@ -752,6 +752,10 @@ while True:
     perc_stable = (stable_invested / portfolio_value * 100) if portfolio_value > 0 else 0
     log(f"[PORTAFOGLIO] Totale: {portfolio_value:.2f} USDT | Volatili: {volatile_invested:.2f} ({perc_volatile:.1f}%) | Meno volatili: {stable_invested:.2f} ({perc_stable:.1f}%) | USDT: {usdt_balance:.2f}")
 
+
+    # --- Avviso saldo basso: invia solo una volta finché non torna sopra soglia ---
+    low_balance_alerted = False
+
     for symbol in ASSETS:
         signal, strategy, price = analyze_asset(symbol)
         log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
@@ -774,7 +778,6 @@ while True:
                 continue
 
             # --- LOGICA 70/30: verifica budget disponibile ---
-
             is_volatile = symbol in VOLATILE_ASSETS
             if is_volatile:
                 group_budget = volatile_budget
@@ -806,9 +809,23 @@ while True:
             order_amount = min(max_invest, group_available, usdt_balance, 250)
             log(f"[FORZA] {symbol} - Strategia: {strategy}, Strength: {strength}, Investo: {order_amount:.2f} USDT (Saldo: {usdt_balance:.2f})")
 
+            # BLOCCO: non tentare acquisto se order_amount < min_order_amt
+            min_order_amt = get_instrument_info(symbol).get("min_order_amt", 5)
+            if order_amount < min_order_amt:
+                log(f"❌ Saldo troppo basso per acquisto di {symbol}: {order_amount:.2f} < min_order_amt {min_order_amt}")
+                if not low_balance_alerted:
+                    notify_telegram(f"❗️ Saldo USDT troppo basso per nuovi acquisti. Ricarica il wallet per continuare a operare.")
+                    low_balance_alerted = True
+                continue
+            else:
+                low_balance_alerted = False
+
             # Logga la quantità calcolata PRIMA dell'acquisto
             qty_str = calculate_quantity(symbol, order_amount)
             log(f"[DEBUG-ENTRY] Quantità calcolata per {symbol} con {order_amount:.2f} USDT: {qty_str}")
+            if not qty_str:
+                log(f"❌ Quantità non valida per acquisto di {symbol}")
+                continue
 
             # ⚠️ INIBISCI GLI ACQUISTI DURANTE IL TEST
             if TEST_MODE:
