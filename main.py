@@ -24,16 +24,19 @@ BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
 ORDER_USDT = 50.0
 
+
 ASSETS = [
     "WIFUSDT", "PEPEUSDT", "BONKUSDT", "INJUSDT", "SUIUSDT",
     "SEIUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "TONUSDT", "DOGEUSDT", "MATICUSDT",
     "BTCUSDT", "ETHUSDT", "LTCUSDT", "XRPUSDT", "LINKUSDT", "AVAXUSDT", "SOLUSDT"
 ]
 
-VOLATILE_ASSETS = [
-    "BONKUSDT", "PEPEUSDT", "WIFUSDT", "INJUSDT", "SUIUSDT",
-    "SEIUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "TONUSDT", "DOGEUSDT", "MATICUSDT"
+# Coin meno volatili (gruppo 30%)
+LESS_VOLATILE_ASSETS = [
+    "BTCUSDT", "ETHUSDT", "LTCUSDT", "XRPUSDT", "LINKUSDT", "AVAXUSDT", "SOLUSDT"
 ]
+# Coin volatili (gruppo 70%)
+VOLATILE_ASSETS = [s for s in ASSETS if s not in LESS_VOLATILE_ASSETS]
 
 INTERVAL_MINUTES = 15
 ATR_WINDOW = 14
@@ -698,7 +701,7 @@ while True:
         coin_values.get(s, 0) for s in open_positions if s in VOLATILE_ASSETS
     )
     stable_invested = sum(
-        coin_values.get(s, 0) for s in open_positions if s not in VOLATILE_ASSETS
+        coin_values.get(s, 0) for s in open_positions if s in LESS_VOLATILE_ASSETS
     )
 
     for symbol in ASSETS:
@@ -723,6 +726,7 @@ while True:
                 continue
 
             # --- LOGICA 70/30: verifica budget disponibile ---
+
             is_volatile = symbol in VOLATILE_ASSETS
             if is_volatile:
                 group_budget = volatile_budget
@@ -731,7 +735,7 @@ while True:
             else:
                 group_budget = stable_budget
                 group_invested = stable_invested
-                group_label = "STABILE"
+                group_label = "MENO VOLATILE"
 
             group_available = group_budget - group_invested
             log(f"[BUDGET] {symbol} ({group_label}) - Budget gruppo: {group_budget:.2f}, Già investito: {group_invested:.2f}, Disponibile: {group_available:.2f}")
