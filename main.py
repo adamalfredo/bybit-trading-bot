@@ -1,25 +1,23 @@
 def format_quantity_bybit(qty: float, qty_step: float) -> str:
     """
     Restituisce la quantità formattata secondo i decimali accettati da Bybit per qty_step e basePrecision, troncando senza arrotondare.
+    Ora accetta anche precision come argomento esplicito.
     """
-    # Per retrocompatibilità, se non viene passata la precisione, deducila da qty_step
+    from typing import Optional
     def get_decimals(step):
         s = str(step)
         if '.' in s:
             return len(s.split('.')[-1].rstrip('0'))
         return 0
-    dec_step = get_decimals(qty_step)
-    # Se la precisione è passata come attributo, usala, altrimenti usa dec_step
-    precision = None
+    # Nuovo: precision come argomento opzionale
     import inspect
     frame = inspect.currentframe().f_back
-    if 'precision' in frame.f_locals:
-        precision = frame.f_locals['precision']
-    if precision is None:
-        precision = dec_step
+    precision = frame.f_locals.get('precision', None)
     # Permetti override esplicito
     if hasattr(qty_step, '__precision_override__'):
         precision = qty_step.__precision_override__
+    if precision is None:
+        precision = get_decimals(qty_step)
     # Troncamento multiplo di qty_step
     floored_qty = (Decimal(str(qty)) // Decimal(str(qty_step))) * Decimal(str(qty_step))
     # Troncamento ai decimali accettati
@@ -223,7 +221,7 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
         price_fmt = f"{{0:.{price_decimals}f}}"
         price_str = price_fmt.format(limit_price)
         # Usa la funzione helper per la quantità con precisione
-        qty_str_fallback = format_quantity_bybit(float(qty_decimal), float(qty_step)) if precision is None else format_quantity_bybit(float(qty_decimal), float(qty_step))
+        qty_str_fallback = format_quantity_bybit(float(qty_decimal), float(qty_step), precision=precision)
         log(f"[DECIMALI][LIMIT_BUY][TRY {attempt}] {symbol} | qty_step={qty_step} | precision={precision} | qty_decimal={qty_decimal} | qty_str_fallback={qty_str_fallback}")
         body = {
             "category": "spot",
