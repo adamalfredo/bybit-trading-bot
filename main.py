@@ -432,11 +432,6 @@ def market_sell(symbol: str, qty: float):
         log(f"❌ Prezzo non disponibile per {symbol}, impossibile vendere")
         return
 
-    order_value = qty * price
-    if order_value < 5:
-        log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
-        return
-
     # Recupera qty_step e precision con fallback robusto
     info = get_instrument_info(symbol)
     qty_step = info.get("qty_step", 0.0001)
@@ -448,21 +443,30 @@ def market_sell(symbol: str, qty: float):
     try:
         dec_qty = Decimal(str(qty))
         step = Decimal(str(qty_step))
-        # Arrotonda per difetto al multiplo di step, MAI supera il saldo
-        floored_qty = (dec_qty // step) * step
+        # Calcola la parte intera in step (es: 14.78979 -> 14.0)
+        int_part = (dec_qty // Decimal(1))
+        if int_part <= 0:
+            log(f"❌ Nessuna parte intera da vendere per {symbol} (qty={qty})")
+            return
+        # Arrotonda la parte intera al multiplo di step
+        sell_qty = (int_part // step) * step
+        # Se dopo l'arrotondamento è zero, esci
+        if sell_qty <= 0:
+            log(f"❌ Quantità intera troppo piccola per {symbol} (dopo arrotondamento step)")
+            return
         # Forza massimo 2 decimali (troncando, non arrotondando)
-        floored_qty = floored_qty.quantize(Decimal('0.01'), rounding=ROUND_DOWN)
-        # Rimuovi eventuali zeri e punto finale
-        qty_str = f"{floored_qty:.2f}".rstrip('0').rstrip('.')
+        sell_qty = sell_qty.quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+        qty_str = f"{sell_qty:.2f}".rstrip('0').rstrip('.')
         if qty_str == '':
             qty_str = '0'
 
-        if Decimal(qty_str) <= 0:
-            log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
+        order_value = float(qty_str) * price
+        if order_value < 5:
+            log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
             return
 
         # Log di debug
-        log(f"[DEBUG] market_sell {symbol}: qty={qty}, step={qty_step}, floored={floored_qty}, qty_str={qty_str}")
+        log(f"[DEBUG] market_sell {symbol}: qty={qty}, int_part={int_part}, step={qty_step}, sell_qty={sell_qty}, qty_str={qty_str}")
 
     except Exception as e:
         log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
@@ -728,10 +732,12 @@ while True:
 
             log(f"🟢 Ordine LIMIT piazzato per {symbol}. Attendi esecuzione.")
 
-            # Dopo l'esecuzione dell'ordine, aggiorna qty e actual_cost
+            # Dopo l'esecuzione dell'ordine, aggiorna qty e actual_cost SOLO se qty > 0
             time.sleep(2)
             qty = get_free_qty(symbol)
-            actual_cost = 0.0
+            if not qty or qty == 0:
+                log(f"❌ Nessuna quantità acquistata per {symbol} dopo LIMIT BUY. Non registro la posizione.")
+                continue
             last_price = get_last_price(symbol)
             if qty and last_price:
                 actual_cost = qty * last_price
