@@ -810,8 +810,11 @@ while True:
         if not current_price:
             continue
 
+        # Log dettagliato per capire sempre la situazione del trailing stop
+        soglia_attivazione = entry["entry_price"] * (1 + TRAILING_ACTIVATION_THRESHOLD)
+        log(f"[TRAILING CHECK] {symbol} | entry_price={entry['entry_price']:.4f} | current_price={current_price:.4f} | soglia={soglia_attivazione:.4f} | trailing_active={entry['trailing_active']}")
         # 🧪 Attiva Trailing se supera la soglia
-        if not entry["trailing_active"] and current_price >= entry["entry_price"] * (1 + TRAILING_ACTIVATION_THRESHOLD):
+        if not entry["trailing_active"] and current_price >= soglia_attivazione:
             entry["trailing_active"] = True
             log(f"🔛 Trailing Stop attivato per {symbol} sopra soglia → Prezzo: {current_price:.4f}")
             notify_telegram(f"🔛 Trailing Stop attivo su {symbol}\nPrezzo: {current_price:.4f}")
