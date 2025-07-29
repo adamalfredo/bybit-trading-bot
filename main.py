@@ -1,16 +1,31 @@
 def format_quantity_bybit(qty: float, qty_step: float) -> str:
     """
-    Restituisce la quantità formattata secondo i decimali accettati da Bybit per qty_step, troncando senza arrotondare.
+    Restituisce la quantità formattata secondo i decimali accettati da Bybit per qty_step e basePrecision, troncando senza arrotondare.
     """
-    s = str(qty_step)
-    if '.' in s:
-        decimali = len(s.split('.')[-1].rstrip('0'))
-    else:
-        decimali = 0
-    quantize_str = '1.' + '0'*decimali if decimali > 0 else '1'
+    # Per retrocompatibilità, se non viene passata la precisione, deducila da qty_step
+    def get_decimals(step):
+        s = str(step)
+        if '.' in s:
+            return len(s.split('.')[-1].rstrip('0'))
+        return 0
+    dec_step = get_decimals(qty_step)
+    # Se la precisione è passata come attributo, usala, altrimenti usa dec_step
+    precision = None
+    import inspect
+    frame = inspect.currentframe().f_back
+    if 'precision' in frame.f_locals:
+        precision = frame.f_locals['precision']
+    if precision is None:
+        precision = dec_step
+    # Permetti override esplicito
+    if hasattr(qty_step, '__precision_override__'):
+        precision = qty_step.__precision_override__
+    # Troncamento multiplo di qty_step
     floored_qty = (Decimal(str(qty)) // Decimal(str(qty_step))) * Decimal(str(qty_step))
+    # Troncamento ai decimali accettati
+    quantize_str = '1.' + '0'*precision if precision > 0 else '1'
     floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
-    fmt = f"{{0:.{decimali}f}}"
+    fmt = f"{{0:.{precision}f}}"
     return fmt.format(floored_qty)
 import os
 import time
@@ -185,12 +200,12 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     info = get_instrument_info(symbol)
     qty_step = info.get("qty_step", 0.0001)
     price_step = info.get("price_step", 0.0001)
+    precision = info.get("precision", 4)
     def step_decimals(step):
         s = str(step)
         if '.' in s:
             return len(s.split('.')[-1].rstrip('0'))
         return 0
-    qty_decimals = step_decimals(qty_step)
     price_decimals = step_decimals(price_step)
     max_attempts = 10
     attempt = 0
@@ -199,16 +214,17 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
         log(f"❌ Quantità non valida per acquisto di {symbol}")
         return None
     qty_decimal = Decimal(qty_str)
-    info = get_instrument_info(symbol)
-    qty_step = Decimal(str(info.get("qty_step", 0.0001)))
+    qty_step_dec = Decimal(str(qty_step))
     min_qty = Decimal(str(info.get("min_qty", 0.0)))
     min_order_amt = Decimal(str(info.get("min_order_amt", 5)))
+    log(f"[DECIMALI][LIMIT_BUY] {symbol} | qty_step={qty_step} | precision={precision} | qty_richiesta={qty_str} | qty_decimal={qty_decimal}")
     while attempt < max_attempts:
         # Formatta prezzo con esattamente i decimali richiesti da price_step
         price_fmt = f"{{0:.{price_decimals}f}}"
         price_str = price_fmt.format(limit_price)
-        # Usa la funzione helper per la quantità
-        qty_str_fallback = format_quantity_bybit(float(qty_decimal), float(qty_step))
+        # Usa la funzione helper per la quantità con precisione
+        qty_str_fallback = format_quantity_bybit(float(qty_decimal), float(qty_step)) if precision is None else format_quantity_bybit(float(qty_decimal), float(qty_step))
+        log(f"[DECIMALI][LIMIT_BUY][TRY {attempt}] {symbol} | qty_step={qty_step} | precision={precision} | qty_decimal={qty_decimal} | qty_str_fallback={qty_str_fallback}")
         body = {
             "category": "spot",
             "symbol": symbol,
@@ -238,12 +254,13 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
             resp_json = {}
         log(f"RESPONSE: {response.status_code} {resp_json}")
         if response.status_code == 200 and resp_json.get("retCode") == 0:
-            log(f"🟢 Ordine LIMIT inviato per {symbol} qty={qty_str_fallback} price={price_str}")
-            notify_telegram(f"🟢 Ordine LIMIT inviato per {symbol} qty={qty_str_fallback} price={price_str}")
+            log(f"🟢 Ordine LIMIT inviato per {symbol} qty={body['qty']} price={price_str}")
+            notify_telegram(f"🟢 Ordine LIMIT inviato per {symbol} qty={body['qty']} price={price_str}")
             return resp_json
         elif resp_json.get("retMsg", "").lower().find("too many decimals") >= 0:
-            qty_decimal -= qty_step
-            qty_decimal = qty_decimal.quantize(qty_step, rounding=ROUND_DOWN)
+            qty_decimal -= qty_step_dec
+            qty_decimal = qty_decimal.quantize(qty_step_dec, rounding=ROUND_DOWN)
+            log(f"[DECIMALI][LIMIT_BUY][FALLBACK] {symbol} | nuovo qty_decimal={qty_decimal} | qty_step={qty_step} | precision={precision}")
             if qty_decimal < min_qty:
                 log(f"❌ Quantità scesa sotto il minimo per {symbol} durante i tentativi fallback")
                 break
@@ -252,7 +269,7 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
                 log(f"❌ Valore ordine sceso sotto il minimo per {symbol} durante i tentativi fallback")
                 break
             attempt += 1
-            log(f"🔄 Tentativo fallback {attempt}: provo qty={format_quantity_bybit(float(qty_decimal), float(qty_step))}")
+            log(f"🔄 Tentativo fallback {attempt}: provo qty={format_quantity_bybit(float(qty_decimal), float(qty_step), precision=precision)}")
             continue
         else:
             log(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
@@ -326,17 +343,20 @@ def market_buy(symbol: str, usdt_amount: float):
             return None
 
         info = get_instrument_info(symbol)
+        qty_step = info.get("qty_step", 0.0001)
         min_qty = info.get("min_qty", 0.0)
         min_order_amt = info.get("min_order_amt", 5)
         precision = info.get("precision", 4)
-
+        log(f"[DECIMALI][MARKET_BUY] {symbol} | qty_step={qty_step} | precision={precision} | qty_richiesta={qty_str}")
+        qty_str_finale = format_quantity_bybit(float(qty_str), float(qty_step)) if precision is None else format_quantity_bybit(float(qty_str), float(qty_step))
+        log(f"[DECIMALI][MARKET_BUY][TRY {retry}] {symbol} | qty_step={qty_step} | precision={precision} | qty_str_finale={qty_str_finale}")
         # Invia ordine MARKET BUY
         body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "qty": qty_str
+            "qty": qty_str_finale
         }
         ts = str(int(time.time() * 1000))
         body_json = json.dumps(body, separators=(",", ":"))
@@ -356,18 +376,18 @@ def market_buy(symbol: str, usdt_amount: float):
             resp_json = response.json()
             log(f"RESPONSE: {response.status_code} {resp_json}")
             if response.status_code == 200 and resp_json.get("retCode") == 0:
-                log(f"🟢 Ordine MARKET inviato per {symbol} qty={qty_str}")
-                notify_telegram(f"🟢 Ordine MARKET inviato per {symbol} qty={qty_str}")
+                log(f"🟢 Ordine MARKET inviato per {symbol} qty={body['qty']}")
+                notify_telegram(f"🟢 Ordine MARKET inviato per {symbol} qty={body['qty']}")
                 return resp_json
             elif resp_json.get("retMsg", "").lower().find("too many decimals") >= 0:
                 # Fallback: riduci la quantità di uno step e riprova
-                info = get_instrument_info(symbol)
-                qty_step = info.get("qty_step", 0.0001)
-                qty_decimal = Decimal(qty_str) - Decimal(str(qty_step))
+                qty_step_dec = Decimal(str(qty_step))
+                qty_decimal = Decimal(qty_str) - qty_step_dec
                 if qty_decimal < Decimal(str(min_qty)):
                     log(f"❌ Quantità scesa sotto il minimo per {symbol} durante fallback BUY")
                     break
-                qty_str = format_quantity_bybit(float(qty_decimal), float(qty_step))
+                qty_str = format_quantity_bybit(float(qty_decimal), float(qty_step)) if precision is None else format_quantity_bybit(float(qty_decimal), float(qty_step))
+                log(f"[DECIMALI][MARKET_BUY][FALLBACK] {symbol} | nuovo qty_decimal={qty_decimal} | qty_step={qty_step} | precision={precision} | qty_str_fallback={qty_str}")
                 retry += 1
                 log(f"🔄 Tentativo fallback BUY {retry}: provo qty={qty_str}")
                 continue
@@ -390,6 +410,7 @@ def market_sell(symbol: str, qty: float):
     qty_step = info.get("qty_step", 0.0001)
     min_qty = info.get("min_qty", 0.0)
     min_order_amt = info.get("min_order_amt", 5)
+    precision = info.get("precision", 4)
     price = get_last_price(symbol)
     if not price:
         log(f"❌ Prezzo non disponibile per {symbol}, impossibile vendere")
@@ -401,12 +422,15 @@ def market_sell(symbol: str, qty: float):
         step = Decimal(str(qty_step))
         min_qty_dec = Decimal(str(min_qty))
         floored_qty = (dec_qty // step) * step
-        floored_qty = floored_qty.quantize(step, rounding=ROUND_DOWN)
+        # Troncamento ai decimali accettati
+        quantize_str = '1.' + '0'*precision if precision > 0 else '1'
+        floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
         if floored_qty < min_qty_dec:
             log(f"❌ Quantità da vendere troppo piccola per {symbol}: {floored_qty} < min_qty {min_qty}")
             return None
         qty_str = format_quantity_bybit(float(floored_qty), float(qty_step))
         order_value = floored_qty * Decimal(str(price))
+        log(f"[DECIMALI][MARKET_SELL] {symbol} | qty_step={qty_step} | precision={precision} | qty_richiesta={qty} | floored_qty={floored_qty} | qty_str={qty_str} | order_value={order_value}")
         if order_value < Decimal(str(min_order_amt)):
             log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
             return None
@@ -416,7 +440,6 @@ def market_sell(symbol: str, qty: float):
         if floored_qty <= 0:
             log(f"❌ Quantità calcolata troppo piccola per {symbol}")
             return None
-        log(f"[DEBUG] market_sell {symbol}: qty={qty}, floored_qty={floored_qty}, qty_step={qty_step}, qty_str={qty_str}, order_value={order_value}")
     except Exception as e:
         log(f"❌ Errore calcolo quantità vendita {symbol}: {e}")
         return None
@@ -456,6 +479,8 @@ def market_sell(symbol: str, qty: float):
             elif resp_json.get("retMsg", "").lower().find("too many decimals") >= 0:
                 # Fallback: riduci di uno step e riprova
                 floored_qty -= step
+                floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
+                log(f"[DECIMALI][MARKET_SELL][FALLBACK] {symbol} | nuovo floored_qty={floored_qty} | qty_step={qty_step} | precision={precision}")
                 if floored_qty < min_qty_dec:
                     log(f"❌ Quantità scesa sotto il minimo per {symbol} durante fallback SELL")
                     break
