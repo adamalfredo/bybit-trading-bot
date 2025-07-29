@@ -314,45 +314,13 @@ def market_buy(symbol: str, usdt_amount: float):
         min_order_amt = info.get("min_order_amt", 5)
         precision = info.get("precision", 4)
 
-        def _send_order(qty_str):
-            body = {
-                "category": "spot",
-                "symbol": symbol,
-                "side": "Buy",
-                "orderType": "Market",
-                "qty": qty_str
-            }
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}")
-        return None
-    limit_price = price * (1 + price_increase_pct)
-    info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.0001)
-    price_step = info.get("price_step", 0.0001)
-    # Calcola i decimali esatti richiesti da Bybit
-    while attempt < max_attempts:
-        # Formatta prezzo con esattamente i decimali richiesti da price_step
-        price_fmt = f"{{0:.{price_decimals}f}}"
-        price_str = price_fmt.format(limit_price)
-        # Formatta quantità con esattamente i decimali richiesti da qty_step (senza arrotondare)
-        s = str(qty_step)
-        if '.' in s:
-            decimali = len(s.split('.')[-1].rstrip('0'))
-        else:
-            decimali = 0
-        quantize_str = '1.' + '0'*decimali if decimali > 0 else '1'
-        qty_decimal = qty_decimal.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
-        qty_fmt = f"{{0:.{decimali}f}}"
-        qty_str_fallback = qty_fmt.format(qty_decimal)
+        # Invia ordine MARKET BUY
         body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Buy",
-            "orderType": "Limit",
-            "qty": qty_str_fallback,
-            "price": price_str,
-            "timeInForce": "GTC"
+            "orderType": "Market",
+            "qty": qty_str
         }
         ts = str(int(time.time() * 1000))
         body_json = json.dumps(body, separators=(",", ":"))
@@ -366,144 +334,25 @@ def market_buy(symbol: str, usdt_amount: float):
             "X-BAPI-SIGN-TYPE": "2",
             "Content-Type": "application/json"
         }
-        response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"LIMIT BUY BODY: {body_json}")
         try:
+            response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+            log(f"MARKET BUY BODY: {body_json}")
             resp_json = response.json()
-        except Exception:
-            resp_json = {}
-        log(f"RESPONSE: {response.status_code} {resp_json}")
-        if response.status_code == 200 and resp_json.get("retCode") == 0:
-            log(f"🟢 Ordine LIMIT inviato per {symbol} qty={qty_str_fallback} price={price_str}")
-            notify_telegram(f"🟢 Ordine LIMIT inviato per {symbol} qty={qty_str_fallback} price={price_str}")
-            return resp_json
-        elif resp_json.get("retMsg", "").lower().find("too many decimals") >= 0:
-            qty_decimal -= qty_step
-            # Tronca nuovamente la quantità dopo la sottrazione
-            qty_decimal = qty_decimal.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
-            if qty_decimal < min_qty:
-                log(f"❌ Quantità scesa sotto il minimo per {symbol} durante i tentativi fallback")
-                break
-            order_value = qty_decimal * Decimal(str(price))
-            if order_value < min_order_amt:
-                log(f"❌ Valore ordine sceso sotto il minimo per {symbol} durante i tentativi fallback")
-                break
-            attempt += 1
-            log(f"🔄 Tentativo fallback {attempt}: provo qty={qty_decimal}")
-            continue
-        else:
-            log(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
-            notify_telegram(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
-            return None
-    log(f"❌ Tutti i tentativi fallback falliti per {symbol}")
-    notify_telegram(f"❌ Tutti i tentativi fallback falliti per {symbol}")
+            log(f"RESPONSE: {response.status_code} {resp_json}")
+            if response.status_code == 200 and resp_json.get("retCode") == 0:
+                log(f"🟢 Ordine MARKET inviato per {symbol} qty={qty_str}")
+                notify_telegram(f"🟢 Ordine MARKET inviato per {symbol} qty={qty_str}")
+                return resp_json
+            else:
+                log(f"❌ Ordine MARKET fallito per {symbol}: {resp_json.get('retMsg')}")
+                notify_telegram(f"❌ Ordine MARKET fallito per {symbol}: {resp_json.get('retMsg')}")
+                retry += 1
+        except Exception as e:
+            log(f"❌ Errore invio ordine MARKET BUY: {e}")
+            retry += 1
+    log(f"❌ Tutti i tentativi MARKET BUY falliti per {symbol}")
+    notify_telegram(f"❌ Tutti i tentativi MARKET BUY falliti per {symbol}")
     return None
-        order_value = qty_decimal * Decimal(str(price))
-        if order_value < min_order_amt:
-            log(f"❌ Valore ordine sceso sotto il minimo per {symbol} durante il fallback")
-            return None
-        qty_str_fallback2 = qty_fmt.format(qty_decimal)
-        body["qty"] = qty_str_fallback2
-        body_json2 = json.dumps(body, separators=(",", ":"))
-        payload2 = f"{ts}{KEY}5000{body_json2}"
-        sign2 = hmac.new(SECRET.encode(), payload2.encode(), hashlib.sha256).hexdigest()
-        headers["X-BAPI-SIGN"] = sign2
-        response2 = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json2)
-        log(f"LIMIT BUY BODY (fallback): {body_json2}")
-        try:
-            resp_json2 = response2.json()
-        except Exception:
-            resp_json2 = {}
-        log(f"RESPONSE: {response2.status_code} {resp_json2}")
-        if response2.status_code == 200 and resp_json2.get("retCode") == 0:
-            log(f"🟢 Ordine LIMIT inviato per {symbol} qty={qty_str_fallback2} price={price_str}")
-            notify_telegram(f"🟢 Ordine LIMIT inviato per {symbol} qty={qty_str_fallback2} price={price_str}")
-            return resp_json2
-        else:
-            log(f"❌ Ordine LIMIT fallito per {symbol} anche dopo fallback: {resp_json2.get('retMsg')}")
-            notify_telegram(f"❌ Ordine LIMIT fallito per {symbol} anche dopo fallback: {resp_json2.get('retMsg')}")
-            return None
-    else:
-        log(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
-        notify_telegram(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
-        return None
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}, impossibile vendere")
-        return
-
-    # Recupera qty_step e precision con fallback robusto
-    info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.0001)
-    precision = info.get("precision", 4)
-    if not qty_step or qty_step <= 0:
-        qty_step = 0.0001
-        precision = 4
-
-    try:
-        dec_qty = Decimal(str(qty))
-        step = Decimal(str(qty_step))
-        min_qty = Decimal(str(info.get("min_qty", 0.0)))
-        min_order_amt = Decimal(str(info.get("min_order_amt", 5)))
-        # Arrotonda la quantità al multiplo più basso di qty_step
-        qty_int = int(dec_qty // step)
-        floored_qty = qty_int * step
-        if floored_qty < min_qty:
-            log(f"❌ Quantità da vendere troppo piccola per {symbol}: {floored_qty} < min_qty {min_qty}")
-            return
-        # Formatta la quantità con i decimali esatti richiesti da qty_step
-        s = str(qty_step)
-        if '.' in s:
-            decimali = len(s.split('.')[-1])
-        else:
-            decimali = 0
-        fmt = f"{{0:.{decimali}f}}"
-        qty_str = fmt.format(floored_qty)
-        order_value = floored_qty * Decimal(str(price))
-        if order_value < min_order_amt:
-            log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
-            return
-        # Verifica che la quantità sia multiplo esatto di qty_step
-        if (floored_qty / step) % 1 != 0:
-            log(f"❌ Quantità {floored_qty} non multiplo di qty_step {qty_step} per {symbol}")
-            return
-        if floored_qty <= 0:
-            log(f"❌ Quantità calcolata troppo piccola per {symbol}")
-            return
-        log(f"[DEBUG] market_sell {symbol}: qty={qty}, floored_qty={floored_qty}, qty_step={qty_step}, qty_str={qty_str}, order_value={order_value}")
-    except Exception as e:
-        log(f"❌ Errore calcolo quantità vendita {symbol}: {e}")
-        return
-
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Sell",
-        "orderType": "Market",
-        "qty": qty_str
-    }
-
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
-
-    try:
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"SELL BODY: {body_json}")
-        log(f"RESPONSE: {resp.status_code} {resp.json()}")
-        return resp
-    except Exception as e:
-        log(f"❌ Errore invio ordine SELL: {e}")
-        return None
 
 def fetch_history(symbol: str):
     endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
@@ -736,6 +585,7 @@ def get_portfolio_value():
                 total += value
     return total, usdt_balance, coin_values
 
+low_balance_alerted = False  # Deve essere fuori dal ciclo per persistere tra i cicli
 while True:
     portfolio_value, usdt_balance, coin_values = get_portfolio_value()
     volatile_budget = portfolio_value * 0.7
@@ -752,9 +602,8 @@ while True:
     perc_stable = (stable_invested / portfolio_value * 100) if portfolio_value > 0 else 0
     log(f"[PORTAFOGLIO] Totale: {portfolio_value:.2f} USDT | Volatili: {volatile_invested:.2f} ({perc_volatile:.1f}%) | Meno volatili: {stable_invested:.2f} ({perc_stable:.1f}%) | USDT: {usdt_balance:.2f}")
 
-
     # --- Avviso saldo basso: invia solo una volta finché non torna sopra soglia ---
-    low_balance_alerted = False
+    # low_balance_alerted ora è globale rispetto al ciclo
 
     for symbol in ASSETS:
         signal, strategy, price = analyze_asset(symbol)
