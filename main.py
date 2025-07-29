@@ -810,9 +810,13 @@ while True:
         if not current_price:
             continue
 
-        # Log dettagliato per capire sempre la situazione del trailing stop
-        soglia_attivazione = entry["entry_price"] * (1 + TRAILING_ACTIVATION_THRESHOLD)
-        log(f"[TRAILING CHECK] {symbol} | entry_price={entry['entry_price']:.4f} | current_price={current_price:.4f} | soglia={soglia_attivazione:.4f} | trailing_active={entry['trailing_active']}")
+        # Soglia trailing dinamica: 0.02 per asset volatili, 0.005 per asset stabili
+        if symbol in VOLATILE_ASSETS:
+            trailing_threshold = 0.02
+        else:
+            trailing_threshold = 0.005
+        soglia_attivazione = entry["entry_price"] * (1 + trailing_threshold)
+        log(f"[TRAILING CHECK] {symbol} | entry_price={entry['entry_price']:.4f} | current_price={current_price:.4f} | soglia={soglia_attivazione:.4f} | trailing_active={entry['trailing_active']} | threshold={trailing_threshold}")
         # 🧪 Attiva Trailing se supera la soglia
         if not entry["trailing_active"] and current_price >= soglia_attivazione:
             entry["trailing_active"] = True
