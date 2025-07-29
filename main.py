@@ -174,7 +174,7 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     def step_decimals(step):
         s = str(step)
         if '.' in s:
-            return len(s.split('.')[-1].rstrip('0'))
+            return len(s.split('.')[-1])  # usa tutti i decimali richiesti, anche zeri
         return 0
     qty_decimals = step_decimals(qty_step)
     price_decimals = step_decimals(price_step)
@@ -190,15 +190,12 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     min_qty = Decimal(str(info.get("min_qty", 0.0)))
     min_order_amt = Decimal(str(info.get("min_order_amt", 5)))
     while attempt < max_attempts:
-        price_str = f"{limit_price:.{price_decimals}f}"
-        # Formatta la quantità con il numero esatto di decimali richiesto da qty_step
-        s = str(qty_step)
-        if '.' in s:
-            decimali = len(s.split('.')[-1].rstrip('0'))
-        else:
-            decimali = 0
-        fmt = f"{{0:.{decimali}f}}"
-        qty_str_fallback = fmt.format(qty_decimal)
+        # Formatta prezzo con esattamente i decimali richiesti da price_step
+        price_fmt = f"{{0:.{price_decimals}f}}"
+        price_str = price_fmt.format(limit_price)
+        # Formatta quantità con esattamente i decimali richiesti da qty_step (anche zeri finali)
+        qty_fmt = f"{{0:.{qty_decimals}f}}"
+        qty_str_fallback = qty_fmt.format(qty_decimal)
         body = {
             "category": "spot",
             "symbol": symbol,
@@ -299,10 +296,10 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
             log(f"⚠️ Attenzione: valore effettivo investito ({investito_effettivo:.2f} USDT) molto inferiore a quello richiesto ({usdt_amount:.2f} USDT)")
         log(f"[DEBUG] {symbol} - price: {price}, qty_step: {qty_step}, min_qty: {min_qty}, min_order_amt: {min_order_amt}, richiesto: {usdt_amount}, calcolato: {floored_qty}, valore ordine: {order_value:.2f}")
 
-        # Formatta la quantità con il numero esatto di decimali richiesto da qty_step
+        # Formatta la quantità con il numero esatto di decimali richiesto da qty_step (anche zeri finali)
         s = str(qty_step)
         if '.' in s:
-            decimali = len(s.split('.')[-1].rstrip('0'))
+            decimali = len(s.split('.')[-1])  # usa tutti i decimali richiesti, anche zeri
         else:
             decimali = 0
         fmt = f"{{0:.{decimali}f}}"
@@ -434,33 +431,36 @@ def market_sell(symbol: str, qty: float):
     try:
         dec_qty = Decimal(str(qty))
         step = Decimal(str(qty_step))
-        # Calcola la parte intera in step (es: 14.78979 -> 14.0)
-        int_part = (dec_qty // Decimal(1))
-        if int_part <= 0:
-            log(f"❌ Nessuna parte intera da vendere per {symbol} (qty={qty})")
+        min_qty = Decimal(str(info.get("min_qty", 0.0)))
+        min_order_amt = Decimal(str(info.get("min_order_amt", 5)))
+        # Arrotonda la quantità al multiplo più basso di qty_step
+        qty_int = int(dec_qty // step)
+        floored_qty = qty_int * step
+        if floored_qty < min_qty:
+            log(f"❌ Quantità da vendere troppo piccola per {symbol}: {floored_qty} < min_qty {min_qty}")
             return
-        # Arrotonda la parte intera al multiplo di step
-        sell_qty = (int_part // step) * step
-        # Se dopo l'arrotondamento è zero, esci
-        if sell_qty <= 0:
-            log(f"❌ Quantità intera troppo piccola per {symbol} (dopo arrotondamento step)")
+        # Formatta la quantità con i decimali esatti richiesti da qty_step
+        s = str(qty_step)
+        if '.' in s:
+            decimali = len(s.split('.')[-1])
+        else:
+            decimali = 0
+        fmt = f"{{0:.{decimali}f}}"
+        qty_str = fmt.format(floored_qty)
+        order_value = floored_qty * Decimal(str(price))
+        if order_value < min_order_amt:
+            log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
             return
-        # Forza massimo 2 decimali (troncando, non arrotondando)
-        sell_qty = sell_qty.quantize(Decimal('0.01'), rounding=ROUND_DOWN)
-        qty_str = f"{sell_qty:.2f}".rstrip('0').rstrip('.')
-        if qty_str == '':
-            qty_str = '0'
-
-        order_value = float(qty_str) * price
-        if order_value < 5:
-            log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
+        # Verifica che la quantità sia multiplo esatto di qty_step
+        if (floored_qty / step) % 1 != 0:
+            log(f"❌ Quantità {floored_qty} non multiplo di qty_step {qty_step} per {symbol}")
             return
-
-        # Log di debug
-        log(f"[DEBUG] market_sell {symbol}: qty={qty}, int_part={int_part}, step={qty_step}, sell_qty={sell_qty}, qty_str={qty_str}")
-
+        if floored_qty <= 0:
+            log(f"❌ Quantità calcolata troppo piccola per {symbol}")
+            return
+        log(f"[DEBUG] market_sell {symbol}: qty={qty}, floored_qty={floored_qty}, qty_step={qty_step}, qty_str={qty_str}, order_value={order_value}")
     except Exception as e:
-        log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
+        log(f"❌ Errore calcolo quantità vendita {symbol}: {e}")
         return
 
     body = {
@@ -684,13 +684,17 @@ while True:
     portfolio_value, usdt_balance, coin_values = get_portfolio_value()
     volatile_budget = portfolio_value * 0.7
     stable_budget = portfolio_value * 0.3
-    # Calcola capitale già investito in ogni gruppo (valore attuale delle posizioni)
     volatile_invested = sum(
         coin_values.get(s, 0) for s in open_positions if s in VOLATILE_ASSETS
     )
     stable_invested = sum(
         coin_values.get(s, 0) for s in open_positions if s in LESS_VOLATILE_ASSETS
     )
+    # Log dettagliato bilanciamento
+    tot_invested = volatile_invested + stable_invested
+    perc_volatile = (volatile_invested / portfolio_value * 100) if portfolio_value > 0 else 0
+    perc_stable = (stable_invested / portfolio_value * 100) if portfolio_value > 0 else 0
+    log(f"[PORTAFOGLIO] Totale: {portfolio_value:.2f} USDT | Volatili: {volatile_invested:.2f} ({perc_volatile:.1f}%) | Meno volatili: {stable_invested:.2f} ({perc_stable:.1f}%) | USDT: {usdt_balance:.2f}")
 
     for symbol in ASSETS:
         signal, strategy, price = analyze_asset(symbol)
@@ -831,16 +835,14 @@ while True:
 
     time.sleep(1)
 
-    # 🔁 Controllo Trailing Stop per le posizioni aperte
+    # 🔁 Controllo Trailing Stop e Stop Loss statico per le posizioni aperte
     for symbol in list(open_positions):
         if symbol not in position_data:
             continue
-
         entry = position_data[symbol]
         current_price = get_last_price(symbol)
         if not current_price:
             continue
-
         # Soglia trailing dinamica: 0.02 per asset volatili, 0.005 per asset stabili
         if symbol in VOLATILE_ASSETS:
             trailing_threshold = 0.02
@@ -853,7 +855,6 @@ while True:
             entry["trailing_active"] = True
             log(f"🔛 Trailing Stop attivato per {symbol} sopra soglia → Prezzo: {current_price:.4f}")
             notify_telegram(f"🔛 Trailing Stop attivo su {symbol}\nPrezzo: {current_price:.4f}")
-
         # ⬆️ Aggiorna massimo e SL se prezzo cresce
         if entry["trailing_active"]:
             if current_price > entry["p_max"]:
@@ -862,32 +863,39 @@ while True:
                 if new_sl > entry["sl"]:
                     log(f"📉 SL aggiornato per {symbol}: da {entry['sl']:.4f} a {new_sl:.4f}")
                     entry["sl"] = new_sl
-
-            # ❌ Esegui vendita se SL raggiunto
-            if current_price <= entry["sl"]:
-                qty = get_free_qty(symbol)
-                if qty > 0:
-                    usdt_before = get_usdt_balance()
-                    resp = market_sell(symbol, qty)
-                    if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
-                        entry_price = entry["entry_price"]
-                        entry_cost = entry.get("entry_cost", ORDER_USDT)
-                        qty = entry.get("qty", qty)
-                        exit_value = current_price * qty
-                        delta = exit_value - entry_cost
-                        pnl = (delta / entry_cost) * 100
-
-                        log(f"🔻 Trailing Stop attivato per {symbol} → Prezzo: {current_price:.4f} | SL: {entry['sl']:.4f}")
-                        notify_telegram(f"🔻 Trailing Stop venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
-                        log_trade_to_google(symbol, entry_price, current_price, pnl, "Trailing Stop", "SL Triggered")
-
-                        # 🗑️ Pulizia
-                        open_positions.discard(symbol)
-                        last_exit_time[symbol] = time.time()
-                        position_data.pop(symbol, None)
-                    else:
-                        log(f"❌ Vendita fallita con Trailing Stop per {symbol}")
-
+        # --- CHIUSURA AUTOMATICA: Trailing Stop o Stop Loss statico ---
+        sl_triggered = False
+        sl_type = None
+        # Trailing SL
+        if entry["trailing_active"] and current_price <= entry["sl"]:
+            sl_triggered = True
+            sl_type = "Trailing Stop"
+        # Stop Loss statico
+        elif not entry["trailing_active"] and current_price <= entry["sl"]:
+            sl_triggered = True
+            sl_type = "Stop Loss"
+        if sl_triggered:
+            qty = get_free_qty(symbol)
+            if qty > 0:
+                usdt_before = get_usdt_balance()
+                resp = market_sell(symbol, qty)
+                if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+                    entry_price = entry["entry_price"]
+                    entry_cost = entry.get("entry_cost", ORDER_USDT)
+                    qty = entry.get("qty", qty)
+                    exit_value = current_price * qty
+                    delta = exit_value - entry_cost
+                    pnl = (delta / entry_cost) * 100
+                    log(f"🔻 {sl_type} attivato per {symbol} → Prezzo: {current_price:.4f} | SL: {entry['sl']:.4f}")
+                    notify_telegram(f"🔻 {sl_type} venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
+                    log_trade_to_google(symbol, entry_price, current_price, pnl, sl_type, "SL Triggered")
+                    # 🗑️ Pulizia
+                    open_positions.discard(symbol)
+                    last_exit_time[symbol] = time.time()
+                    position_data.pop(symbol, None)
+                else:
+                    log(f"❌ Vendita fallita con {sl_type} per {symbol}")
+            else:
+                log(f"❌ Quantità nulla o troppo piccola per vendita {sl_type} su {symbol}")
     # Sicurezza: attesa tra i cicli principali
-    # Aggiungi pausa di sicurezza per evitare ciclo troppo veloce se tutto salta
     time.sleep(INTERVAL_MINUTES * 60)
