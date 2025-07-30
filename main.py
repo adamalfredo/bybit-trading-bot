@@ -1,33 +1,4 @@
 from typing import Optional
-
-def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] = None) -> str:
-    """
-    Restituisce la quantità formattata secondo i decimali accettati da Bybit per qty_step e basePrecision,
-    troncando senza arrotondare e garantendo che sia un multiplo esatto di qty_step.
-    """
-    from decimal import Decimal, ROUND_DOWN
-    def get_decimals(step):
-        s = str(step)
-        if '.' in s:
-            return len(s.split('.')[-1].rstrip('0'))
-        return 0
-    if hasattr(qty_step, '__precision_override__'):
-        precision = qty_step.__precision_override__
-    if precision is None:
-        precision = get_decimals(qty_step)
-    step_dec = Decimal(str(qty_step))
-    qty_dec = Decimal(str(qty))
-    # Tronca la quantità al multiplo più basso di qty_step
-    floored_qty = (qty_dec // step_dec) * step_dec
-    # Troncamento ai decimali accettati
-    quantize_str = '1.' + '0'*precision if precision > 0 else '1'
-    floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
-    # Garantisce che sia multiplo esatto di qty_step
-    if (floored_qty / step_dec) % 1 != 0:
-        floored_qty = (floored_qty // step_dec) * step_dec
-        floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
-    fmt = f"{{0:.{precision}f}}"
-    return fmt.format(floored_qty)
 import os
 import time
 import hmac
@@ -82,6 +53,37 @@ cooldown = {}
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
+
+def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] = None) -> str:
+    """
+    Restituisce la quantità formattata secondo i decimali accettati da Bybit per qty_step e basePrecision,
+    troncando senza arrotondare e garantendo che sia un multiplo esatto di qty_step.
+    """
+    from decimal import Decimal, ROUND_DOWN
+    def get_decimals(step):
+        s = str(step)
+        if '.' in s:
+            return len(s.split('.')[-1].rstrip('0'))
+        return 0
+    if hasattr(qty_step, '__precision_override__'):
+        precision = qty_step.__precision_override__
+    if precision is None:
+        precision = get_decimals(qty_step)
+    step_dec = Decimal(str(qty_step))
+    qty_dec = Decimal(str(qty))
+    # Tronca la quantità al multiplo più basso di qty_step
+    floored_qty = (qty_dec // step_dec) * step_dec
+    # Troncamento ai decimali accettati
+    quantize_str = '1.' + '0'*precision if precision > 0 else '1'
+    floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
+    # Garantisce che sia multiplo esatto di qty_step
+    if (floored_qty / step_dec) % 1 != 0:
+        floored_qty = (floored_qty // step_dec) * step_dec
+        floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
+    fmt = f"{{0:.{precision}f}}"
+    # LOG DIAGNOSTICO
+    log(f"[DECIMALI][FORMAT_QTY] qty={qty} | qty_step={qty_step} | precision={precision} | floored_qty={floored_qty} | quantize_str={quantize_str}")
+    return fmt.format(floored_qty)
 
 # --- FUNZIONI DI SUPPORTO BYBIT E TELEGRAM ---
 def get_last_price(symbol):
@@ -211,6 +213,7 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     max_attempts = 10
     attempt = 0
     qty_str = calculate_quantity(symbol, usdt_amount)
+    log(f"[DECIMALI][LIMIT_BUY][PRE-CHECK] {symbol} | usdt_amount={usdt_amount} | qty_str={qty_str}")
     if not qty_str:
         log(f"❌ Quantità non valida per acquisto di {symbol}")
         return None
@@ -294,13 +297,16 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         return None
     try:
         raw_qty = Decimal(str(usdt_amount)) / Decimal(str(price))
+        log(f"[DECIMALI][CALC_QTY] {symbol} | usdt_amount={usdt_amount} | price={price} | raw_qty={raw_qty} | qty_step={qty_step} | precision={precision}")
         qty_str = format_quantity_bybit(float(raw_qty), float(qty_step), precision=precision)
         qty_dec = Decimal(qty_str)
         min_qty_dec = Decimal(str(min_qty))
         if qty_dec < min_qty_dec:
+            log(f"[DECIMALI][CALC_QTY] {symbol} | qty_dec < min_qty_dec: {qty_dec} < {min_qty_dec}")
             qty_dec = min_qty_dec
             qty_str = format_quantity_bybit(float(qty_dec), float(qty_step), precision=precision)
         order_value = qty_dec * Decimal(str(price))
+        log(f"[DECIMALI][CALC_QTY] {symbol} | qty_dec={qty_dec} | order_value={order_value}")
         if order_value < Decimal(str(min_order_amt)):
             log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
             return None
@@ -310,6 +316,7 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         investito_effettivo = float(qty_dec) * float(price)
         if investito_effettivo < 0.95 * usdt_amount:
             log(f"⚠️ Attenzione: valore effettivo investito ({investito_effettivo:.2f} USDT) molto inferiore a quello richiesto ({usdt_amount:.2f} USDT)")
+        log(f"[DECIMALI][CALC_QTY][RETURN] {symbol} | qty_str={qty_str}")
         return qty_str
     except Exception as e:
         log(f"❌ Errore calcolo quantità per {symbol}: {e}")
@@ -390,6 +397,7 @@ def market_sell(symbol: str, qty: float):
     min_order_amt = info.get("min_order_amt", 5)
     precision = info.get("precision", 4)
     price = get_last_price(symbol)
+    log(f"[DECIMALI][MARKET_SELL][PRE-CHECK] {symbol} | qty={qty} | qty_step={qty_step} | precision={precision}")
     if not price or price <= 0:
         log(f"❌ Prezzo non disponibile o nullo per {symbol}, impossibile vendere")
         return None
@@ -399,6 +407,7 @@ def market_sell(symbol: str, qty: float):
         min_qty_dec = Decimal(str(min_qty))
         qty_str = format_quantity_bybit(float(dec_qty), float(qty_step), precision=precision)
         floored_qty = Decimal(qty_str)
+        log(f"[DECIMALI][MARKET_SELL][POST-FORMAT] {symbol} | dec_qty={dec_qty} | floored_qty={floored_qty} | qty_str={qty_str}")
         if floored_qty < min_qty_dec:
             log(f"❌ Quantità da vendere troppo piccola per {symbol}: {floored_qty} < min_qty {min_qty}")
             return None
