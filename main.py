@@ -398,6 +398,12 @@ def market_sell(symbol: str, qty: float):
     max_retry = 2
     qty_step_dec = Decimal(str(qty_step))
     qty_decimal = Decimal(str(qty))
+    # LASCIA SEMPRE POLVERE: riduci qty di almeno 2*qty_step
+    if qty_decimal > 2 * qty_step_dec:
+        qty_decimal = qty_decimal - 2 * qty_step_dec
+        log(f"[DUST][MARKET_SELL] {symbol} | qty originale={qty} | qty con polvere={qty_decimal} | qty_step={qty_step}")
+    else:
+        log(f"[DUST][MARKET_SELL] {symbol} | qty troppo piccola per lasciare polvere, provo a vendere tutto: {qty_decimal}")
     while retry <= max_retry:
         qty_str_finale = format_quantity_bybit(float(qty_decimal), float(qty_step), precision=precision)
         body = {
