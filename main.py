@@ -229,7 +229,6 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
         price_str = price_fmt.format(limit_price)
         qty_str_fallback = format_quantity_bybit(float(qty_decimal), float(qty_step), precision=precision)
         log(f"[DECIMALI][LIMIT_BUY][TRY {attempt}] {symbol} | qty_step={qty_step} | precision={precision} | qty_decimal={qty_decimal} | qty_str_fallback={qty_str_fallback}")
-        log(f"[ULTRA-LOG][LIMIT_BUY][TRY {attempt}] {symbol} | BODY INVIATO: {json.dumps(body)}")
         body = {
             "category": "spot",
             "symbol": symbol,
@@ -239,6 +238,7 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
             "price": price_str,
             "timeInForce": "GTC"
         }
+        log(f"[ULTRA-LOG][LIMIT_BUY][TRY {attempt}] {symbol} | BODY INVIATO: {json.dumps(body)}")
         ts = str(int(time.time() * 1000))
         body_json = json.dumps(body, separators=(",", ":"))
         payload = f"{ts}{KEY}5000{body_json}"
