@@ -213,27 +213,38 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     retry = 0
     max_retry = 2
     qty_str = calculate_quantity(symbol, usdt_amount)
-    while retry <= max_retry:
-        log(f"[DECIMALI][LIMIT_BUY][PRE-CHECK][TRY {retry}] {symbol} | usdt_amount={usdt_amount} | qty_str={qty_str}")
-        if not qty_str:
-            log(f"❌ Quantità non valida per acquisto di {symbol} | usdt_amount={usdt_amount} | price={price} | min_order_amt={info.get('min_order_amt', 5)} | qty_str={qty_str}")
-            return None
+    qty_step_dec = Decimal(str(qty_step))
+    min_qty = Decimal(str(info.get("min_qty", 0.0)))
+    min_order_amt = Decimal(str(info.get("min_order_amt", 5)))
+    precision_str = '1.' + '0'*precision
+    # Primo tentativo: applica la polvere
+    if qty_str:
         qty_decimal = Decimal(qty_str)
-        qty_step_dec = Decimal(str(qty_step))
-        min_qty = Decimal(str(info.get("min_qty", 0.0)))
-        min_order_amt = Decimal(str(info.get("min_order_amt", 5)))
-        # --- POLVERE: lascia sempre almeno 2*qty_step anche in acquisto ---
         polvere = qty_step_dec * 2
         qty_teorica = qty_decimal
         acquistabile = qty_teorica - polvere
         if acquistabile < min_qty:
             acquistabile = min_qty
-        # Arrotonda per difetto al multiplo di step
         acquistabile = (acquistabile // qty_step_dec) * qty_step_dec
-        acquistabile = acquistabile.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
+        acquistabile = acquistabile.quantize(Decimal(precision_str), rounding=ROUND_DOWN)
         qty_str_fallback = format_quantity_bybit(float(acquistabile), float(qty_step), precision=precision)
         polvere_effettiva = qty_teorica - Decimal(qty_str_fallback)
-        log(f"[DECIMALI][LIMIT_BUY][POLVERE][TRY {retry}] {symbol} | qty_teorica={qty_teorica} | acquistabile={acquistabile} | qty_str_fallback={qty_str_fallback} | polvere_lasciata={polvere_effettiva}")
+        log(f"[DECIMALI][LIMIT_BUY][POLVERE][TRY 0] {symbol} | qty_teorica={qty_teorica} | acquistabile={acquistabile} | qty_str_fallback={qty_str_fallback} | polvere_lasciata={polvere_effettiva}")
+        qty_decimal = Decimal(qty_str_fallback)
+    else:
+        log(f"❌ Quantità non valida per acquisto di {symbol} | usdt_amount={usdt_amount} | price={price} | min_order_amt={min_order_amt} | qty_str={qty_str}")
+        return None
+    while retry <= max_retry:
+        # Dal secondo tentativo in poi, riduci solo di uno step
+        if retry > 0:
+            qty_decimal = qty_decimal - qty_step_dec
+            qty_decimal = (qty_decimal // qty_step_dec) * qty_step_dec
+            qty_decimal = qty_decimal.quantize(Decimal(precision_str), rounding=ROUND_DOWN)
+            if qty_decimal < min_qty:
+                log(f"❌ Quantità scesa sotto il minimo per {symbol} durante fallback LIMIT_BUY")
+                break
+            qty_str_fallback = format_quantity_bybit(float(qty_decimal), float(qty_step), precision=precision)
+            log(f"[DECIMALI][LIMIT_BUY][FALLBACK][TRY {retry}] {symbol} | nuovo qty_decimal={qty_decimal} | qty_step={qty_step} | precision={precision} | qty_str_fallback={qty_str_fallback}")
         # LOG ULTRA DETTAGLIATO
         log(f"[ULTRA-LOG][LIMIT_BUY][TRY {retry}] {symbol} | usdt_amount={usdt_amount} | price={price} | qty_step={qty_step} | precision={precision} | min_qty={min_qty} | min_order_amt={min_order_amt} | qty_str={qty_str} | qty_decimal={qty_decimal}")
         log(f"[ULTRA-LOG][LIMIT_BUY][TRY {retry}] {symbol} | Corpo calcolato: qty={qty_str} (teorico), qty_decimal={qty_decimal}, qty_step={qty_step}, precision={precision}, min_qty={min_qty}, min_order_amt={min_order_amt}")
@@ -277,17 +288,8 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
             notify_telegram(f"🟢 Ordine LIMIT inviato per {symbol} qty={body['qty']} price={price_str}")
             return resp_json
         elif resp_json.get("retMsg", "").lower().find("too many decimals") >= 0:
-            # Fallback: riduci la quantità di uno step e ritenta
-            qty_decimal = Decimal(qty_str_fallback) - qty_step_dec
-            qty_decimal = (qty_decimal // qty_step_dec) * qty_step_dec
-            qty_decimal = qty_decimal.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
-            if qty_decimal < min_qty:
-                log(f"❌ Quantità scesa sotto il minimo per {symbol} durante fallback LIMIT_BUY")
-                break
-            qty_str = format_quantity_bybit(float(qty_decimal), float(qty_step), precision=precision)
-            log(f"[DECIMALI][LIMIT_BUY][FALLBACK][TRY {retry}] {symbol} | nuovo qty_decimal={qty_decimal} | qty_step={qty_step} | precision={precision} | qty_str_fallback={qty_str}")
             retry += 1
-            log(f"🔄 Tentativo fallback LIMIT_BUY {retry}: provo qty={qty_str}")
+            log(f"🔄 Tentativo fallback LIMIT_BUY {retry}: provo qty={qty_decimal}")
             continue
         else:
             log(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')} | usdt_amount={usdt_amount} | price={price} | qty_str={qty_str} | qty_decimal={qty_decimal} | min_order_amt={min_order_amt} | min_qty={min_qty}")
