@@ -405,6 +405,16 @@ def market_sell(symbol: str, qty: float):
         dec_qty = Decimal(str(qty))
         step = Decimal(str(qty_step))
         min_qty_dec = Decimal(str(min_qty))
+        # --- POLVERE: non vendere mai tutto il saldo, lascia sempre almeno 2*qty_step ---
+        # Se la quantità richiesta è troppo vicina a uno step intero, la riduco
+        polvere = step * 2
+        saldo_preciso = dec_qty
+        if (saldo_preciso % step) == 0 or (saldo_preciso - (saldo_preciso // step) * step) < (step * 0.5):
+            # Se la quantità è multiplo esatto o quasi, lascio polvere
+            dec_qty = saldo_preciso - polvere
+            if dec_qty < min_qty_dec:
+                dec_qty = min_qty_dec
+            log(f"[DECIMALI][MARKET_SELL][POLVERE] {symbol} | saldo_preciso={saldo_preciso} | nuova_qty={dec_qty} | polvere={polvere}")
         qty_str = format_quantity_bybit(float(dec_qty), float(qty_step), precision=precision)
         floored_qty = Decimal(qty_str)
         log(f"[DECIMALI][MARKET_SELL][POST-FORMAT] {symbol} | dec_qty={dec_qty} | floored_qty={floored_qty} | qty_str={qty_str}")
