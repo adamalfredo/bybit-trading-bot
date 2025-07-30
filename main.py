@@ -593,6 +593,7 @@ TEST_MODE = False  # Acquisti e vendite normali abilitati
 
 
 
+MIN_HOLDING_MINUTES = 1  # Tempo minimo in minuti da attendere dopo l'acquisto prima di poter attivare uno stop loss
 # --- SYNC POSIZIONI APERTE DA WALLET ALL'AVVIO ---
 open_positions = set()
 position_data = {}
@@ -901,7 +902,19 @@ while True:
     for symbol in list(open_positions):
         if symbol not in position_data:
             continue
+        # CONTROLLO SICUREZZA: se il saldo effettivo è zero, rimuovi la posizione
+        saldo = get_free_qty(symbol)
+        if saldo is None or saldo < 1e-6:
+            log(f"[CLEANUP] {symbol}: saldo zero, rimuovo da open_positions e position_data")
+            open_positions.discard(symbol)
+            position_data.pop(symbol, None)
+            continue
         entry = position_data[symbol]
+        # Calcola da quanto tempo la posizione è aperta
+        holding_seconds = time.time() - entry.get("entry_time", 0)
+        if holding_seconds < MIN_HOLDING_MINUTES * 60:
+            log(f"[HOLDING] {symbol}: attendo ancora {MIN_HOLDING_MINUTES - holding_seconds/60:.1f} min prima di attivare SL/TSL")
+            continue
         current_price = get_last_price(symbol)
         if not current_price:
             continue
