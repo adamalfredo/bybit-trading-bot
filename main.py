@@ -197,7 +197,7 @@ def notify_telegram(msg):
 def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     price = get_last_price(symbol)
     if not price or price <= 0:
-        log(f"❌ Prezzo non disponibile o nullo per {symbol}")
+        log(f"❌ Prezzo non disponibile o nullo per {symbol} | usdt_amount={usdt_amount}")
         return None
     limit_price = price * (1 + price_increase_pct)
     info = get_instrument_info(symbol)
@@ -215,7 +215,7 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     qty_str = calculate_quantity(symbol, usdt_amount)
     log(f"[DECIMALI][LIMIT_BUY][PRE-CHECK] {symbol} | usdt_amount={usdt_amount} | qty_str={qty_str}")
     if not qty_str:
-        log(f"❌ Quantità non valida per acquisto di {symbol}")
+        log(f"❌ Quantità non valida per acquisto di {symbol} | usdt_amount={usdt_amount} | price={price} | min_order_amt={min_order_amt} | qty_str={qty_str}")
         return None
     qty_decimal = Decimal(qty_str)
     qty_step_dec = Decimal(str(qty_step))
@@ -263,22 +263,26 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
             qty_decimal -= qty_step_dec
             qty_decimal = (qty_decimal // qty_step_dec) * qty_step_dec
             qty_decimal = qty_decimal.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
-            log(f"[DECIMALI][LIMIT_BUY][FALLBACK] {symbol} | nuovo qty_decimal={qty_decimal} | qty_step={qty_step} | precision={precision}")
+            log(f"[DECIMALI][LIMIT_BUY][FALLBACK] {symbol} | nuovo qty_decimal={qty_decimal} | qty_step={qty_step} | precision={precision} | usdt_amount={usdt_amount} | price={price} | min_order_amt={min_order_amt}")
             if qty_decimal < min_qty:
-                log(f"❌ Quantità scesa sotto il minimo per {symbol} durante i tentativi fallback")
+                log(f"❌ Quantità scesa sotto il minimo per {symbol} durante i tentativi fallback | qty_decimal={qty_decimal} < min_qty={min_qty}")
                 break
             order_value = qty_decimal * Decimal(str(price))
             if order_value < min_order_amt:
-                log(f"❌ Valore ordine sceso sotto il minimo per {symbol} durante i tentativi fallback")
+                log(f"❌ Valore ordine sceso sotto il minimo per {symbol} durante i tentativi fallback | order_value={order_value} < min_order_amt={min_order_amt}")
                 break
             attempt += 1
             log(f"🔄 Tentativo fallback {attempt}: provo qty={format_quantity_bybit(float(qty_decimal), float(qty_step), precision=precision)}")
             continue
         else:
-            log(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
+            log(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')} | usdt_amount={usdt_amount} | price={price} | qty_str={qty_str} | qty_decimal={qty_decimal} | min_order_amt={min_order_amt} | min_qty={min_qty}")
+            if resp_json.get('retMsg', '').lower().find('insufficient balance') >= 0:
+                log(f"[DEBUG][LIMIT_BUY][INSUFFICIENT_BALANCE] {symbol} | usdt_balance={get_usdt_balance()} | usdt_amount={usdt_amount} | qty_str={qty_str} | qty_decimal={qty_decimal}")
+            if resp_json.get('retMsg', '').lower().find('data sent for paramter') >= 0:
+                log(f"[DEBUG][LIMIT_BUY][PARAM_ERROR] {symbol} | body={body_json} | usdt_amount={usdt_amount} | price={price} | qty_str={qty_str} | qty_decimal={qty_decimal}")
             notify_telegram(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
             return None
-    log(f"❌ Tutti i tentativi fallback falliti per {symbol}")
+    log(f"❌ Tutti i tentativi fallback falliti per {symbol} | usdt_amount={usdt_amount} | price={price} | qty_str={qty_str} | qty_decimal={qty_decimal} | min_order_amt={min_order_amt} | min_qty={min_qty}")
     notify_telegram(f"❌ Tutti i tentativi fallback falliti per {symbol}")
     return None
 
@@ -421,7 +425,9 @@ def market_sell(symbol: str, qty: float):
         if floored_qty < min_qty_dec:
             log(f"❌ Quantità da vendere troppo piccola per {symbol}: {floored_qty} < min_qty {min_qty}")
             return None
-        order_value = floored_qty * Decimal(str(price))
+        # Assicura che price sia Decimal per evitare errori di tipo
+        price_dec = Decimal(str(price))
+        order_value = floored_qty * price_dec
         log(f"[DECIMALI][MARKET_SELL] {symbol} | qty_step={qty_step} | precision={precision} | qty_richiesta={qty} | floored_qty={floored_qty} | qty_str={qty_str} | order_value={order_value}")
         if order_value < Decimal(str(min_order_amt)):
             log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
