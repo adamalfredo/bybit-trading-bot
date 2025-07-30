@@ -210,8 +210,6 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
             return len(s.split('.')[-1].rstrip('0'))
         return 0
     price_decimals = step_decimals(price_step)
-    max_attempts = 10
-    attempt = 0
     qty_str = calculate_quantity(symbol, usdt_amount)
     log(f"[DECIMALI][LIMIT_BUY][PRE-CHECK] {symbol} | usdt_amount={usdt_amount} | qty_str={qty_str}")
     if not qty_str:
