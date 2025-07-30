@@ -317,27 +317,27 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         return None
 
 def market_buy(symbol: str, usdt_amount: float):
-    retry = 0
-    max_retry = 2
-    while retry <= max_retry:
-        qty_str = calculate_quantity(symbol, usdt_amount)
-        if not qty_str:
-            log(f"❌ Quantità non valida per acquisto di {symbol}")
-            return None
-        info = get_instrument_info(symbol)
-        qty_step = info.get("qty_step", 0.0001)
-        min_qty = info.get("min_qty", 0.0)
-        min_order_amt = info.get("min_order_amt", 5)
-        precision = info.get("precision", 4)
-        log(f"[DECIMALI][MARKET_BUY] {symbol} | qty_step={qty_step} | precision={precision} | qty_richiesta={qty_str}")
-        qty_str_finale = format_quantity_bybit(float(qty_str), float(qty_step), precision=precision)
-        log(f"[DECIMALI][MARKET_BUY][TRY {retry}] {symbol} | qty_step={qty_step} | precision={precision} | qty_str_finale={qty_str_finale}")
+    # Solo per coin a basso prezzo (< 100 USDT): logica fallback con riacquisto differenza
+    price = get_last_price(symbol)
+    if not price:
+        log(f"❌ Prezzo non disponibile per {symbol}")
+        return None
+    qty_str = calculate_quantity(symbol, usdt_amount)
+    if not qty_str:
+        log(f"❌ Quantità non valida per acquisto di {symbol}")
+        return None
+    info = get_instrument_info(symbol)
+    min_qty = info.get("min_qty", 0.0)
+    min_order_amt = info.get("min_order_amt", 5)
+    precision = info.get("precision", 4)
+
+    def _send_order(qty_str):
         body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Buy",
             "orderType": "Market",
-            "qty": qty_str_finale
+            "qty": qty_str
         }
         ts = str(int(time.time() * 1000))
         body_json = json.dumps(body, separators=(",", ":"))
@@ -351,38 +351,68 @@ def market_buy(symbol: str, usdt_amount: float):
             "X-BAPI-SIGN-TYPE": "2",
             "Content-Type": "application/json"
         }
+        response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+        log(f"BUY BODY: {body_json}")
         try:
-            response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-            log(f"MARKET BUY BODY: {body_json}")
             resp_json = response.json()
-            log(f"RESPONSE: {response.status_code} {resp_json}")
-            if response.status_code == 200 and resp_json.get("retCode") == 0:
-                log(f"🟢 Ordine MARKET inviato per {symbol} qty={body['qty']}")
-                notify_telegram(f"🟢 Ordine MARKET inviato per {symbol} qty={body['qty']}")
-                return resp_json
-            elif resp_json.get("retMsg", "").lower().find("too many decimals") >= 0:
-                qty_step_dec = Decimal(str(qty_step))
-                qty_decimal = Decimal(qty_str) - qty_step_dec
-                qty_decimal = (qty_decimal // qty_step_dec) * qty_step_dec
-                qty_decimal = qty_decimal.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
-                if qty_decimal < Decimal(str(min_qty)):
-                    log(f"❌ Quantità scesa sotto il minimo per {symbol} durante fallback BUY")
-                    break
-                qty_str = format_quantity_bybit(float(qty_decimal), float(qty_step), precision=precision)
-                log(f"[DECIMALI][MARKET_BUY][FALLBACK] {symbol} | nuovo qty_decimal={qty_decimal} | qty_step={qty_step} | precision={precision} | qty_str_fallback={qty_str}")
-                retry += 1
-                log(f"🔄 Tentativo fallback BUY {retry}: provo qty={qty_str}")
-                continue
+        except Exception:
+            resp_json = {}
+        log(f"RESPONSE: {response.status_code} {resp_json}")
+        # Logga dettagli filled/cumExecQty/orderStatus se presenti
+        if 'result' in resp_json:
+            result = resp_json['result']
+            filled = result.get('cumExecQty') or result.get('execQty') or result.get('qty')
+            order_status = result.get('orderStatus')
+            log(f"[BYBIT ORDER RESULT] filled: {filled}, orderStatus: {order_status}, result: {result}")
+        return response
+
+    try:
+        response = _send_order(qty_str)
+        if response.status_code == 200 and response.json().get("retCode") == 0:
+            time.sleep(2)
+            qty_after = get_free_qty(symbol)
+            if not qty_after or qty_after == 0:
+                time.sleep(3)
+                qty_after = get_free_qty(symbol)
+
+            # Calcola la quantità richiesta in float
+            try:
+                qty_requested = float(qty_str)
+            except Exception:
+                qty_requested = None
+
+            # Se la quantità effettiva è molto inferiore a quella richiesta, logga e notifica
+            if qty_requested and qty_after < 0.8 * qty_requested:
+                log(f"⚠️ Quantità acquistata ({qty_after}) molto inferiore a quella richiesta ({qty_requested}) per {symbol}")
+                notify_telegram(f"⚠️ Ordine parzialmente eseguito per {symbol}: richiesto {qty_requested}, ottenuto {qty_after}")
+                # Tenta un solo riacquisto della differenza se supera i minimi
+                diff = qty_requested - qty_after
+                price2 = get_last_price(symbol)
+                if diff > min_qty and price2 and (diff * price2) > min_order_amt:
+                    diff_str = f"{diff:.{precision}f}".rstrip('0').rstrip('.')
+                    log(f"🔁 TENTO RIACQUISTO della differenza: {diff_str} {symbol}")
+                    response2 = _send_order(diff_str)
+                    if response2.status_code == 200 and response2.json().get("retCode") == 0:
+                        time.sleep(2)
+                        qty_final = get_free_qty(symbol)
+                        log(f"🟢 Acquisto finale per {symbol}: {qty_final}")
+                        return qty_final
+                    else:
+                        log(f"❌ Riacquisto fallito per {symbol}")
+                        return qty_after
+                else:
+                    log(f"❌ Differenza troppo piccola per riacquisto su {symbol}")
+                    return qty_after
+            if qty_after and qty_after > 0:
+                log(f"🟢 Acquisto registrato per {symbol}")
+                return qty_after
             else:
-                log(f"❌ Ordine MARKET fallito per {symbol}: {resp_json.get('retMsg')}")
-                notify_telegram(f"❌ Ordine MARKET fallito per {symbol}: {resp_json.get('retMsg')}")
-                retry += 1
-        except Exception as e:
-            log(f"❌ Errore invio ordine MARKET BUY: {e}")
-            retry += 1
-    log(f"❌ Tutti i tentativi MARKET BUY falliti per {symbol}")
-    notify_telegram(f"❌ Tutti i tentativi MARKET BUY falliti per {symbol}")
-    return None
+                log(f"⚠️ Acquisto riuscito ma saldo non aggiornato per {symbol}")
+        return None
+
+    except Exception as e:
+        log(f"❌ Errore invio ordine market per {symbol}: {e}")
+        return None
 
 def market_sell(symbol: str, qty: float):
     price = get_last_price(symbol)
@@ -784,25 +814,32 @@ while True:
                 log(f"[TEST_MODE] Acquisti inibiti per {symbol}")
                 continue
 
-            # Esegui l'acquisto effettivo con ordine LIMIT
-            resp = limit_buy(symbol, order_amount)
-            if resp is None:
-                log(f"❌ Acquisto LIMIT fallito per {symbol}")
-                continue
-
-            log(f"🟢 Ordine LIMIT piazzato per {symbol}. Attendi esecuzione.")
-
-            # Dopo l'esecuzione dell'ordine, aggiorna qty e actual_cost SOLO se qty > 0
-            time.sleep(2)
-            qty = get_free_qty(symbol)
-            if not qty or qty == 0:
-                log(f"❌ Nessuna quantità acquistata per {symbol} dopo LIMIT BUY. Non registro la posizione.")
-                continue
+            # Scegli la funzione di acquisto in base al prezzo della coin
             last_price = get_last_price(symbol)
-            if qty and last_price:
+            if last_price is None:
+                log(f"❌ Prezzo non disponibile per {symbol} (acquisto)")
+                continue
+            if last_price < 100:
+                # Coin piccole: usa market_buy (fallback con riacquisto differenza)
+                qty = market_buy(symbol, order_amount)
+                if not qty or qty == 0:
+                    log(f"❌ Nessuna quantità acquistata per {symbol} dopo MARKET BUY. Non registro la posizione.")
+                    continue
                 actual_cost = qty * last_price
+                log(f"🟢 Ordine MARKET piazzato per {symbol}. Attendi esecuzione.")
             else:
-                actual_cost = order_amount
+                # Coin grandi: usa limit_buy (come ora)
+                resp = limit_buy(symbol, order_amount)
+                if resp is None:
+                    log(f"❌ Acquisto LIMIT fallito per {symbol}")
+                    continue
+                log(f"🟢 Ordine LIMIT piazzato per {symbol}. Attendi esecuzione.")
+                time.sleep(2)
+                qty = get_free_qty(symbol)
+                if not qty or qty == 0:
+                    log(f"❌ Nessuna quantità acquistata per {symbol} dopo LIMIT BUY. Non registro la posizione.")
+                    continue
+                actual_cost = qty * last_price
 
             df = fetch_history(symbol)
             if df is None or "Close" not in df.columns:
