@@ -210,78 +210,96 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
             return len(s.split('.')[-1].rstrip('0'))
         return 0
     price_decimals = step_decimals(price_step)
+    retry = 0
+    max_retry = 2
     qty_str = calculate_quantity(symbol, usdt_amount)
-    log(f"[DECIMALI][LIMIT_BUY][PRE-CHECK] {symbol} | usdt_amount={usdt_amount} | qty_str={qty_str}")
-    if not qty_str:
-        log(f"❌ Quantità non valida per acquisto di {symbol} | usdt_amount={usdt_amount} | price={price} | min_order_amt={info.get('min_order_amt', 5)} | qty_str={qty_str}")
-        return None
-    qty_decimal = Decimal(qty_str)
-    qty_step_dec = Decimal(str(qty_step))
-    min_qty = Decimal(str(info.get("min_qty", 0.0)))
-    min_order_amt = Decimal(str(info.get("min_order_amt", 5)))
-    # --- POLVERE: lascia sempre almeno 2*qty_step anche in acquisto ---
-    polvere = qty_step_dec * 2
-    qty_teorica = qty_decimal
-    acquistabile = qty_teorica - polvere
-    if acquistabile < min_qty:
-        acquistabile = min_qty
-    # Arrotonda per difetto al multiplo di step
-    acquistabile = (acquistabile // qty_step_dec) * qty_step_dec
-    acquistabile = acquistabile.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
-    qty_str_fallback = format_quantity_bybit(float(acquistabile), float(qty_step), precision=precision)
-    polvere_effettiva = qty_teorica - Decimal(qty_str_fallback)
-    log(f"[DECIMALI][LIMIT_BUY][POLVERE] {symbol} | qty_teorica={qty_teorica} | acquistabile={acquistabile} | qty_str_fallback={qty_str_fallback} | polvere_lasciata={polvere_effettiva}")
-    # LOG ULTRA DETTAGLIATO
-    log(f"[ULTRA-LOG][LIMIT_BUY] {symbol} | usdt_amount={usdt_amount} | price={price} | qty_step={qty_step} | precision={precision} | min_qty={min_qty} | min_order_amt={min_order_amt} | qty_str={qty_str} | qty_decimal={qty_decimal}")
-    log(f"[ULTRA-LOG][LIMIT_BUY] {symbol} | Corpo calcolato: qty={qty_str} (teorico), qty_decimal={qty_decimal}, qty_step={qty_step}, precision={precision}, min_qty={min_qty}, min_order_amt={min_order_amt}")
-    # Invia ordine una sola volta (niente fallback: la polvere evita errori Bybit)
-    price_fmt = f"{{0:.{price_decimals}f}}"
-    price_str = price_fmt.format(limit_price)
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Buy",
-        "orderType": "Limit",
-        "qty": qty_str_fallback,
-        "price": price_str,
-        "timeInForce": "GTC"
-    }
-    log(f"[ULTRA-LOG][LIMIT_BUY][SEND] {symbol} | BODY INVIATO: {json.dumps(body)}")
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
-    response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-    log(f"LIMIT BUY BODY: {body_json}")
-    try:
-        resp_json = response.json()
-    except Exception:
-        resp_json = {}
-    log(f"RESPONSE: {response.status_code} {resp_json}")
-    log(f"[ULTRA-LOG][LIMIT_BUY][SEND] {symbol} | RISPOSTA BYBIT: {resp_json}")
-    if response.status_code == 200 and resp_json.get("retCode") == 0:
-        qty_accettata = body['qty']
-        log(f"[ULTRA-LOG][LIMIT_BUY][SUCCESS] {symbol} | qty_teorica={qty_str} | qty_troncata={qty_str_fallback} | qty_accettata_bybit={qty_accettata}")
-        log(f"[ULTRA-LOG][LIMIT_BUY][SUCCESS] {symbol} | Tutti i parametri: usdt_amount={usdt_amount} | price={price} | qty_step={qty_step} | precision={precision} | min_qty={min_qty} | min_order_amt={min_order_amt}")
-        log(f"🟢 Ordine LIMIT inviato per {symbol} qty={body['qty']} price={price_str}")
-        notify_telegram(f"🟢 Ordine LIMIT inviato per {symbol} qty={body['qty']} price={price_str}")
-        return resp_json
-    else:
-        log(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')} | usdt_amount={usdt_amount} | price={price} | qty_str={qty_str} | qty_decimal={qty_decimal} | min_order_amt={min_order_amt} | min_qty={min_qty}")
-        if resp_json.get('retMsg', '').lower().find('insufficient balance') >= 0:
-            log(f"[DEBUG][LIMIT_BUY][INSUFFICIENT_BALANCE] {symbol} | usdt_balance={get_usdt_balance()} | usdt_amount={usdt_amount} | qty_str={qty_str} | qty_decimal={qty_decimal}")
-        if resp_json.get('retMsg', '').lower().find('data sent for paramter') >= 0:
-            log(f"[DEBUG][LIMIT_BUY][PARAM_ERROR] {symbol} | body={body_json} | usdt_amount={usdt_amount} | price={price} | qty_str={qty_str} | qty_decimal={qty_decimal}")
-        notify_telegram(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
-        return None
+    while retry <= max_retry:
+        log(f"[DECIMALI][LIMIT_BUY][PRE-CHECK][TRY {retry}] {symbol} | usdt_amount={usdt_amount} | qty_str={qty_str}")
+        if not qty_str:
+            log(f"❌ Quantità non valida per acquisto di {symbol} | usdt_amount={usdt_amount} | price={price} | min_order_amt={info.get('min_order_amt', 5)} | qty_str={qty_str}")
+            return None
+        qty_decimal = Decimal(qty_str)
+        qty_step_dec = Decimal(str(qty_step))
+        min_qty = Decimal(str(info.get("min_qty", 0.0)))
+        min_order_amt = Decimal(str(info.get("min_order_amt", 5)))
+        # --- POLVERE: lascia sempre almeno 2*qty_step anche in acquisto ---
+        polvere = qty_step_dec * 2
+        qty_teorica = qty_decimal
+        acquistabile = qty_teorica - polvere
+        if acquistabile < min_qty:
+            acquistabile = min_qty
+        # Arrotonda per difetto al multiplo di step
+        acquistabile = (acquistabile // qty_step_dec) * qty_step_dec
+        acquistabile = acquistabile.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
+        qty_str_fallback = format_quantity_bybit(float(acquistabile), float(qty_step), precision=precision)
+        polvere_effettiva = qty_teorica - Decimal(qty_str_fallback)
+        log(f"[DECIMALI][LIMIT_BUY][POLVERE][TRY {retry}] {symbol} | qty_teorica={qty_teorica} | acquistabile={acquistabile} | qty_str_fallback={qty_str_fallback} | polvere_lasciata={polvere_effettiva}")
+        # LOG ULTRA DETTAGLIATO
+        log(f"[ULTRA-LOG][LIMIT_BUY][TRY {retry}] {symbol} | usdt_amount={usdt_amount} | price={price} | qty_step={qty_step} | precision={precision} | min_qty={min_qty} | min_order_amt={min_order_amt} | qty_str={qty_str} | qty_decimal={qty_decimal}")
+        log(f"[ULTRA-LOG][LIMIT_BUY][TRY {retry}] {symbol} | Corpo calcolato: qty={qty_str} (teorico), qty_decimal={qty_decimal}, qty_step={qty_step}, precision={precision}, min_qty={min_qty}, min_order_amt={min_order_amt}")
+        price_fmt = f"{{0:.{price_decimals}f}}"
+        price_str = price_fmt.format(limit_price)
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": "Buy",
+            "orderType": "Limit",
+            "qty": qty_str_fallback,
+            "price": price_str,
+            "timeInForce": "GTC"
+        }
+        log(f"[ULTRA-LOG][LIMIT_BUY][SEND][TRY {retry}] {symbol} | BODY INVIATO: {json.dumps(body)}")
+        ts = str(int(time.time() * 1000))
+        body_json = json.dumps(body, separators=(",", ":"))
+        payload = f"{ts}{KEY}5000{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-SIGN-TYPE": "2",
+            "Content-Type": "application/json"
+        }
+        response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+        log(f"LIMIT BUY BODY: {body_json}")
+        try:
+            resp_json = response.json()
+        except Exception:
+            resp_json = {}
+        log(f"RESPONSE: {response.status_code} {resp_json}")
+        log(f"[ULTRA-LOG][LIMIT_BUY][SEND][TRY {retry}] {symbol} | RISPOSTA BYBIT: {resp_json}")
+        if response.status_code == 200 and resp_json.get("retCode") == 0:
+            qty_accettata = body['qty']
+            log(f"[ULTRA-LOG][LIMIT_BUY][SUCCESS][TRY {retry}] {symbol} | qty_teorica={qty_str} | qty_troncata={qty_str_fallback} | qty_accettata_bybit={qty_accettata}")
+            log(f"[ULTRA-LOG][LIMIT_BUY][SUCCESS][TRY {retry}] {symbol} | Tutti i parametri: usdt_amount={usdt_amount} | price={price} | qty_step={qty_step} | precision={precision} | min_qty={min_qty} | min_order_amt={min_order_amt}")
+            log(f"🟢 Ordine LIMIT inviato per {symbol} qty={body['qty']} price={price_str}")
+            notify_telegram(f"🟢 Ordine LIMIT inviato per {symbol} qty={body['qty']} price={price_str}")
+            return resp_json
+        elif resp_json.get("retMsg", "").lower().find("too many decimals") >= 0:
+            # Fallback: riduci la quantità di uno step e ritenta
+            qty_decimal = Decimal(qty_str_fallback) - qty_step_dec
+            qty_decimal = (qty_decimal // qty_step_dec) * qty_step_dec
+            qty_decimal = qty_decimal.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
+            if qty_decimal < min_qty:
+                log(f"❌ Quantità scesa sotto il minimo per {symbol} durante fallback LIMIT_BUY")
+                break
+            qty_str = format_quantity_bybit(float(qty_decimal), float(qty_step), precision=precision)
+            log(f"[DECIMALI][LIMIT_BUY][FALLBACK][TRY {retry}] {symbol} | nuovo qty_decimal={qty_decimal} | qty_step={qty_step} | precision={precision} | qty_str_fallback={qty_str}")
+            retry += 1
+            log(f"🔄 Tentativo fallback LIMIT_BUY {retry}: provo qty={qty_str}")
+            continue
+        else:
+            log(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')} | usdt_amount={usdt_amount} | price={price} | qty_str={qty_str} | qty_decimal={qty_decimal} | min_order_amt={min_order_amt} | min_qty={min_qty}")
+            if resp_json.get('retMsg', '').lower().find('insufficient balance') >= 0:
+                log(f"[DEBUG][LIMIT_BUY][INSUFFICIENT_BALANCE] {symbol} | usdt_balance={get_usdt_balance()} | usdt_amount={usdt_amount} | qty_str={qty_str} | qty_decimal={qty_decimal}")
+            if resp_json.get('retMsg', '').lower().find('data sent for paramter') >= 0:
+                log(f"[DEBUG][LIMIT_BUY][PARAM_ERROR] {symbol} | body={body_json} | usdt_amount={usdt_amount} | price={price} | qty_str={qty_str} | qty_decimal={qty_decimal}")
+            notify_telegram(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
+            return None
+    log(f"❌ Tutti i tentativi LIMIT BUY falliti per {symbol}")
+    notify_telegram(f"❌ Tutti i tentativi LIMIT BUY falliti per {symbol}")
+    return None
 
 def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     price = get_last_price(symbol)
