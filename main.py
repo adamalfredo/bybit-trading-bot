@@ -437,26 +437,26 @@ def market_sell(symbol: str, qty: float):
         qty_str = qty_str_troncata
         floored_qty = Decimal(qty_str)
         log(f"[ULTRA-LOG][MARKET_SELL][CONFRONTO] {symbol} | qty_teorica={qty_str_teorica} | qty_troncata={qty_str_troncata}")
-    log(f"[DECIMALI][MARKET_SELL][POST-FORMAT] {symbol} | dec_qty={dec_qty} | floored_qty={floored_qty} | qty_str={qty_str}")
-    log(f"[ULTRA-LOG][MARKET_SELL][POST-FORMAT] {symbol} | dec_qty={dec_qty} | floored_qty={floored_qty} | qty_str={qty_str} | qty_step={qty_step} | precision={precision}")
-        if floored_qty < min_qty_dec:
-            log(f"❌ Quantità da vendere troppo piccola per {symbol}: {floored_qty} < min_qty {min_qty}")
-            return None
-        # Assicura che price sia Decimal per evitare errori di tipo
-        price_dec = Decimal(str(price))
-        order_value = floored_qty * price_dec
-        log(f"[DECIMALI][MARKET_SELL] {symbol} | qty_step={qty_step} | precision={precision} | qty_richiesta={qty} | floored_qty={floored_qty} | qty_str={qty_str} | order_value={order_value}")
-        if order_value < Decimal(str(min_order_amt)):
-            log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
-            return None
-        if (floored_qty / step) % 1 != 0:
-            log(f"❌ Quantità {floored_qty} non multiplo di qty_step {qty_step} per {symbol}")
-            return None
-        if floored_qty <= 0:
-            log(f"❌ Quantità calcolata troppo piccola per {symbol}")
-            return None
     except Exception as e:
         log(f"❌ Errore calcolo quantità vendita {symbol}: {e}")
+        return None
+    log(f"[DECIMALI][MARKET_SELL][POST-FORMAT] {symbol} | dec_qty={dec_qty} | floored_qty={floored_qty} | qty_str={qty_str}")
+    log(f"[ULTRA-LOG][MARKET_SELL][POST-FORMAT] {symbol} | dec_qty={dec_qty} | floored_qty={floored_qty} | qty_str={qty_str} | qty_step={qty_step} | precision={precision}")
+    if floored_qty < min_qty_dec:
+        log(f"❌ Quantità da vendere troppo piccola per {symbol}: {floored_qty} < min_qty {min_qty}")
+        return None
+    # Assicura che price sia Decimal per evitare errori di tipo
+    price_dec = Decimal(str(price))
+    order_value = floored_qty * price_dec
+    log(f"[DECIMALI][MARKET_SELL] {symbol} | qty_step={qty_step} | precision={precision} | qty_richiesta={qty} | floored_qty={floored_qty} | qty_str={qty_str} | order_value={order_value}")
+    if order_value < Decimal(str(min_order_amt)):
+        log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
+        return None
+    if (floored_qty / step) % 1 != 0:
+        log(f"❌ Quantità {floored_qty} non multiplo di qty_step {qty_step} per {symbol}")
+        return None
+    if floored_qty <= 0:
+        log(f"❌ Quantità calcolata troppo piccola per {symbol}")
         return None
     retry = 0
     max_retry = 2
