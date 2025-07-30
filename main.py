@@ -215,18 +215,21 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     qty_str = calculate_quantity(symbol, usdt_amount)
     log(f"[DECIMALI][LIMIT_BUY][PRE-CHECK] {symbol} | usdt_amount={usdt_amount} | qty_str={qty_str}")
     if not qty_str:
-        log(f"❌ Quantità non valida per acquisto di {symbol} | usdt_amount={usdt_amount} | price={price} | min_order_amt={min_order_amt} | qty_str={qty_str}")
+        log(f"❌ Quantità non valida per acquisto di {symbol} | usdt_amount={usdt_amount} | price={price} | min_order_amt={info.get('min_order_amt', 5)} | qty_str={qty_str}")
         return None
     qty_decimal = Decimal(qty_str)
     qty_step_dec = Decimal(str(qty_step))
     min_qty = Decimal(str(info.get("min_qty", 0.0)))
     min_order_amt = Decimal(str(info.get("min_order_amt", 5)))
-    log(f"[DECIMALI][LIMIT_BUY] {symbol} | qty_step={qty_step} | precision={precision} | qty_richiesta={qty_str} | qty_decimal={qty_decimal}")
+    # LOG ULTRA DETTAGLIATO
+    log(f"[ULTRA-LOG][LIMIT_BUY] {symbol} | usdt_amount={usdt_amount} | price={price} | qty_step={qty_step} | precision={precision} | min_qty={min_qty} | min_order_amt={min_order_amt} | qty_str={qty_str} | qty_decimal={qty_decimal}")
+    log(f"[ULTRA-LOG][LIMIT_BUY] {symbol} | Corpo calcolato: qty={qty_str} (teorico), qty_decimal={qty_decimal}, qty_step={qty_step}, precision={precision}, min_qty={min_qty}, min_order_amt={min_order_amt}")
     while attempt < max_attempts:
         price_fmt = f"{{0:.{price_decimals}f}}"
         price_str = price_fmt.format(limit_price)
         qty_str_fallback = format_quantity_bybit(float(qty_decimal), float(qty_step), precision=precision)
         log(f"[DECIMALI][LIMIT_BUY][TRY {attempt}] {symbol} | qty_step={qty_step} | precision={precision} | qty_decimal={qty_decimal} | qty_str_fallback={qty_str_fallback}")
+        log(f"[ULTRA-LOG][LIMIT_BUY][TRY {attempt}] {symbol} | BODY INVIATO: {json.dumps(body)}")
         body = {
             "category": "spot",
             "symbol": symbol,
@@ -255,7 +258,14 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
         except Exception:
             resp_json = {}
         log(f"RESPONSE: {response.status_code} {resp_json}")
+        log(f"[ULTRA-LOG][LIMIT_BUY][TRY {attempt}] {symbol} | RISPOSTA BYBIT: {resp_json}")
+        if resp_json.get('retMsg', '').lower().find('too many decimals') >= 0:
+            log(f"[ULTRA-LOG][LIMIT_BUY][TRY {attempt}] {symbol} | ERRORE BYBIT: too many decimals | qty_decimal={qty_decimal} | qty_str_fallback={qty_str_fallback} | qty_step={qty_step} | precision={precision}")
         if response.status_code == 200 and resp_json.get("retCode") == 0:
+            # Log confronto quantità teorica, troncata e accettata da Bybit
+            qty_accettata = body['qty']
+            log(f"[ULTRA-LOG][LIMIT_BUY][SUCCESS] {symbol} | qty_teorica={qty_str} | qty_troncata={qty_str_fallback} | qty_accettata_bybit={qty_accettata}")
+            log(f"[ULTRA-LOG][LIMIT_BUY][SUCCESS] {symbol} | Tutti i parametri: usdt_amount={usdt_amount} | price={price} | qty_step={qty_step} | precision={precision} | min_qty={min_qty} | min_order_amt={min_order_amt}")
             log(f"🟢 Ordine LIMIT inviato per {symbol} qty={body['qty']} price={price_str}")
             notify_telegram(f"🟢 Ordine LIMIT inviato per {symbol} qty={body['qty']} price={price_str}")
             return resp_json
@@ -402,6 +412,8 @@ def market_sell(symbol: str, qty: float):
     precision = info.get("precision", 4)
     price = get_last_price(symbol)
     log(f"[DECIMALI][MARKET_SELL][PRE-CHECK] {symbol} | qty={qty} | qty_step={qty_step} | precision={precision}")
+    # LOG ULTRA DETTAGLIATO
+    log(f"[ULTRA-LOG][MARKET_SELL][PRE-CHECK] {symbol} | qty={qty} | qty_step={qty_step} | precision={precision} | min_qty={min_qty} | min_order_amt={min_order_amt}")
     if not price or price <= 0:
         log(f"❌ Prezzo non disponibile o nullo per {symbol}, impossibile vendere")
         return None
@@ -418,10 +430,15 @@ def market_sell(symbol: str, qty: float):
             dec_qty = saldo_preciso - polvere
             if dec_qty < min_qty_dec:
                 dec_qty = min_qty_dec
-            log(f"[DECIMALI][MARKET_SELL][POLVERE] {symbol} | saldo_preciso={saldo_preciso} | nuova_qty={dec_qty} | polvere={polvere}")
-        qty_str = format_quantity_bybit(float(dec_qty), float(qty_step), precision=precision)
+        log(f"[DECIMALI][MARKET_SELL][POLVERE] {symbol} | saldo_preciso={saldo_preciso} | nuova_qty={dec_qty} | polvere={polvere}")
+        log(f"[ULTRA-LOG][MARKET_SELL][POLVERE] {symbol} | saldo_preciso={saldo_preciso} | nuova_qty={dec_qty} | polvere={polvere}")
+        qty_str_teorica = str(qty)
+        qty_str_troncata = format_quantity_bybit(float(dec_qty), float(qty_step), precision=precision)
+        qty_str = qty_str_troncata
         floored_qty = Decimal(qty_str)
-        log(f"[DECIMALI][MARKET_SELL][POST-FORMAT] {symbol} | dec_qty={dec_qty} | floored_qty={floored_qty} | qty_str={qty_str}")
+        log(f"[ULTRA-LOG][MARKET_SELL][CONFRONTO] {symbol} | qty_teorica={qty_str_teorica} | qty_troncata={qty_str_troncata}")
+    log(f"[DECIMALI][MARKET_SELL][POST-FORMAT] {symbol} | dec_qty={dec_qty} | floored_qty={floored_qty} | qty_str={qty_str}")
+    log(f"[ULTRA-LOG][MARKET_SELL][POST-FORMAT] {symbol} | dec_qty={dec_qty} | floored_qty={floored_qty} | qty_str={qty_str} | qty_step={qty_step} | precision={precision}")
         if floored_qty < min_qty_dec:
             log(f"❌ Quantità da vendere troppo piccola per {symbol}: {floored_qty} < min_qty {min_qty}")
             return None
@@ -466,9 +483,17 @@ def market_sell(symbol: str, qty: float):
         try:
             response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
             log(f"MARKET SELL BODY: {body_json}")
+            log(f"[ULTRA-LOG][MARKET_SELL][TRY {retry}] {symbol} | BODY INVIATO: {body_json}")
             resp_json = response.json()
             log(f"RESPONSE: {response.status_code} {resp_json}")
+            log(f"[ULTRA-LOG][MARKET_SELL][TRY {retry}] {symbol} | RISPOSTA BYBIT: {resp_json}")
+            if resp_json.get('retMsg', '').lower().find('too many decimals') >= 0:
+                log(f"[ULTRA-LOG][MARKET_SELL][TRY {retry}] {symbol} | ERRORE BYBIT: too many decimals | floored_qty={floored_qty} | qty_str={qty_str} | qty_step={qty_step} | precision={precision}")
             if response.status_code == 200 and resp_json.get("retCode") == 0:
+                # Log confronto quantità teorica, troncata e accettata da Bybit
+                qty_accettata = body['qty']
+                log(f"[ULTRA-LOG][MARKET_SELL][SUCCESS] {symbol} | qty_teorica={qty_str_teorica} | qty_troncata={qty_str_troncata} | qty_accettata_bybit={qty_accettata}")
+                log(f"[ULTRA-LOG][MARKET_SELL][SUCCESS] {symbol} | Tutti i parametri: qty={qty} | price={price} | qty_step={qty_step} | precision={precision} | min_qty={min_qty} | min_order_amt={min_order_amt}")
                 log(f"🟢 Ordine MARKET SELL inviato per {symbol} qty={qty_str}")
                 notify_telegram(f"🟢 Ordine MARKET SELL inviato per {symbol} qty={qty_str}")
                 return response
