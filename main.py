@@ -462,22 +462,19 @@ def market_sell(symbol: str, qty: float):
     try:
         dec_qty = Decimal(str(qty))
         step = Decimal(str(qty_step))
-        # Arrotonda per difetto al multiplo di step, MAI supera il saldo
+        # LASCIA SEMPRE POLVERE: non vendere mai tutto, lascia almeno 2*qty_step
+        min_dust = step * 2
+        if dec_qty > min_dust:
+            dec_qty = dec_qty - min_dust
+        # Arrotonda per difetto al multiplo di step
         floored_qty = (dec_qty // step) * step
-        # Forza massimo 2 decimali (troncando, non arrotondando)
-        floored_qty = floored_qty.quantize(Decimal('0.01'), rounding=ROUND_DOWN)
-        # Rimuovi eventuali zeri e punto finale
-        qty_str = f"{floored_qty:.2f}".rstrip('0').rstrip('.')
-        if qty_str == '':
-            qty_str = '0'
-
+        # Usa la precisione corretta Bybit
+        qty_str = format_quantity_bybit(float(floored_qty), float(qty_step), precision=precision)
         if Decimal(qty_str) <= 0:
-            log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
+            log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento e polvere)")
             return
-
         # Log di debug
-        log(f"[DEBUG] market_sell {symbol}: qty={qty}, step={qty_step}, floored={floored_qty}, qty_str={qty_str}")
-
+        log(f"[DEBUG] market_sell {symbol}: qty={qty}, step={qty_step}, floored={floored_qty}, qty_str={qty_str}, min_dust={min_dust}")
     except Exception as e:
         log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
         return
