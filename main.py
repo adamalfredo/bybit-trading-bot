@@ -827,7 +827,7 @@ while True:
                     log(f"❌ Nessuna quantità acquistata per {symbol} dopo MARKET BUY. Non registro la posizione.")
                     continue
                 actual_cost = qty * last_price
-                log(f"🟢 Ordine MARKET piazzato per {symbol}. Attendi esecuzione.")
+                log(f"🟢 Ordine MARKET piazzato per {symbol}. Attendi esecuzione. Investito effettivo: {actual_cost:.2f} USDT")
             else:
                 # Coin grandi: usa limit_buy (come ora)
                 resp = limit_buy(symbol, order_amount)
@@ -867,7 +867,11 @@ while True:
 
             open_positions.add(symbol)
             log(f"🟢 Acquisto registrato per {symbol} | Entry: {price:.4f} | TP: {tp:.4f} | SL: {sl:.4f}")
-            notify_telegram(f"🟢📈 Acquisto per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}\nInvestito: {order_amount:.2f} USDT")
+            # Notifica con importo effettivo investito per market_buy, altrimenti usa order_amount
+            if last_price < 100:
+                notify_telegram(f"🟢📈 Acquisto per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f} USDT")
+            else:
+                notify_telegram(f"🟢📈 Acquisto per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}\nInvestito: {order_amount:.2f} USDT")
             time.sleep(3)
 
         # 🔴 USCITA (EXIT)
