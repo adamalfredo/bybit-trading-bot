@@ -687,6 +687,7 @@ def analyze_asset(symbol: str):
 
         # --- Filtro trend di fondo: solo se EMA50 > EMA200 (trend rialzista) ---
         if last["ema50"] <= last["ema200"]:
+            log(f"[STRATEGY][{symbol}] Filtro trend NON superato: ema50={last['ema50']:.4f} <= ema200={last['ema200']:.4f}")
             return None, None, None
 
         # --- Soglie dinamiche: TP/SL/trailing in base a volatilità ---
@@ -698,41 +699,81 @@ def analyze_asset(symbol: str):
         # Trailing dinamico tra 0.5% e 3%
         trailing_dyn = min(TRAILING_MAX, max(TRAILING_MIN, 0.005 + atr_ratio))
 
+
         # --- Nuova logica: almeno 2 condizioni di ingresso devono essere vere ---
         entry_conditions = []
         entry_strategies = []
+        # Log dettagliato per ogni condizione
         if is_volatile:
             # Condizioni per asset volatili
-            if last["Close"] > last["bb_upper"] and last["rsi"] < 70:
+            cond1 = last["Close"] > last["bb_upper"]
+            cond2 = last["rsi"] < 70
+            if cond1 and cond2:
                 entry_conditions.append(True)
                 entry_strategies.append("Breakout Bollinger")
-            if prev["sma20"] < prev["sma50"] and last["sma20"] > last["sma50"]:
+            else:
+                log(f"[STRATEGY][{symbol}] Condizione Breakout Bollinger: Close={last['Close']:.4f} > bb_upper={last['bb_upper']:.4f} = {cond1}, RSI={last['rsi']:.2f} < 70 = {cond2}")
+            cond3 = prev["sma20"] < prev["sma50"]
+            cond4 = last["sma20"] > last["sma50"]
+            if cond3 and cond4:
                 entry_conditions.append(True)
                 entry_strategies.append("Incrocio SMA 20/50")
-            if last["macd"] > last["macd_signal"] and last["adx"] > adx_threshold:
+            else:
+                log(f"[STRATEGY][{symbol}] Condizione Incrocio SMA 20/50: prev_sma20={prev['sma20']:.4f} < prev_sma50={prev['sma50']:.4f} = {cond3}, last_sma20={last['sma20']:.4f} > last_sma50={last['sma50']:.4f} = {cond4}")
+            cond5 = last["macd"] > last["macd_signal"]
+            cond6 = last["adx"] > adx_threshold
+            if cond5 and cond6:
                 entry_conditions.append(True)
                 entry_strategies.append("MACD bullish + ADX")
+            else:
+                log(f"[STRATEGY][{symbol}] Condizione MACD bullish + ADX: macd={last['macd']:.4f} > macd_signal={last['macd_signal']:.4f} = {cond5}, adx={last['adx']:.2f} > soglia={adx_threshold} = {cond6}")
         else:
             # Condizioni per asset stabili
-            if prev["ema20"] < prev["ema50"] and last["ema20"] > last["ema50"]:
+            cond1 = prev["ema20"] < prev["ema50"]
+            cond2 = last["ema20"] > last["ema50"]
+            if cond1 and cond2:
                 entry_conditions.append(True)
                 entry_strategies.append("Incrocio EMA 20/50")
-            if last["macd"] > last["macd_signal"] and last["adx"] > adx_threshold:
+            else:
+                log(f"[STRATEGY][{symbol}] Condizione Incrocio EMA 20/50: prev_ema20={prev['ema20']:.4f} < prev_ema50={prev['ema50']:.4f} = {cond1}, last_ema20={last['ema20']:.4f} > last_ema50={last['ema50']:.4f} = {cond2}")
+            cond3 = last["macd"] > last["macd_signal"]
+            cond4 = last["adx"] > adx_threshold
+            if cond3 and cond4:
                 entry_conditions.append(True)
                 entry_strategies.append("MACD bullish (stabile)")
-            if last["rsi"] > 50 and last["ema20"] > last["ema50"]:
+            else:
+                log(f"[STRATEGY][{symbol}] Condizione MACD bullish (stabile): macd={last['macd']:.4f} > macd_signal={last['macd_signal']:.4f} = {cond3}, adx={last['adx']:.2f} > soglia={adx_threshold} = {cond4}")
+            cond5 = last["rsi"] > 50
+            cond6 = last["ema20"] > last["ema50"]
+            if cond5 and cond6:
                 entry_conditions.append(True)
                 entry_strategies.append("Trend EMA + RSI")
+            else:
+                log(f"[STRATEGY][{symbol}] Condizione Trend EMA + RSI: rsi={last['rsi']:.2f} > 50 = {cond5}, ema20={last['ema20']:.4f} > ema50={last['ema50']:.4f} = {cond6}")
 
         if len(entry_conditions) >= 2:
+            log(f"[STRATEGY][{symbol}] Segnale ENTRY generato: strategie attive: {entry_strategies}")
             return "entry", ", ".join(entry_strategies), price
+        else:
+            log(f"[STRATEGY][{symbol}] Nessun segnale ENTRY: condizioni soddisfatte = {len(entry_conditions)}")
 
         # EXIT comune a tutti
-        if last["Close"] < last["bb_lower"] and last["rsi"] > 30:
+        cond_exit1 = last["Close"] < last["bb_lower"]
+        cond_exit2 = last["rsi"] > 30
+        if cond_exit1 and cond_exit2:
+            log(f"[STRATEGY][{symbol}] Segnale EXIT: Rimbalzo RSI + BB")
             return "exit", "Rimbalzo RSI + BB", price
-        elif last["macd"] < last["macd_signal"] and last["adx"] > adx_threshold:
+        else:
+            log(f"[STRATEGY][{symbol}] Condizione EXIT Rimbalzo RSI + BB: Close={last['Close']:.4f} < bb_lower={last['bb_lower']:.4f} = {cond_exit1}, RSI={last['rsi']:.2f} > 30 = {cond_exit2}")
+        cond_exit3 = last["macd"] < last["macd_signal"]
+        cond_exit4 = last["adx"] > adx_threshold
+        if cond_exit3 and cond_exit4:
+            log(f"[STRATEGY][{symbol}] Segnale EXIT: MACD bearish + ADX")
             return "exit", "MACD bearish + ADX", price
+        else:
+            log(f"[STRATEGY][{symbol}] Condizione EXIT MACD bearish + ADX: macd={last['macd']:.4f} < macd_signal={last['macd_signal']:.4f} = {cond_exit3}, adx={last['adx']:.2f} > soglia={adx_threshold} = {cond_exit4}")
 
+        log(f"[STRATEGY][{symbol}] Nessun segnale EXIT generato")
         return None, None, None
     except Exception as e:
         log(f"Errore analisi {symbol}: {e}")
