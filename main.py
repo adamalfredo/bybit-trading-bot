@@ -611,8 +611,16 @@ def fetch_history(symbol: str):
         ])
         df["timestamp"] = pd.to_datetime(df["timestamp"].astype(int), unit="ms")
         df.set_index("timestamp", inplace=True)
+        # Conversione a float e log dei NaN
         for col in ["Open", "High", "Low", "Close", "Volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+        # Log delle prime 5 righe e conteggio NaN
+        log(f"[KLINE-DF] {symbol} | head:\n{df.head(5)}")
+        log(f"[KLINE-DF] {symbol} | NaN per colonna: {df.isna().sum().to_dict()}")
+        # Logga le righe con almeno un NaN nelle colonne chiave
+        nan_rows = df[df[["Open", "High", "Low", "Close", "Volume"]].isna().any(axis=1)]
+        if not nan_rows.empty:
+            log(f"[KLINE-DF] {symbol} | Righe con NaN:\n{nan_rows.head(5)}")
         return df
     except Exception as e:
         log(f"[!] Errore richiesta Kline per {symbol}: {e}")
@@ -628,8 +636,12 @@ def analyze_asset(symbol: str):
     try:
         df = fetch_history(symbol)
         if df is None or len(df) < 3:
-            log(f"[ANALYZE] Dati storici insufficienti per {symbol} (df is None or len < 3)")
+            log(f"[ANALYZE] Dati storici insufficienti per {symbol} (df is None o len < 3)")
             return None, None, None
+        # Log approfondito prima del dropna
+        log(f"[ANALYZE-DF] {symbol} | Prima del dropna, len={len(df)}")
+        log(f"[ANALYZE-DF] {symbol} | head:\n{df.head(5)}")
+        log(f"[ANALYZE-DF] {symbol} | NaN per colonna: {df.isna().sum().to_dict()}")
         close = find_close_column(df)
         if close is None:
             log(f"[ANALYZE] Colonna close non trovata per {symbol}")
@@ -655,6 +667,10 @@ def analyze_asset(symbol: str):
             "bb_upper", "bb_lower", "rsi", "sma20", "sma50", "ema20", "ema50", "ema200",
             "macd", "macd_signal", "adx", "atr"
         ], inplace=True)
+        # Log dopo il dropna
+        log(f"[ANALYZE-DF] {symbol} | Dopo dropna, len={len(df)}")
+        log(f"[ANALYZE-DF] {symbol} | head:\n{df.head(5)}")
+        log(f"[ANALYZE-DF] {symbol} | NaN per colonna: {df.isna().sum().to_dict()}")
 
         if len(df) < 3:
             log(f"[ANALYZE] Dati storici insufficienti dopo dropna per {symbol} (len < 3)")
