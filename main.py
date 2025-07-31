@@ -595,7 +595,7 @@ def fetch_history(symbol: str):
         "category": "spot",
         "symbol": symbol,
         "interval": str(INTERVAL_MINUTES),
-        "limit": 100
+        "limit": 250  # aumentato per supportare indicatori lunghi
     }
     try:
         resp = requests.get(endpoint, params=params, timeout=10)
@@ -673,6 +673,8 @@ def analyze_asset(symbol: str):
         log(f"[ANALYZE-DF] {symbol} | NaN per colonna: {df.isna().sum().to_dict()}")
 
         if len(df) < 3:
+            # Logga anche la quantità di NaN per colonna PRIMA del dropna
+            log(f"[ANALYZE-DF] {symbol} | PRIMA DEL DROPNNA: NaN per colonna: {df.isna().sum().to_dict()}")
             log(f"[ANALYZE] Dati storici insufficienti dopo dropna per {symbol} (len < 3)")
             return None, None, None
 
