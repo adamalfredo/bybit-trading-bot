@@ -25,18 +25,43 @@ BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 ORDER_USDT = 50.0
 
 
-ASSETS = [
-    "WIFUSDT", "PEPEUSDT", "BONKUSDT", "INJUSDT", "SUIUSDT",
-    "SEIUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "TONUSDT", "DOGEUSDT", "MATICUSDT",
-    "BTCUSDT", "ETHUSDT", "LTCUSDT", "XRPUSDT", "LINKUSDT", "AVAXUSDT", "SOLUSDT"
-]
 
-# Coin meno volatili (gruppo 30%)
-LESS_VOLATILE_ASSETS = [
-    "BTCUSDT", "ETHUSDT", "LTCUSDT", "XRPUSDT", "LINKUSDT", "AVAXUSDT", "SOLUSDT"
-]
-# Coin volatili (gruppo 70%)
-VOLATILE_ASSETS = [s for s in ASSETS if s not in LESS_VOLATILE_ASSETS]
+# --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
+ASSETS = []
+LESS_VOLATILE_ASSETS = []
+VOLATILE_ASSETS = []
+
+def update_assets(top_n=18, n_stable=7):
+    """
+    Aggiorna ASSETS, LESS_VOLATILE_ASSETS e VOLATILE_ASSETS:
+    - Prende i top N asset spot per volume 24h USDT
+    - I primi n_stable per market cap (BTC, ETH, ... se presenti) sono i meno volatili
+    - Gli altri sono considerati volatili
+    """
+    global ASSETS, LESS_VOLATILE_ASSETS, VOLATILE_ASSETS
+    try:
+        endpoint = f"{BYBIT_BASE_URL}/v5/market/tickers"
+        params = {"category": "spot"}
+        resp = requests.get(endpoint, params=params, timeout=10)
+        data = resp.json()
+        if data.get("retCode") != 0:
+            log(f"[ASSETS] Errore API tickers: {data}")
+            return
+        tickers = data["result"]["list"]
+        # Filtra solo coppie USDT
+        usdt_tickers = [t for t in tickers if t["symbol"].endswith("USDT")]
+        # Ordina per volume 24h (turnover24h)
+        usdt_tickers.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
+        # Prendi i top N
+        top = usdt_tickers[:top_n]
+        ASSETS = [t["symbol"] for t in top]
+        # Ordina per market cap stimata (lastPrice * totalVolume)
+        top.sort(key=lambda x: float(x.get("lastPrice", 0)) * float(x.get("totalVolume", 0)), reverse=True)
+        LESS_VOLATILE_ASSETS = [t["symbol"] for t in top[:n_stable]]
+        VOLATILE_ASSETS = [s for s in ASSETS if s not in LESS_VOLATILE_ASSETS]
+        log(f"[ASSETS] Aggiornati: {ASSETS}\nMeno volatili: {LESS_VOLATILE_ASSETS}\nVolatili: {VOLATILE_ASSETS}")
+    except Exception as e:
+        log(f"[ASSETS] Errore aggiornamento lista asset: {e}")
 
 INTERVAL_MINUTES = 15
 ATR_WINDOW = 14
@@ -640,6 +665,9 @@ def sync_positions_from_wallet():
             log(f"[SYNC] Posizione trovata in wallet: {symbol} qty={qty} entry={entry_price:.4f} SL={sl:.4f} TP={tp:.4f}")
 
 # --- Esegui sync all'avvio ---
+
+# Aggiorna la lista asset all'avvio
+update_assets()
 sync_positions_from_wallet()
 
 def get_usdt_balance() -> float:
@@ -724,6 +752,8 @@ def get_portfolio_value():
 
 low_balance_alerted = False  # Deve essere fuori dal ciclo per persistere tra i cicli
 while True:
+    # Aggiorna la lista asset dinamicamente ogni ciclo
+    update_assets()
     portfolio_value, usdt_balance, coin_values = get_portfolio_value()
     volatile_budget = portfolio_value * 0.7
     stable_budget = portfolio_value * 0.3
