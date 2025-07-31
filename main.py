@@ -24,8 +24,6 @@ BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
 ORDER_USDT = 50.0
 
-
-
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
 ASSETS = []
 LESS_VOLATILE_ASSETS = []
@@ -466,7 +464,6 @@ def market_sell(symbol: str, qty: float):
         qty_step = 0.0001
         precision = 4
 
-
     max_fallback = 4  # Prova a ridurre la precisione fino a 4 volte
     fallback_count = 0
     orig_precision = precision
@@ -549,45 +546,6 @@ def market_sell(symbol: str, qty: float):
     log(f"❌ Tutti i tentativi di vendita falliti per {symbol} (decimali)")
     notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} (tutti i fallback decimali esauriti)")
     return None
-
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Sell",
-        "orderType": "Market",
-        "qty": qty_str
-    }
-
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
-
-    try:
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"SELL BODY: {body_json}")
-        log(f"RESPONSE: {resp.status_code} {resp.json()}")
-        # Notifica Telegram se la vendita fallisce
-        try:
-            resp_json = resp.json()
-        except Exception:
-            resp_json = {}
-        if resp.status_code != 200 or resp_json.get("retCode") != 0:
-            notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol}! Codice: {resp.status_code} - Msg: {resp_json.get('retMsg','?')}")
-        return resp
-    except Exception as e:
-        log(f"❌ Errore invio ordine SELL: {e}")
-        notify_telegram(f"❌❗️ Errore invio ordine SELL per {symbol}: {e}")
-        return None
 
 def fetch_history(symbol: str):
     endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
