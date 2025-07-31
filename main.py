@@ -10,7 +10,6 @@ import pandas as pd
 from ta.volatility import BollingerBands, AverageTrueRange
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD, ADXIndicator, SMAIndicator
-from typing import Optional
 
 # Env vars (Railway)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -667,7 +666,7 @@ def setup_gspread():
     return client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
 
 # Salva una riga nel foglio
-def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
+def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type, usdt_enter=None, usdt_exit=None, delta_usd=None):
     try:
         import base64
 
@@ -688,6 +687,7 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
         creds = Credentials.from_service_account_file(creds_path, scopes=scope)
         client = gspread.authorize(creds)
         sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
+
         sheet.append_row([
             time.strftime("%Y-%m-%d %H:%M:%S"),
             symbol,
@@ -695,7 +695,10 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
             round(exit, 6),
             f"{pnl_pct:.2f}%",
             strategy,
-            result_type
+            result_type,
+            usdt_enter if usdt_enter is not None else "",
+            usdt_exit if usdt_exit is not None else "",
+            delta_usd if delta_usd is not None else ""
         ])
     except Exception as e:
         log(f"❌ Errore log su Google Sheets: {e}")
@@ -892,7 +895,7 @@ while True:
                 log(f"🔴 Vendita completata per {symbol}")
                 log(f"📊 PnL stimato: {pnl:.2f}% | Delta: {delta:.2f}")
                 notify_telegram(f"🔴📉 Vendita per {symbol} a {price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}%")
-                log_trade_to_google(symbol, entry_price, price, pnl, strategy, "Exit Signal")
+                log_trade_to_google(symbol, entry_price, price, pnl, strategy, "Exit Signal", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
 
                 open_positions.discard(symbol)
                 last_exit_time[symbol] = time.time()
@@ -967,7 +970,7 @@ while True:
                     pnl = (delta / entry_cost) * 100
                     log(f"🔻 {sl_type} attivato per {symbol} → Prezzo: {current_price:.4f} | SL: {entry['sl']:.4f}")
                     notify_telegram(f"🔻 {sl_type} venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
-                    log_trade_to_google(symbol, entry_price, current_price, pnl, sl_type, "SL Triggered")
+                    log_trade_to_google(symbol, entry_price, current_price, pnl, sl_type, "SL Triggered", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
                     # 🗑️ Pulizia
                     open_positions.discard(symbol)
                     last_exit_time[symbol] = time.time()
