@@ -471,12 +471,16 @@ def market_sell(symbol: str, qty: float):
         # Usa la precisione corretta Bybit
         qty_str = format_quantity_bybit(float(floored_qty), float(qty_step), precision=precision)
         if Decimal(qty_str) <= 0:
+            saldo_attuale = get_free_qty(symbol)
             log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento e polvere)")
+            notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} (saldo troppo piccolo: {saldo_attuale})")
             return
         # Log di debug
         log(f"[DEBUG] market_sell {symbol}: qty={qty}, step={qty_step}, floored={floored_qty}, qty_str={qty_str}, min_dust={min_dust}")
     except Exception as e:
         log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
+        saldo_attuale = get_free_qty(symbol)
+        notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} (errore quantità, saldo: {saldo_attuale})")
         return
 
     body = {
