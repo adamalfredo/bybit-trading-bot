@@ -599,6 +599,8 @@ def fetch_history(symbol: str):
     }
     try:
         resp = requests.get(endpoint, params=params, timeout=10)
+        # Logga la risposta grezza per debug
+        log(f"[KLINE-RAW] {symbol} | status={resp.status_code} | text={resp.text[:300]}")
         data = resp.json()
         if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
             log(f"[!] Errore Kline per {symbol}: {data}")
