@@ -505,9 +505,17 @@ def market_sell(symbol: str, qty: float):
         resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"SELL BODY: {body_json}")
         log(f"RESPONSE: {resp.status_code} {resp.json()}")
+        # Notifica Telegram se la vendita fallisce
+        try:
+            resp_json = resp.json()
+        except Exception:
+            resp_json = {}
+        if resp.status_code != 200 or resp_json.get("retCode") != 0:
+            notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol}! Codice: {resp.status_code} - Msg: {resp_json.get('retMsg','?')}")
         return resp
     except Exception as e:
         log(f"❌ Errore invio ordine SELL: {e}")
+        notify_telegram(f"❌❗️ Errore invio ordine SELL per {symbol}: {e}")
         return None
 
 def fetch_history(symbol: str):
@@ -931,6 +939,7 @@ while True:
                 position_data.pop(symbol, None)
             else:
                 log(f"❌ Vendita fallita per {symbol}")
+                notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} durante EXIT SIGNAL!")
 
     time.sleep(1)
 
@@ -1006,6 +1015,7 @@ while True:
                     position_data.pop(symbol, None)
                 else:
                     log(f"❌ Vendita fallita con {sl_type} per {symbol}")
+                    notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} durante {sl_type}!")
             else:
                 log(f"❌ Quantità nulla o troppo piccola per vendita {sl_type} su {symbol}")
     # Sicurezza: attesa tra i cicli principali
