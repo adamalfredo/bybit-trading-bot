@@ -686,6 +686,8 @@ def calculate_stop_loss(entry_price, current_price, p_max, trailing_active):
     else:
         return p_max * (1 - TRAILING_DISTANCE)
 
+
+import threading
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -758,6 +760,78 @@ def get_portfolio_value():
     return total, usdt_balance, coin_values
 
 low_balance_alerted = False  # Deve essere fuori dal ciclo per persistere tra i cicli
+def trailing_stop_worker():
+    while True:
+        for symbol in list(open_positions):
+            if symbol not in position_data:
+                continue
+            saldo = get_free_qty(symbol)
+            if saldo is None or saldo < 1e-6:
+                log(f"[CLEANUP] {symbol}: saldo zero, rimuovo da open_positions e position_data")
+                open_positions.discard(symbol)
+                position_data.pop(symbol, None)
+                continue
+            entry = position_data[symbol]
+            holding_seconds = time.time() - entry.get("entry_time", 0)
+            if holding_seconds < MIN_HOLDING_MINUTES * 60:
+                log(f"[HOLDING][FAST] {symbol}: attendo ancora {MIN_HOLDING_MINUTES - holding_seconds/60:.1f} min prima di attivare SL/TSL")
+                continue
+            current_price = get_last_price(symbol)
+            if not current_price:
+                continue
+            if symbol in VOLATILE_ASSETS:
+                trailing_threshold = 0.02
+            else:
+                trailing_threshold = 0.005
+            soglia_attivazione = entry["entry_price"] * (1 + trailing_threshold)
+            log(f"[TRAILING CHECK][FAST] {symbol} | entry_price={entry['entry_price']:.4f} | current_price={current_price:.4f} | soglia={soglia_attivazione:.4f} | trailing_active={entry['trailing_active']} | threshold={trailing_threshold}")
+            if not entry["trailing_active"] and current_price >= soglia_attivazione:
+                entry["trailing_active"] = True
+                log(f"🔛 Trailing Stop attivato per {symbol} sopra soglia → Prezzo: {current_price:.4f}")
+                notify_telegram(f"🔛 Trailing Stop attivo su {symbol}\nPrezzo: {current_price:.4f}")
+            if entry["trailing_active"]:
+                if current_price > entry["p_max"]:
+                    entry["p_max"] = current_price
+                    new_sl = current_price * (1 - TRAILING_SL_BUFFER)
+                    if new_sl > entry["sl"]:
+                        log(f"📉 SL aggiornato per {symbol}: da {entry['sl']:.4f} a {new_sl:.4f}")
+                        entry["sl"] = new_sl
+            sl_triggered = False
+            sl_type = None
+            if entry["trailing_active"] and current_price <= entry["sl"]:
+                sl_triggered = True
+                sl_type = "Trailing Stop"
+            elif not entry["trailing_active"] and current_price <= entry["sl"]:
+                sl_triggered = True
+                sl_type = "Stop Loss"
+            if sl_triggered:
+                qty = get_free_qty(symbol)
+                if qty > 0:
+                    usdt_before = get_usdt_balance()
+                    resp = market_sell(symbol, qty)
+                    if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+                        entry_price = entry["entry_price"]
+                        entry_cost = entry.get("entry_cost", ORDER_USDT)
+                        qty = entry.get("qty", qty)
+                        exit_value = current_price * qty
+                        delta = exit_value - entry_cost
+                        pnl = (delta / entry_cost) * 100
+                        log(f"🔻 {sl_type} attivato per {symbol} → Prezzo: {current_price:.4f} | SL: {entry['sl']:.4f}")
+                        notify_telegram(f"🔻 {sl_type} venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
+                        log_trade_to_google(symbol, entry_price, current_price, pnl, sl_type, "SL Triggered", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
+                        open_positions.discard(symbol)
+                        last_exit_time[symbol] = time.time()
+                        position_data.pop(symbol, None)
+                    else:
+                        log(f"❌ Vendita fallita con {sl_type} per {symbol}")
+                        notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} durante {sl_type}!")
+                else:
+                    log(f"❌ Quantità nulla o troppo piccola per vendita {sl_type} su {symbol}")
+        time.sleep(60)
+
+trailing_thread = threading.Thread(target=trailing_stop_worker, daemon=True)
+trailing_thread.start()
+
 while True:
     # Aggiorna la lista asset dinamicamente ogni ciclo
     update_assets()
