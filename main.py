@@ -625,10 +625,12 @@ def find_close_column(df: pd.DataFrame):
 def analyze_asset(symbol: str):
     try:
         df = fetch_history(symbol)
-        if df is None:
+        if df is None or len(df) < 3:
+            log(f"[ANALYZE] Dati storici insufficienti per {symbol} (df is None or len < 3)")
             return None, None, None
         close = find_close_column(df)
         if close is None:
+            log(f"[ANALYZE] Colonna close non trovata per {symbol}")
             return None, None, None
 
         bb = BollingerBands(close=close)
@@ -651,6 +653,10 @@ def analyze_asset(symbol: str):
             "bb_upper", "bb_lower", "rsi", "sma20", "sma50", "ema20", "ema50", "ema200",
             "macd", "macd_signal", "adx", "atr"
         ], inplace=True)
+
+        if len(df) < 3:
+            log(f"[ANALYZE] Dati storici insufficienti dopo dropna per {symbol} (len < 3)")
+            return None, None, None
 
         is_volatile = symbol in VOLATILE_ASSETS
         adx_threshold = 20 if is_volatile else 15
@@ -862,8 +868,9 @@ def trailing_stop_worker():
             if symbol not in position_data:
                 continue
             saldo = get_free_qty(symbol)
-            if saldo is None or saldo < 1e-6:
-                log(f"[CLEANUP] {symbol}: saldo zero, rimuovo da open_positions e position_data")
+            # PATCH: se saldo < 1 (polvere), rimuovi la posizione
+            if saldo is None or saldo < 1:
+                log(f"[CLEANUP] {symbol}: saldo troppo basso ({saldo}), rimuovo da open_positions e position_data (polvere)")
                 open_positions.discard(symbol)
                 position_data.pop(symbol, None)
                 continue
@@ -955,6 +962,15 @@ while True:
 
         # ❌ Filtra segnali nulli
         if signal is None or strategy is None or price is None:
+            continue
+
+    # PATCH: rimuovi posizioni con saldo < 1 (polvere) anche nel ciclo principale
+    for symbol in list(open_positions):
+        saldo = get_free_qty(symbol)
+        if saldo is None or saldo < 1:
+            log(f"[CLEANUP] {symbol}: saldo troppo basso ({saldo}), rimuovo da open_positions e position_data (polvere)")
+            open_positions.discard(symbol)
+            position_data.pop(symbol, None)
             continue
 
         # ✅ ENTRATA
