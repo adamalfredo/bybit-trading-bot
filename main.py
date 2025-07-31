@@ -1016,8 +1016,9 @@ while True:
                 last_exit_time[symbol] = time.time()
                 position_data.pop(symbol, None)
             else:
+                saldo_attuale = get_free_qty(symbol)
                 log(f"❌ Vendita fallita per {symbol}")
-                notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} durante EXIT SIGNAL!")
+                notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} durante EXIT SIGNAL! (saldo attuale: {saldo_attuale})")
 
     time.sleep(1)
 
