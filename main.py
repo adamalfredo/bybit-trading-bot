@@ -346,9 +346,11 @@ def market_buy(symbol: str, usdt_amount: float):
     if not price:
         log(f"❌ Prezzo non disponibile per {symbol}")
         return None
-    qty_str = calculate_quantity(symbol, usdt_amount)
+    # Applica un margine di sicurezza per evitare insufficient balance
+    safe_usdt_amount = usdt_amount * 0.98
+    qty_str = calculate_quantity(symbol, safe_usdt_amount)
     if not qty_str:
-        log(f"❌ Quantità non valida per acquisto di {symbol}")
+        log(f"❌ Quantità non valida per acquisto di {symbol} (con margine sicurezza)")
         return None
     info = get_instrument_info(symbol)
     min_qty = info.get("min_qty", 0.0)
