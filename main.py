@@ -30,6 +30,7 @@ ORDER_USDT = 50.0
 ASSETS = []
 LESS_VOLATILE_ASSETS = []
 VOLATILE_ASSETS = []
+LIQUIDITY_MIN_VOLUME = 1_000_000  # Soglia minima volume 24h USDT (consigliato)
 
 def update_assets(top_n=18, n_stable=7):
     """
@@ -48,8 +49,8 @@ def update_assets(top_n=18, n_stable=7):
             log(f"[ASSETS] Errore API tickers: {data}")
             return
         tickers = data["result"]["list"]
-        # Filtra solo coppie USDT
-        usdt_tickers = [t for t in tickers if t["symbol"].endswith("USDT")]
+        # Filtra solo coppie USDT e con volume sufficiente
+        usdt_tickers = [t for t in tickers if t["symbol"].endswith("USDT") and float(t.get("turnover24h", 0)) >= LIQUIDITY_MIN_VOLUME]
         # Ordina per volume 24h (turnover24h)
         usdt_tickers.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
         # Prendi i top N
@@ -67,7 +68,13 @@ INTERVAL_MINUTES = 15
 ATR_WINDOW = 14
 TP_FACTOR = 2.0
 SL_FACTOR = 1.5
-# TRAILING_ACTIVATION_THRESHOLD = 0.001 # +0.1% activation threshold
+# Soglie dinamiche consigliate
+TP_MIN = 1.5
+TP_MAX = 3.0
+SL_MIN = 1.0
+SL_MAX = 2.5
+TRAILING_MIN = 0.005  # 0.5%
+TRAILING_MAX = 0.03   # 3%
 TRAILING_ACTIVATION_THRESHOLD = 0.02
 TRAILING_SL_BUFFER = 0.007
 TRAILING_DISTANCE = 0.02
@@ -459,29 +466,89 @@ def market_sell(symbol: str, qty: float):
         qty_step = 0.0001
         precision = 4
 
-    try:
-        dec_qty = Decimal(str(qty))
-        step = Decimal(str(qty_step))
-        # LASCIA SEMPRE POLVERE: non vendere mai tutto, lascia almeno 2*qty_step
-        min_dust = step * 2
-        if dec_qty > min_dust:
-            dec_qty = dec_qty - min_dust
-        # Arrotonda per difetto al multiplo di step
-        floored_qty = (dec_qty // step) * step
-        # Usa la precisione corretta Bybit
-        qty_str = format_quantity_bybit(float(floored_qty), float(qty_step), precision=precision)
-        if Decimal(qty_str) <= 0:
+
+    max_fallback = 4  # Prova a ridurre la precisione fino a 4 volte
+    fallback_count = 0
+    orig_precision = precision
+    while fallback_count <= max_fallback:
+        try:
+            dec_qty = Decimal(str(qty))
+            step = Decimal(str(qty_step))
+            # LASCIA SEMPRE POLVERE: non vendere mai tutto, lascia almeno 2*qty_step
+            min_dust = step * 2
+            if dec_qty > min_dust:
+                dec_qty = dec_qty - min_dust
+            # Arrotonda per difetto al multiplo di step
+            floored_qty = (dec_qty // step) * step
+            # Limita i decimali secondo la precisione Bybit (o fallback)
+            use_precision = max(0, orig_precision - fallback_count)
+            quantize_str = '1.' + '0'*use_precision if use_precision > 0 else '1'
+            floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
+            # Garantisce che sia multiplo esatto di qty_step
+            if (floored_qty / step) % 1 != 0:
+                floored_qty = (floored_qty // step) * step
+                floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
+            qty_str = f"{floored_qty:.{use_precision}f}"
+            # Log di debug dettagliato
+            log(f"[DECIMALI][SELL] {symbol} | qty={qty} | qty_step={qty_step} | precision={use_precision} | min_dust={min_dust} | floored_qty={floored_qty} | qty_str={qty_str} | fallback={fallback_count}")
+            if Decimal(qty_str) < step or Decimal(qty_str) <= 0:
+                saldo_attuale = get_free_qty(symbol)
+                log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento e polvere, step={step})")
+                notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} (saldo troppo piccolo: {saldo_attuale}, step richiesto: {step})")
+                return
+        except Exception as e:
+            log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
             saldo_attuale = get_free_qty(symbol)
-            log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento e polvere)")
-            notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} (saldo troppo piccolo: {saldo_attuale})")
+            notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} (errore quantità, saldo: {saldo_attuale})")
             return
-        # Log di debug
-        log(f"[DEBUG] market_sell {symbol}: qty={qty}, step={qty_step}, floored={floored_qty}, qty_str={qty_str}, min_dust={min_dust}")
-    except Exception as e:
-        log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
-        saldo_attuale = get_free_qty(symbol)
-        notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} (errore quantità, saldo: {saldo_attuale})")
-        return
+
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": "Sell",
+            "orderType": "Market",
+            "qty": qty_str
+        }
+
+        ts = str(int(time.time() * 1000))
+        body_json = json.dumps(body, separators=(",", ":"))
+        payload = f"{ts}{KEY}5000{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-SIGN-TYPE": "2",
+            "Content-Type": "application/json"
+        }
+
+        try:
+            resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+            log(f"SELL BODY: {body_json}")
+            log(f"RESPONSE: {resp.status_code} {resp.json()}")
+            try:
+                resp_json = resp.json()
+            except Exception:
+                resp_json = {}
+            if resp.status_code == 200 and resp_json.get("retCode") == 0:
+                return resp
+            elif resp_json.get("retMsg", "").lower().find("too many decimals") >= 0:
+                fallback_count += 1
+                log(f"[DECIMALI][SELL][FALLBACK] {symbol} | Troppi decimali, provo con precisione {orig_precision-fallback_count}")
+                continue
+            else:
+                notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol}! Codice: {resp.status_code} - Msg: {resp_json.get('retMsg','?')}")
+                return resp
+        except Exception as e:
+            log(f"❌ Errore invio ordine SELL: {e}")
+            notify_telegram(f"❌❗️ Errore invio ordine SELL per {symbol}: {e}")
+            return None
+    # Se esce dal ciclo, vendita fallita per troppi decimali
+    log(f"❌ Tutti i tentativi di vendita falliti per {symbol} (decimali)")
+    notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} (tutti i fallback decimali esauriti)")
+    return None
 
     body = {
         "category": "spot",
@@ -572,6 +639,7 @@ def analyze_asset(symbol: str):
         df["sma50"] = SMAIndicator(close=close, window=50).sma_indicator()
         df["ema20"] = EMAIndicator(close=close, window=20).ema_indicator()
         df["ema50"] = EMAIndicator(close=close, window=50).ema_indicator()
+        df["ema200"] = EMAIndicator(close=close, window=200).ema_indicator()
         macd = MACD(close=close)
         df["macd"] = macd.macd()
         df["macd_signal"] = macd.macd_signal()
@@ -580,7 +648,7 @@ def analyze_asset(symbol: str):
         df["atr"] = atr.average_true_range()
 
         df.dropna(subset=[
-            "bb_upper", "bb_lower", "rsi", "sma20", "sma50", "ema20", "ema50",
+            "bb_upper", "bb_lower", "rsi", "sma20", "sma50", "ema20", "ema50", "ema200",
             "macd", "macd_signal", "adx", "atr"
         ], inplace=True)
 
@@ -591,23 +659,47 @@ def analyze_asset(symbol: str):
         prev = df.iloc[-2]
         price = float(last["Close"])
 
-        # Strategie per asset volatili
-        if is_volatile:
-            if last["Close"] > last["bb_upper"] and last["rsi"] < 70:
-                return "entry", "Breakout Bollinger", price
-            elif prev["sma20"] < prev["sma50"] and last["sma20"] > last["sma50"]:
-                return "entry", "Incrocio SMA 20/50", price
-            elif last["macd"] > last["macd_signal"] and last["adx"] > adx_threshold:
-                return "entry", "MACD bullish + ADX", price
+        # --- Filtro trend di fondo: solo se EMA50 > EMA200 (trend rialzista) ---
+        if last["ema50"] <= last["ema200"]:
+            return None, None, None
 
-        # Strategie per asset stabili
+        # --- Soglie dinamiche: TP/SL/trailing in base a volatilità ---
+        atr_ratio = last["atr"] / price if price > 0 else 0
+        # TP dinamico tra 1.5x e 3x ATR
+        tp_dyn = min(TP_MAX, max(TP_MIN, TP_FACTOR + atr_ratio * 5))
+        # SL dinamico tra 1x e 2.5x ATR
+        sl_dyn = min(SL_MAX, max(SL_MIN, SL_FACTOR + atr_ratio * 3))
+        # Trailing dinamico tra 0.5% e 3%
+        trailing_dyn = min(TRAILING_MAX, max(TRAILING_MIN, 0.005 + atr_ratio))
+
+        # --- Nuova logica: almeno 2 condizioni di ingresso devono essere vere ---
+        entry_conditions = []
+        entry_strategies = []
+        if is_volatile:
+            # Condizioni per asset volatili
+            if last["Close"] > last["bb_upper"] and last["rsi"] < 70:
+                entry_conditions.append(True)
+                entry_strategies.append("Breakout Bollinger")
+            if prev["sma20"] < prev["sma50"] and last["sma20"] > last["sma50"]:
+                entry_conditions.append(True)
+                entry_strategies.append("Incrocio SMA 20/50")
+            if last["macd"] > last["macd_signal"] and last["adx"] > adx_threshold:
+                entry_conditions.append(True)
+                entry_strategies.append("MACD bullish + ADX")
         else:
+            # Condizioni per asset stabili
             if prev["ema20"] < prev["ema50"] and last["ema20"] > last["ema50"]:
-                return "entry", "Incrocio EMA 20/50", price
-            elif last["macd"] > last["macd_signal"] and last["adx"] > adx_threshold:
-                return "entry", "MACD bullish (stabile)", price
-            elif last["rsi"] > 50 and last["ema20"] > last["ema50"]:
-                return "entry", "Trend EMA + RSI", price
+                entry_conditions.append(True)
+                entry_strategies.append("Incrocio EMA 20/50")
+            if last["macd"] > last["macd_signal"] and last["adx"] > adx_threshold:
+                entry_conditions.append(True)
+                entry_strategies.append("MACD bullish (stabile)")
+            if last["rsi"] > 50 and last["ema20"] > last["ema50"]:
+                entry_conditions.append(True)
+                entry_strategies.append("Trend EMA + RSI")
+
+        if len(entry_conditions) >= 2:
+            return "entry", ", ".join(entry_strategies), price
 
         # EXIT comune a tutti
         if last["Close"] < last["bb_lower"] and last["rsi"] > 30:
@@ -895,6 +987,7 @@ while True:
                 log(f"💸 Budget {group_label} insufficiente per {symbol} (disponibile: {group_available:.2f})")
                 continue
 
+
             # 📊 Valuta la forza del segnale in base alla strategia
             strategy_strength = {
                 "Breakout Bollinger": 1.0,
@@ -905,6 +998,21 @@ while True:
                 "Trend EMA + RSI": 0.6
             }
             strength = strategy_strength.get(strategy, 0.5)  # default prudente
+
+            # --- Adatta la size ordine in base alla volatilità (ATR/Prezzo) ---
+            df_hist = fetch_history(symbol)
+            if df_hist is not None and "atr" in df_hist.columns and "Close" in df_hist.columns:
+                last_hist = df_hist.iloc[-1]
+                atr_val = last_hist["atr"]
+                last_price = last_hist["Close"]
+                atr_ratio = atr_val / last_price if last_price > 0 else 0
+                # Se la volatilità è molto alta, riduci la size ordine
+                if atr_ratio > 0.08:
+                    strength *= 0.5
+                    log(f"[VOLATILITÀ] {symbol}: ATR/Prezzo molto alto ({atr_ratio:.2%}), size ordine dimezzata.")
+                elif atr_ratio > 0.04:
+                    strength *= 0.75
+                    log(f"[VOLATILITÀ] {symbol}: ATR/Prezzo elevato ({atr_ratio:.2%}), size ordine ridotta del 25%.")
 
             max_invest = min(group_available, usdt_balance) * strength
             order_amount = min(max_invest, group_available, usdt_balance, 250)
@@ -965,26 +1073,40 @@ while True:
                 log(f"❌ Dati storici mancanti per {symbol}")
                 continue
 
+
             atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
             last = df.iloc[-1]
             atr_val = last["atr"] if "atr" in last else atr.iloc[-1]
 
-            tp = price + (atr_val * TP_FACTOR)
-            sl = price - (atr_val * SL_FACTOR)
+            # --- Adatta la distanza di SL/TP in base alla volatilità (ATR/Prezzo) e limiti consigliati ---
+            atr_ratio = atr_val / price if price > 0 else 0
+            tp_factor = min(TP_MAX, max(TP_MIN, TP_FACTOR + atr_ratio * 5))
+            sl_factor = min(SL_MAX, max(SL_MIN, SL_FACTOR + atr_ratio * 3))
+            tp = price + (atr_val * tp_factor)
+            sl = price - (atr_val * sl_factor)
+            log(f"[VOLATILITÀ] {symbol}: ATR/Prezzo={atr_ratio:.2%}, TPx={tp_factor:.2f}, SLx={sl_factor:.2f}")
 
+            # Take profit parziale: 40% posizione a 1.5x ATR, resto trailing
+            partial_tp_ratio = 0.4
+            qty_partial = qty * partial_tp_ratio
+            qty_residual = qty - qty_partial
+            tp_partial = price + (atr_val * 1.5)
             position_data[symbol] = {
                 "entry_price": price,
                 "tp": tp,
                 "sl": sl,
                 "entry_cost": actual_cost,
                 "qty": qty,
+                "qty_partial": qty_partial,
+                "qty_residual": qty_residual,
+                "tp_partial": tp_partial,
                 "entry_time": time.time(),
                 "trailing_active": False,
                 "p_max": price
             }
 
             open_positions.add(symbol)
-            log(f"🟢 Acquisto registrato per {symbol} | Entry: {price:.4f} | TP: {tp:.4f} | SL: {sl:.4f}")
+            log(f"🟢 Acquisto registrato per {symbol} | Entry: {price:.4f} | TP: {tp:.4f} | SL: {sl:.4f} | TP parziale su {qty_partial:.4f} a {tp_partial:.4f}")
             # Notifica con importo effettivo investito per market_buy, altrimenti usa order_amount
             if last_price < 100:
                 notify_telegram(f"🟢📈 Acquisto per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f} USDT")
@@ -1099,3 +1221,162 @@ while True:
                 log(f"❌ Quantità nulla o troppo piccola per vendita {sl_type} su {symbol}")
     # Sicurezza: attesa tra i cicli principali
     time.sleep(INTERVAL_MINUTES * 60)
+
+# --- FUNZIONE DI BACKTEST DELLA STRATEGIA ---
+import matplotlib.pyplot as plt
+def backtest_strategy(symbol, initial_balance=1000, fee_pct=0.001, start_idx=0, verbose=True):
+    """
+    Backtest della strategia su dati storici Bybit spot.
+    - symbol: simbolo (es. 'BTCUSDT')
+    - initial_balance: capitale iniziale in USDT
+    - fee_pct: commissione per trade (default 0.1%)
+    - start_idx: indice da cui partire (default 0, inizio dati)
+    """
+    df = fetch_history(symbol)
+    if df is None or len(df) < 50:
+        print(f"[BACKTEST] Dati insufficienti per {symbol}")
+        return
+    close = find_close_column(df)
+    if close is None:
+        print(f"[BACKTEST] Colonna close non trovata per {symbol}")
+        return
+    # Calcola indicatori richiesti
+    df["bb_upper"] = BollingerBands(close=close).bollinger_hband()
+    df["bb_lower"] = BollingerBands(close=close).bollinger_lband()
+    df["rsi"] = RSIIndicator(close=close).rsi()
+    df["sma20"] = SMAIndicator(close=close, window=20).sma_indicator()
+    df["sma50"] = SMAIndicator(close=close, window=50).sma_indicator()
+    df["ema20"] = EMAIndicator(close=close, window=20).ema_indicator()
+    df["ema50"] = EMAIndicator(close=close, window=50).ema_indicator()
+    df["ema200"] = EMAIndicator(close=close, window=200).ema_indicator()
+    macd = MACD(close=close)
+    df["macd"] = macd.macd()
+    df["macd_signal"] = macd.macd_signal()
+    df["adx"] = ADXIndicator(high=df["High"], low=df["Low"], close=close).adx()
+    atr = AverageTrueRange(high=df["High"], low=df["Low"], close=close, window=ATR_WINDOW)
+    df["atr"] = atr.average_true_range()
+    df = df.dropna().copy()
+    # Parametri
+    is_volatile = symbol in VOLATILE_ASSETS
+    adx_threshold = 20 if is_volatile else 15
+    # Stato
+    usdt = initial_balance
+    coin = 0
+    entry_price = 0
+    entry_idx = None
+    trade_log = []
+    equity_curve = []
+    max_equity = initial_balance
+    max_drawdown = 0
+    for i in range(start_idx+1, len(df)):
+        row = df.iloc[i]
+        prev = df.iloc[i-1]
+        price = float(row["Close"])
+        # --- Filtro trend di fondo ---
+        if row["ema50"] <= row["ema200"]:
+            equity_curve.append(usdt + coin * price)
+            continue
+        # --- Soglie dinamiche ---
+        atr_ratio = row["atr"] / price if price > 0 else 0
+        tp_dyn = min(TP_MAX, max(TP_MIN, TP_FACTOR + atr_ratio * 5))
+        sl_dyn = min(SL_MAX, max(SL_MIN, SL_FACTOR + atr_ratio * 3))
+        trailing_dyn = min(TRAILING_MAX, max(TRAILING_MIN, 0.005 + atr_ratio))
+        # --- Entry logic (almeno 2 condizioni) ---
+        entry_conditions = []
+        if is_volatile:
+            if row["Close"] > row["bb_upper"] and row["rsi"] < 70:
+                entry_conditions.append(True)
+            if prev["sma20"] < prev["sma50"] and row["sma20"] > row["sma50"]:
+                entry_conditions.append(True)
+            if row["macd"] > row["macd_signal"] and row["adx"] > adx_threshold:
+                entry_conditions.append(True)
+        else:
+            if prev["ema20"] < prev["ema50"] and row["ema20"] > row["ema50"]:
+                entry_conditions.append(True)
+            if row["macd"] > row["macd_signal"] and row["adx"] > adx_threshold:
+                entry_conditions.append(True)
+            if row["rsi"] > 50 and row["ema20"] > row["ema50"]:
+                entry_conditions.append(True)
+        # --- ENTRY ---
+        if coin == 0 and len(entry_conditions) >= 2:
+            # Compra tutto l'USDT
+            qty = usdt / price
+            entry_price = price
+            entry_idx = i
+            coin = qty * (1 - fee_pct)
+            usdt = 0
+            if verbose:
+                print(f"[BACKTEST][ENTRY] {df.index[i]}: BUY {qty:.4f} {symbol} @ {price:.4f}")
+            trade_log.append({"type": "buy", "price": price, "idx": i})
+        # --- EXIT ---
+        elif coin > 0:
+            exit_signal = False
+            reason = ""
+            # Take profit
+            if price >= entry_price + row["atr"] * tp_dyn:
+                exit_signal = True
+                reason = "TP"
+            # Stop loss
+            elif price <= entry_price - row["atr"] * sl_dyn:
+                exit_signal = True
+                reason = "SL"
+            # Exit signal
+            elif row["Close"] < row["bb_lower"] and row["rsi"] > 30:
+                exit_signal = True
+                reason = "RSI+BB"
+            elif row["macd"] < row["macd_signal"] and row["adx"] > adx_threshold:
+                exit_signal = True
+                reason = "MACD Bearish"
+            if exit_signal:
+                usdt = coin * price * (1 - fee_pct)
+                if verbose:
+                    print(f"[BACKTEST][EXIT] {df.index[i]}: SELL {coin:.4f} {symbol} @ {price:.4f} | Reason: {reason}")
+                trade_log.append({"type": "sell", "price": price, "idx": i, "reason": reason})
+                coin = 0
+                entry_price = 0
+                entry_idx = None
+        equity = usdt + coin * price
+        equity_curve.append(equity)
+        if equity > max_equity:
+            max_equity = equity
+        dd = (max_equity - equity) / max_equity
+        if dd > max_drawdown:
+            max_drawdown = dd
+    # --- Risultati ---
+    final_equity = usdt + coin * price
+    n_trades = len([t for t in trade_log if t["type"] == "buy"])
+    wins = 0
+    losses = 0
+    for j in range(1, len(trade_log)):
+        if trade_log[j]["type"] == "sell" and trade_log[j-1]["type"] == "buy":
+            pnl = (trade_log[j]["price"] - trade_log[j-1]["price"]) / trade_log[j-1]["price"]
+            if pnl > 0:
+                wins += 1
+            else:
+                losses += 1
+    winrate = wins / n_trades * 100 if n_trades > 0 else 0
+    print(f"\n[BACKTEST] {symbol} | Capitale iniziale: {initial_balance} USDT")
+    print(f"[BACKTEST] Capitale finale: {final_equity:.2f} USDT | PnL: {final_equity-initial_balance:.2f} USDT ({(final_equity/initial_balance-1)*100:.2f}%)")
+    print(f"[BACKTEST] Numero trade: {n_trades} | Win rate: {winrate:.1f}% | Max drawdown: {max_drawdown*100:.2f}%")
+    if n_trades > 0:
+        print(f"[BACKTEST] Trade vincenti: {wins} | Perdenti: {losses}")
+    # Plot equity curve
+    plt.figure(figsize=(10,4))
+    plt.plot(equity_curve, label="Equity")
+    plt.title(f"Backtest {symbol}")
+    plt.xlabel("Step")
+    plt.ylabel("USDT")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+    return {
+        "final_equity": final_equity,
+        "n_trades": n_trades,
+        "winrate": winrate,
+        "max_drawdown": max_drawdown,
+        "trade_log": trade_log,
+        "equity_curve": equity_curve
+    }
+
+# Esempio di utilizzo (decommenta per lanciare il backtest):
+# backtest_strategy('BTCUSDT', initial_balance=1000, fee_pct=0.001)
