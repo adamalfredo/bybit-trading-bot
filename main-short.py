@@ -878,7 +878,7 @@ while True:
     # Log dettagliato bilanciamento
     tot_invested = volatile_invested + stable_invested
     perc_volatile = (volatile_invested / portfolio_value * 100) if portfolio_value > 0 else 0
-    perc_stable = (stable_investito / portfolio_value * 100) if portfolio_value > 0 else 0
+    perc_stable = (stable_invested / portfolio_value * 100) if portfolio_value > 0 else 0
     log(f"[PORTAFOGLIO] Totale: {portfolio_value:.2f} USDT | Volatili: {volatile_invested:.2f} ({perc_volatile:.1f}%) | Meno volatili: {stable_investito:.2f} ({perc_stable:.1f}%) | USDT: {usdt_balance:.2f}")
 
     # --- Avviso saldo basso: invia solo una volta finché non torna sopra soglia ---
