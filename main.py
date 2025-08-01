@@ -30,6 +30,11 @@ LESS_VOLATILE_ASSETS = []
 VOLATILE_ASSETS = []
 LIQUIDITY_MIN_VOLUME = 1_000_000  # Soglia minima volume 24h USDT (consigliato)
 
+# --- BLACKLIST STABLECOIN ---
+STABLECOIN_BLACKLIST = [
+    "USDCUSDT", "USDEUSDT", "TUSDUSDT", "USDPUSDT", "BUSDUSDT", "FDUSDUSDT", "DAIUSDT", "EURUSDT", "USDTUSDT"
+]
+
 def update_assets(top_n=18, n_stable=7):
     """
     Aggiorna ASSETS, LESS_VOLATILE_ASSETS e VOLATILE_ASSETS:
@@ -47,8 +52,13 @@ def update_assets(top_n=18, n_stable=7):
             log(f"[ASSETS] Errore API tickers: {data}")
             return
         tickers = data["result"]["list"]
-        # Filtra solo coppie USDT e con volume sufficiente
-        usdt_tickers = [t for t in tickers if t["symbol"].endswith("USDT") and float(t.get("turnover24h", 0)) >= LIQUIDITY_MIN_VOLUME]
+        # Filtra solo coppie USDT, con volume sufficiente, ed esclude le stablecoin
+        usdt_tickers = [
+            t for t in tickers
+            if t["symbol"].endswith("USDT")
+            and float(t.get("turnover24h", 0)) >= LIQUIDITY_MIN_VOLUME
+            and t["symbol"] not in STABLECOIN_BLACKLIST
+        ]
         # Ordina per volume 24h (turnover24h)
         usdt_tickers.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
         # Prendi i top N
@@ -976,6 +986,8 @@ while True:
     # low_balance_alerted ora è globale rispetto al ciclo
 
     for symbol in ASSETS:
+        if symbol in STABLECOIN_BLACKLIST:
+            continue
         signal, strategy, price = analyze_asset(symbol)
         log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
 
