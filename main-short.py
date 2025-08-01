@@ -233,88 +233,6 @@ def notify_telegram(msg):
     except Exception as e:
         log(f"[TELEGRAM] Errore invio messaggio: {e}")
 
-def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
-    price = get_last_price(symbol)
-    if not price or price <= 0:
-        log(f"❌ Prezzo non disponibile o nullo per {symbol} | usdt_amount={usdt_amount}")
-        return None
-    limit_price = price * (1 + price_increase_pct)
-    info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.0001)
-    price_step = info.get("price_step", 0.0001)
-    precision = info.get("precision", 4)
-    min_qty = info.get("min_qty", 0.0)
-    min_order_amt = info.get("min_order_amt", 5)
-    def step_decimals(step):
-        s = str(step)
-        if '.' in s:
-            return len(s.split('.')[-1].rstrip('0'))
-        return 0
-    price_decimals = step_decimals(price_step)
-    retry = 0
-    max_retry = 2
-    qty_str = calculate_quantity(symbol, usdt_amount)
-    if not qty_str:
-        log(f"❌ Quantità non valida per acquisto di {symbol}")
-        return None
-    qty_step_dec = Decimal(str(qty_step))
-    qty_decimal = Decimal(qty_str)
-    while retry <= max_retry:
-        qty_str_finale = format_quantity_bybit(float(qty_decimal), float(qty_step), precision=precision)
-        price_fmt = f"{{0:.{price_decimals}f}}"
-        price_str = price_fmt.format(limit_price)
-        body = {
-            "category": "spot",
-            "symbol": symbol,
-            "side": "Buy",
-            "orderType": "Limit",
-            "qty": qty_str_finale,
-            "price": price_str,
-            "timeInForce": "GTC"
-        }
-        ts = str(int(time.time() * 1000))
-        body_json = json.dumps(body, separators=(",", ":"))
-        payload = f"{ts}{KEY}5000{body_json}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json"
-        }
-        try:
-            response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-            log(f"LIMIT BUY BODY: {body_json}")
-            resp_json = response.json()
-            log(f"RESPONSE: {response.status_code} {resp_json}")
-            if response.status_code == 200 and resp_json.get("retCode") == 0:
-                log(f"🟢 Ordine LIMIT inviato per {symbol} qty={body['qty']} price={price_str}")
-                notify_telegram(f"🟢 Ordine [SHORT] LIMIT inviato per {symbol} qty={body['qty']} price={price_str}")
-                return resp_json
-            elif resp_json.get("retMsg", "").lower().find("too many decimals") >= 0:
-                qty_decimal = qty_decimal - qty_step_dec
-                qty_decimal = (qty_decimal // qty_step_dec) * qty_step_dec
-                qty_decimal = qty_decimal.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
-                if qty_decimal < Decimal(str(min_qty)):
-                    log(f"❌ Quantità scesa sotto il minimo per {symbol} durante fallback LIMIT_BUY")
-                    break
-                log(f"[DECIMALI][LIMIT_BUY][FALLBACK] {symbol} | nuovo qty_decimal={qty_decimal} | qty_step={qty_step} | precision={precision}")
-                retry += 1
-                log(f"🔄 Tentativo fallback LIMIT_BUY {retry}: provo qty={qty_decimal}")
-                continue
-            else:
-                log(f"❌ Ordine LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
-                notify_telegram(f"❌ Ordine [SHORT] LIMIT fallito per {symbol}: {resp_json.get('retMsg')}")
-                retry += 1
-        except Exception as e:
-            log(f"❌ Errore invio ordine LIMIT BUY: {e}")
-            retry += 1
-    log(f"❌ Tutti i tentativi LIMIT BUY falliti per {symbol}")
-    notify_telegram(f"❌ Tutti i tentativi LIMIT BUY [SHORT] falliti per {symbol}")
-    return None
-
 def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     price = get_last_price(symbol)
     if not price:
@@ -353,106 +271,6 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         return qty_str
     except Exception as e:
         log(f"❌ Errore calcolo quantità per {symbol}: {e}")
-        return None
-
-def market_buy(symbol: str, usdt_amount: float):
-    # Solo per coin a basso prezzo (< 100 USDT): logica fallback con riacquisto differenza
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}")
-        return None
-    # Applica un margine di sicurezza per evitare insufficient balance
-    safe_usdt_amount = usdt_amount * 0.98
-    qty_str = calculate_quantity(symbol, safe_usdt_amount)
-    if not qty_str:
-        log(f"❌ Quantità non valida per acquisto di {symbol} (con margine sicurezza)")
-        return None
-    info = get_instrument_info(symbol)
-    min_qty = info.get("min_qty", 0.0)
-    min_order_amt = info.get("min_order_amt", 5)
-    precision = info.get("precision", 4)
-
-    def _send_order(qty_str):
-        body = {
-            "category": "spot",
-            "symbol": symbol,
-            "side": "Buy",
-            "orderType": "Market",
-            "qty": qty_str
-        }
-        ts = str(int(time.time() * 1000))
-        body_json = json.dumps(body, separators=(",", ":"))
-        payload = f"{ts}{KEY}5000{body_json}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json"
-        }
-        response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"BUY BODY: {body_json}")
-        try:
-            resp_json = response.json()
-        except Exception:
-            resp_json = {}
-        log(f"RESPONSE: {response.status_code} {resp_json}")
-        # Logga dettagli filled/cumExecQty/orderStatus se presenti
-        if 'result' in resp_json:
-            result = resp_json['result']
-            filled = result.get('cumExecQty') or result.get('execQty') or result.get('qty')
-            order_status = result.get('orderStatus')
-            log(f"[BYBIT ORDER RESULT] filled: {filled}, orderStatus: {order_status}, result: {result}")
-        return response
-
-    try:
-        response = _send_order(qty_str)
-        if response.status_code == 200 and response.json().get("retCode") == 0:
-            time.sleep(2)
-            qty_after = get_free_qty(symbol)
-            if not qty_after or qty_after == 0:
-                time.sleep(3)
-                qty_after = get_free_qty(symbol)
-
-            # Calcola la quantità richiesta in float
-            try:
-                qty_requested = float(qty_str)
-            except Exception:
-                qty_requested = None
-
-            # Se la quantità effettiva è molto inferiore a quella richiesta, logga e notifica
-            if qty_requested and qty_after < 0.8 * qty_requested:
-                log(f"⚠️ Quantità acquistata ({qty_after}) molto inferiore a quella richiesta ({qty_requested}) per {symbol}")
-                notify_telegram(f"⚠️ Ordine [SHORT] parzialmente eseguito per {symbol}: richiesto {qty_requested}, ottenuto {qty_after}")
-                # Tenta un solo riacquisto della differenza se supera i minimi
-                diff = qty_requested - qty_after
-                price2 = get_last_price(symbol)
-                if diff > min_qty and price2 and (diff * price2) > min_order_amt:
-                    diff_str = f"{diff:.{precision}f}".rstrip('0').rstrip('.')
-                    log(f"🔁 TENTO RIACQUISTO della differenza: {diff_str} {symbol}")
-                    response2 = _send_order(diff_str)
-                    if response2.status_code == 200 and response2.json().get("retCode") == 0:
-                        time.sleep(2)
-                        qty_final = get_free_qty(symbol)
-                        log(f"🟢 Acquisto finale per {symbol}: {qty_final}")
-                        return qty_final
-                    else:
-                        log(f"❌ Riacquisto fallito per {symbol}")
-                        return qty_after
-                else:
-                    log(f"❌ Differenza troppo piccola per riacquisto su {symbol}")
-                    return qty_after
-            if qty_after and qty_after > 0:
-                log(f"🟢 Acquisto registrato per {symbol}")
-                return qty_after
-            else:
-                log(f"⚠️ Acquisto riuscito ma saldo non aggiornato per {symbol}")
-        return None
-
-    except Exception as e:
-        log(f"❌ Errore invio ordine market per {symbol}: {e}")
         return None
 
 def market_short(symbol: str, usdt_amount: float):
@@ -533,6 +351,36 @@ def market_cover(symbol: str, qty: float):
         resp_json = {}
     log(f"RESPONSE: {response.status_code} {resp_json}")
     return response
+
+def fetch_history(symbol: str, interval=15, limit=100):
+    """
+    Scarica la cronologia dei prezzi per il simbolo dato da Bybit (linear/futures).
+    """
+    try:# ✅ ENTRATA SHORT
+        endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
+        params = {
+            "category": "linear",
+            "symbol": symbol,
+            "interval": str(interval),
+            "limit": limit
+        }
+        resp = requests.get(endpoint, params=params, timeout=10)
+        data = resp.json()
+        if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
+            log(f"[BYBIT] Errore fetch_history {symbol}: {data}")
+            return None
+        klines = data["result"]["list"]
+        # Bybit restituisce i dati dal più vecchio al più recente
+        df = pd.DataFrame(klines, columns=[
+            "timestamp", "Open", "High", "Low", "Close", "Volume", "Turnover"
+        ])
+        # Conversioni di tipo
+        for col in ["Open", "High", "Low", "Close", "Volume", "Turnover"]:
+            df[col] = df[col].astype(float)
+        return df
+    except Exception as e:
+        log(f"[BYBIT] Errore fetch_history {symbol}: {e}")
+        return None
 
 # 4. Inverti la logica di ingresso/uscita in analyze_asset
 # Esempio (solo la parte principale, da adattare):
@@ -911,15 +759,15 @@ while True:
             is_volatile = symbol in VOLATILE_ASSETS
             if is_volatile:
                 group_budget = volatile_budget
-                group_invested = volatile_investito
+                group_invested = volatile_invested
                 group_label = "VOLATILE"
             else:
                 group_budget = stable_budget
-                group_invested = stable_investito
+                group_invested = stable_invested
                 group_label = "MENO VOLATILE"
 
-            group_available = group_budget - group_investito
-            log(f"[BUDGET] {symbol} ({group_label}) - Budget gruppo: {group_budget:.2f}, Già investito: {group_investito:.2f}, Disponibile: {group_available:.2f}")
+            group_available = group_budget - group_invested
+            log(f"[BUDGET] {symbol} ({group_label}) - Budget gruppo: {group_budget:.2f}, Già investito: {group_invested:.2f}, Disponibile: {group_available:.2f}")
             if group_available < ORDER_USDT:
                 log(f"💸 Budget {group_label} insufficiente per {symbol} (disponibile: {group_available:.2f})")
                 continue
@@ -979,77 +827,6 @@ while True:
                 continue
 
             # Scegli la funzione di acquisto in base al prezzo della coin
-            last_price = get_last_price(symbol)
-            if last_price is None:
-                log(f"❌ Prezzo non disponibile per {symbol} (acquisto)")
-                continue
-            if last_price < 100:
-                # Coin piccole: usa market_buy (fallback con riacquisto differenza)
-                qty = market_buy(symbol, order_amount)
-                if not qty or qty == 0:
-                    log(f"❌ Nessuna quantità acquistata per {symbol} dopo MARKET BUY. Non registro la posizione.")
-                    continue
-                actual_cost = qty * last_price
-                log(f"🟢 Ordine MARKET piazzato per {symbol}. Attendi esecuzione. Investito effettivo: {actual_cost:.2f} USDT")
-            else:
-                # Coin grandi: usa limit_buy (come ora)
-                resp = limit_buy(symbol, order_amount)
-                if resp is None:
-                    log(f"❌ Acquisto LIMIT fallito per {symbol}")
-                    continue
-                log(f"🟢 Ordine LIMIT piazzato per {symbol}. Attendi esecuzione.")
-                time.sleep(2)
-                qty = get_free_qty(symbol)
-                if not qty or qty == 0:
-                    log(f"❌ Nessuna quantità acquistata per {symbol} dopo LIMIT BUY. Non registro la posizione.")
-                    continue
-                actual_cost = qty * last_price
-
-            df = fetch_history(symbol)
-            if df is None or "Close" not in df.columns:
-                log(f"❌ Dati storici mancanti per {symbol}")
-                continue
-
-
-            atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
-            last = df.iloc[-1]
-            atr_val = last["atr"] if "atr" in last else atr.iloc[-1]
-
-            # --- Adatta la distanza di SL/TP in base alla volatilità (ATR/Prezzo) e limiti consigliati ---
-            atr_ratio = atr_val / price if price > 0 else 0
-            tp_factor = min(TP_MAX, max(TP_MIN, TP_FACTOR + atr_ratio * 5))
-            sl_factor = min(SL_MAX, max(SL_MIN, SL_FACTOR + atr_ratio * 3))
-            tp = price + (atr_val * tp_factor)
-            sl = price - (atr_val * sl_factor)
-
-            # PATCH 1: SL deve essere almeno 1% sotto il prezzo di ingresso
-            min_sl = price * 0.99  # 1% sotto
-            if sl > min_sl:
-                log(f"[SL PATCH] SL troppo vicino al prezzo di ingresso ({sl:.4f} > {min_sl:.4f}), imposto SL a {min_sl:.4f}")
-                sl = min_sl
-
-            log(f"[VOLATILITÀ] {symbol}: ATR/Prezzo={atr_ratio:.2%}, TPx={tp_factor:.2f}, SLx={sl_factor:.2f}")
-            # PATCH 3: Log dettagliato su entry, SL e prezzo corrente subito dopo ogni acquisto
-            log(f"[ENTRY-DETAIL] {symbol} | Entry: {price:.4f} | SL: {sl:.4f} | TP: {tp:.4f} | ATR: {atr_val:.4f}")
-
-            # Take profit parziale: 40% posizione a 1.5x ATR, resto trailing
-            partial_tp_ratio = 0.4
-            qty_partial = qty * partial_tp_ratio
-            qty_residual = qty - qty_partial
-            tp_partial = price + (atr_val * 1.5)
-            position_data[symbol] = {
-                "entry_price": price,
-                "tp": tp,
-                "sl": sl,
-                "entry_cost": actual_cost,
-                "qty": qty,
-                "qty_partial": qty_partial,
-                "qty_residual": qty_residual,
-                "tp_partial": tp_partial,
-                "entry_time": time.time(),
-                "trailing_active": False,
-                "p_max": price
-            }
 
             open_positions.add(symbol)
             log(f"🟢 Acquisto registrato per {symbol} | Entry: {price:.4f} | TP: {tp:.4f} | SL: {sl:.4f} | TP parziale su {qty_partial:.4f} a {tp_partial:.4f}")
@@ -1077,15 +854,136 @@ while True:
             is_volatile = symbol in VOLATILE_ASSETS
             if is_volatile:
                 group_budget = volatile_budget
-                group_invested = volatile_investito
+                group_invested = volatile_invested
                 group_label = "VOLATILE"
             else:
                 group_budget = stable_budget
-                group_invested = stable_investito
+                group_invested = stable_invested
                 group_label = "MENO VOLATILE"
 
-            group_available = group_budget - group_investito
-            log(f"[BUDGET] {symbol} ({group_label}) - Budget gruppo: {group_budget:.2f}, Già investito: {group_investito:.2f}, Disponibile: {group_available:.2f}")
+            group_available = group_budget - group_invested
+            log(f"[BUDGET] {symbol} ({group_label}) - Budget gruppo: {group_budget:.2f}, Già investito: {group_invested:.2f}, Disponibile: {group_available:.2f}")
+            if group_available < ORDER_USDT:
+                log(f"💸 Budget {group_label} insufficiente per {symbol} (disponibile: {group_available:.2f})")
+                continue
+
+            # 📊 Valuta la forza del segnale in base alla strategia
+            strategy_strength = {
+                "Breakout Bollinger": 1.0,
+                "MACD bullish + ADX": 0.9,
+                "Incrocio SMA 20/50": 0.75,
+                "Incrocio EMA 20/50": 0.7,
+                "MACD bullish (stabile)": 0.65,
+                "Trend EMA + RSI": 0.6
+            }
+            strength = strategy_strength.get(strategy, 0.5)  # default prudente
+
+            # --- Adatta la size ordine in base alla volatilità (ATR/Prezzo) ---
+            df_hist = fetch_history(symbol)
+            if df_hist is not None and "atr" in df_hist.columns and "Close" in df_hist.columns:
+                last_hist = df_hist.iloc[-1]
+                atr_val = last_hist["atr"]
+                last_price = last_hist["Close"]
+                atr_ratio = atr_val / last_price if last_price > 0 else 0
+                # Se la volatilità è molto alta, riduci la size ordine
+                if atr_ratio > 0.08:
+                    strength *= 0.5
+                    log(f"[VOLATILITÀ] {symbol}: ATR/Prezzo molto alto ({atr_ratio:.2%}), size ordine dimezzata.")
+                elif atr_ratio > 0.04:
+                    strength *= 0.75
+                    log(f"[VOLATILITÀ] {symbol}: ATR/Prezzo elevato ({atr_ratio:.2%}), size ordine ridotta del 25%.")
+
+            max_invest = min(group_available, usdt_balance) * strength
+            order_amount = min(max_invest, group_available, usdt_balance, 250)
+            log(f"[FORZA] {symbol} - Strategia: {strategy}, Strength: {strength}, Investo: {order_amount:.2f} USDT (Saldo: {usdt_balance:.2f})")
+
+            # BLOCCO: non tentare short se order_amount < min_order_amt
+            min_order_amt = get_instrument_info(symbol).get("min_order_amt", 5)
+            if order_amount < min_order_amt:
+                log(f"❌ Saldo troppo basso per aprire short su {symbol}: {order_amount:.2f} < min_order_amt {min_order_amt}")
+                if not low_balance_alerted:
+                    notify_telegram(f"❗️ Saldo USDT troppo basso per nuovi short. Ricarica il wallet per continuare a operare.")
+                    low_balance_alerted = True
+                continue
+            else:
+                low_balance_alerted = False
+
+            # Logga la quantità calcolata PRIMA dell'apertura short
+            qty_str = calculate_quantity(symbol, order_amount)
+            log(f"[DEBUG-ENTRY] Quantità calcolata per {symbol} con {order_amount:.2f} USDT: {qty_str}")
+            if not qty_str:
+                log(f"❌ Quantità non valida per short di {symbol}")
+                continue
+
+            if TEST_MODE:
+                log(f"[TEST_MODE] SHORT inibiti per {symbol}")
+                continue
+
+            # APERTURA SHORT
+            qty = market_short(symbol, order_amount)
+            if not qty or qty == 0:
+                log(f"❌ Nessuna quantità shortata per {symbol}. Non registro la posizione.")
+                continue
+            actual_cost = qty * get_last_price(symbol)
+            log(f"🟢 SHORT aperto per {symbol}. Investito effettivo: {actual_cost:.2f} USDT")
+
+            # Calcolo ATR, SL, TP per SHORT
+            df = fetch_history(symbol)
+            if df is None or "Close" not in df.columns:
+                log(f"❌ Dati storici mancanti per {symbol}")
+                continue
+            atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
+            last = df.iloc[-1]
+            atr_val = last["atr"] if "atr" in last else atr.iloc[-1]
+            atr_ratio = atr_val / get_last_price(symbol) if get_last_price(symbol) > 0 else 0
+            tp_factor = min(TP_MAX, max(TP_MIN, TP_FACTOR + atr_ratio * 5))
+            sl_factor = min(SL_MAX, max(SL_MIN, SL_FACTOR + atr_ratio * 3))
+            tp = get_last_price(symbol) - (atr_val * tp_factor)  # TP SOTTO ENTRY
+            sl = get_last_price(symbol) + (atr_val * sl_factor)  # SL SOPRA ENTRY
+            min_sl = get_last_price(symbol) * 1.01  # SL almeno 1% SOPRA entry
+            if sl < min_sl:
+                log(f"[SL PATCH] SL troppo vicino al prezzo di ingresso ({sl:.4f} < {min_sl:.4f}), imposto SL a {min_sl:.4f}")
+                sl = min_sl
+
+            log(f"[ENTRY-DETAIL] {symbol} | Entry: {get_last_price(symbol):.4f} | SL: {sl:.4f} | TP: {tp:.4f} | ATR: {atr_val:.4f}")
+
+            position_data[symbol] = {
+                "entry_price": get_last_price(symbol),
+                "tp": tp,
+                "sl": sl,
+                "entry_cost": actual_cost,
+                "qty": qty,
+                "entry_time": time.time(),
+                "trailing_active": False,
+                "p_min": get_last_price(symbol)  # p_min per trailing SHORT
+            }
+            open_positions.add(symbol)
+            notify_telegram(f"🟢📉 SHORT aperto per {symbol}\nPrezzo: {get_last_price(symbol):.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f} USDT\nSL: {sl:.4f}\nTP: {tp:.4f}")
+            time.sleep(3)
+            # Cooldown
+            if symbol in last_exit_time:
+                elapsed = time.time() - last_exit_time[symbol]
+                if elapsed < COOLDOWN_MINUTES * 60:
+                    log(f"⏳ Cooldown attivo per {symbol} ({elapsed:.0f}s), salto ingresso")
+                    continue
+
+            if symbol in open_positions:
+                log(f"⏩ Ignoro apertura short: già in posizione su {symbol}")
+                continue
+
+            # --- LOGICA 70/30: verifica budget disponibile ---
+            is_volatile = symbol in VOLATILE_ASSETS
+            if is_volatile:
+                group_budget = volatile_budget
+                group_invested = volatile_invested
+                group_label = "VOLATILE"
+            else:
+                group_budget = stable_budget
+                group_invested = stable_invested
+                group_label = "MENO VOLATILE"
+
+            group_available = group_budget - group_invested
+            log(f"[BUDGET] {symbol} ({group_label}) - Budget gruppo: {group_budget:.2f}, Già investito: {group_invested:.2f}, Disponibile: {group_available:.2f}")
             if group_available < ORDER_USDT:
                 log(f"💸 Budget {group_label} insufficiente per {symbol} (disponibile: {group_available:.2f})")
                 continue
