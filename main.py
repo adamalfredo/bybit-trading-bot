@@ -1173,6 +1173,8 @@ while True:
             usdt_before = get_usdt_balance()
             resp = market_sell(symbol, qty)
             if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+                # PATCH: aggiorna il prezzo con quello effettivo di vendita
+                price = get_last_price(symbol)
                 price = round(price, 6)
                 exit_value = price * qty
                 delta = exit_value - entry_cost
