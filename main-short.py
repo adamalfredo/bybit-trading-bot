@@ -382,6 +382,15 @@ def fetch_history(symbol: str, interval=15, limit=100):
         log(f"[BYBIT] Errore fetch_history {symbol}: {e}")
         return None
 
+def find_close_column(df):
+    """
+    Restituisce la colonna 'Close' se presente, altrimenti None.
+    """
+    for col in df.columns:
+        if col.lower() == "close":
+            return df[col]
+    return None
+
 # 4. Inverti la logica di ingresso/uscita in analyze_asset
 # Esempio (solo la parte principale, da adattare):
 def analyze_asset(symbol: str):
