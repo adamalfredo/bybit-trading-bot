@@ -661,57 +661,57 @@ def analyze_asset(symbol: str):
         # --- Nuova logica: almeno 2 condizioni di ingresso devono essere vere ---
         entry_conditions = []
         entry_strategies = []
-        # Log dettagliato per ogni condizione
+        # STRATEGIA AGGRESSIVA: basta UNA qualsiasi condizione elementare per generare entry
         if is_volatile:
-            # Condizioni per asset volatili
-            cond1 = last["Close"] >= last["bb_upper"] * 0.995  # PATCH: più permissivo
-            cond2 = last["rsi"] < 75  # PATCH: più permissivo
-            if cond1 and cond2:
+            # Condizioni per asset volatili (ognuna può scatenare un entry)
+            cond1 = last["Close"] >= last["bb_upper"] * 0.995
+            if cond1:
                 entry_conditions.append(True)
                 entry_strategies.append("Breakout Bollinger")
-            else:
-                log(f"[STRATEGY][{symbol}] Condizione Breakout Bollinger: Close={last['Close']:.4f} >= bb_upper*0.995={last['bb_upper']*0.995:.4f} = {cond1}, RSI={last['rsi']:.2f} < 75 = {cond2}")
+            cond2 = last["rsi"] < 80  # ancora più permissivo
+            if cond2:
+                entry_conditions.append(True)
+                entry_strategies.append("RSI basso")
             cond3 = prev["sma20"] < prev["sma50"]
             cond4 = last["sma20"] > last["sma50"]
             if cond3 and cond4:
                 entry_conditions.append(True)
                 entry_strategies.append("Incrocio SMA 20/50")
-            else:
-                log(f"[STRATEGY][{symbol}] Condizione Incrocio SMA 20/50: prev_sma20={prev['sma20']:.4f} < prev_sma50={prev['sma50']:.4f} = {cond3}, last_sma20={last['sma20']:.4f} > last_sma50={last['sma50']:.4f} = {cond4}")
             cond5 = last["macd"] > last["macd_signal"]
-            cond6 = last["adx"] >= adx_threshold - 2  # PATCH: più permissivo
-            if cond5 and cond6:
+            if cond5:
                 entry_conditions.append(True)
-                entry_strategies.append("MACD bullish + ADX")
-            else:
-                log(f"[STRATEGY][{symbol}] Condizione MACD bullish + ADX: macd={last['macd']:.4f} > macd_signal={last['macd_signal']:.4f} = {cond5}, adx={last['adx']:.2f} >= soglia-2={adx_threshold-2} = {cond6}")
+                entry_strategies.append("MACD bullish")
+            cond6 = last["adx"] >= adx_threshold - 5  # molto permissivo
+            if cond6:
+                entry_conditions.append(True)
+                entry_strategies.append("ADX forte")
         else:
-            # Condizioni per asset stabili
+            # Condizioni per asset stabili (ognuna può scatenare un entry)
             cond1 = prev["ema20"] < prev["ema50"]
             cond2 = last["ema20"] > last["ema50"]
             if cond1 and cond2:
                 entry_conditions.append(True)
                 entry_strategies.append("Incrocio EMA 20/50")
-            else:
-                log(f"[STRATEGY][{symbol}] Condizione Incrocio EMA 20/50: prev_ema20={prev['ema20']:.4f} < prev_ema50={prev['ema50']:.4f} = {cond1}, last_ema20={last['ema20']:.4f} > last_ema50={last['ema50']:.4f} = {cond2}")
             cond3 = last["macd"] > last["macd_signal"]
-            cond4 = last["adx"] >= adx_threshold - 2  # PATCH: più permissivo
-            if cond3 and cond4:
+            if cond3:
                 entry_conditions.append(True)
-                entry_strategies.append("MACD bullish (stabile)")
-            else:
-                log(f"[STRATEGY][{symbol}] Condizione MACD bullish (stabile): macd={last['macd']:.4f} > macd_signal={last['macd_signal']:.4f} = {cond3}, adx={last['adx']:.2f} >= soglia-2={adx_threshold-2} = {cond4}")
-            cond5 = last["rsi"] > 45  # PATCH: più permissivo
+                entry_strategies.append("MACD bullish")
+            cond4 = last["adx"] >= adx_threshold - 5
+            if cond4:
+                entry_conditions.append(True)
+                entry_strategies.append("ADX forte")
+            cond5 = last["rsi"] > 40  # ancora più permissivo
+            if cond5:
+                entry_conditions.append(True)
+                entry_strategies.append("RSI alto")
             cond6 = last["ema20"] > last["ema50"]
-            if cond5 and cond6:
+            if cond6:
                 entry_conditions.append(True)
-                entry_strategies.append("Trend EMA + RSI")
-            else:
-                log(f"[STRATEGY][{symbol}] Condizione Trend EMA + RSI: rsi={last['rsi']:.2f} > 45 = {cond5}, ema20={last['ema20']:.4f} > ema50={last['ema50']:.4f} = {cond6}")
+                entry_strategies.append("EMA20 sopra EMA50")
 
-        # PATCH: ora basta almeno 1 condizione per generare un segnale ENTRY
+        # Ora basta almeno 1 condizione elementare per generare entry
         if len(entry_conditions) >= 1:
-            log(f"[STRATEGY][{symbol}] Segnale ENTRY generato: strategie attive: {entry_strategies}")
+            log(f"[STRATEGY][{symbol}] Segnale ENTRY AGGRESSIVO generato: strategie attive: {entry_strategies}")
             return "entry", ", ".join(entry_strategies), price
         else:
             log(f"[STRATEGY][{symbol}] Nessun segnale ENTRY: condizioni soddisfatte = {len(entry_conditions)}")
