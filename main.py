@@ -558,7 +558,7 @@ def fetch_history(symbol: str):
     try:
         resp = requests.get(endpoint, params=params, timeout=10)
         # Logga la risposta grezza per debug
-        log(f"[KLINE-RAW] {symbol} | status={resp.status_code} | text={resp.text[:300]}")
+        # log(f"[KLINE-RAW] {symbol} | status={resp.status_code} | text={resp.text[:300]}")
         data = resp.json()
         if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
             log(f"[!] Errore Kline per {symbol}: {data}")
@@ -573,12 +573,12 @@ def fetch_history(symbol: str):
         for col in ["Open", "High", "Low", "Close", "Volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         # Log delle prime 5 righe e conteggio NaN
-        log(f"[KLINE-DF] {symbol} | head:\n{df.head(5)}")
-        log(f"[KLINE-DF] {symbol} | NaN per colonna: {df.isna().sum().to_dict()}")
+        # log(f"[KLINE-DF] {symbol} | head:\n{df.head(5)}")
+        # log(f"[KLINE-DF] {symbol} | NaN per colonna: {df.isna().sum().to_dict()}")
         # Logga le righe con almeno un NaN nelle colonne chiave
         nan_rows = df[df[["Open", "High", "Low", "Close", "Volume"]].isna().any(axis=1)]
-        if not nan_rows.empty:
-            log(f"[KLINE-DF] {symbol} | Righe con NaN:\n{nan_rows.head(5)}")
+        # if not nan_rows.empty:
+        #     log(f"[KLINE-DF] {symbol} | Righe con NaN:\n{nan_rows.head(5)}")
         return df
     except Exception as e:
         log(f"[!] Errore richiesta Kline per {symbol}: {e}")
@@ -597,9 +597,9 @@ def analyze_asset(symbol: str):
             log(f"[ANALYZE] Dati storici insufficienti per {symbol} (df is None o len < 3)")
             return None, None, None
         # Log approfondito prima del dropna
-        log(f"[ANALYZE-DF] {symbol} | Prima del dropna, len={len(df)}")
-        log(f"[ANALYZE-DF] {symbol} | head:\n{df.head(5)}")
-        log(f"[ANALYZE-DF] {symbol} | NaN per colonna: {df.isna().sum().to_dict()}")
+        # log(f"[ANALYZE-DF] {symbol} | Prima del dropna, len={len(df)}")
+        # log(f"[ANALYZE-DF] {symbol} | head:\n{df.head(5)}")
+        # log(f"[ANALYZE-DF] {symbol} | NaN per colonna: {df.isna().sum().to_dict()}")
         close = find_close_column(df)
         if close is None:
             log(f"[ANALYZE] Colonna close non trovata per {symbol}")
@@ -627,8 +627,8 @@ def analyze_asset(symbol: str):
         ], inplace=True)
         # Log dopo il dropna
         log(f"[ANALYZE-DF] {symbol} | Dopo dropna, len={len(df)}")
-        log(f"[ANALYZE-DF] {symbol} | head:\n{df.head(5)}")
-        log(f"[ANALYZE-DF] {symbol} | NaN per colonna: {df.isna().sum().to_dict()}")
+        # log(f"[ANALYZE-DF] {symbol} | head:\n{df.head(5)}")
+        # log(f"[ANALYZE-DF] {symbol} | NaN per colonna: {df.isna().sum().to_dict()}")
 
         if len(df) < 3:
             # Logga anche la quantità di NaN per colonna PRIMA del dropna
@@ -1110,7 +1110,16 @@ while True:
             sl_factor = min(SL_MAX, max(SL_MIN, SL_FACTOR + atr_ratio * 3))
             tp = price + (atr_val * tp_factor)
             sl = price - (atr_val * sl_factor)
+
+            # PATCH 1: SL deve essere almeno 1% sotto il prezzo di ingresso
+            min_sl = price * 0.99  # 1% sotto
+            if sl > min_sl:
+                log(f"[SL PATCH] SL troppo vicino al prezzo di ingresso ({sl:.4f} > {min_sl:.4f}), imposto SL a {min_sl:.4f}")
+                sl = min_sl
+
             log(f"[VOLATILITÀ] {symbol}: ATR/Prezzo={atr_ratio:.2%}, TPx={tp_factor:.2f}, SLx={sl_factor:.2f}")
+            # PATCH 3: Log dettagliato su entry, SL e prezzo corrente subito dopo ogni acquisto
+            log(f"[ENTRY-DETAIL] {symbol} | Entry: {price:.4f} | SL: {sl:.4f} | TP: {tp:.4f} | ATR: {atr_val:.4f}")
 
             # Take profit parziale: 40% posizione a 1.5x ATR, resto trailing
             partial_tp_ratio = 0.4
@@ -1135,9 +1144,9 @@ while True:
             log(f"🟢 Acquisto registrato per {symbol} | Entry: {price:.4f} | TP: {tp:.4f} | SL: {sl:.4f} | TP parziale su {qty_partial:.4f} a {tp_partial:.4f}")
             # Notifica con importo effettivo investito per market_buy, altrimenti usa order_amount
             if last_price < 100:
-                notify_telegram(f"🟢📈 Acquisto per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f} USDT")
+                notify_telegram(f"🟢📈 Acquisto per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f} USDT\nSL: {sl:.4f}\nTP: {tp:.4f}")
             else:
-                notify_telegram(f"🟢📈 Acquisto per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}\nInvestito: {order_amount:.2f} USDT")
+                notify_telegram(f"🟢📈 Acquisto per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}\nInvestito: {order_amount:.2f} USDT\nSL: {sl:.4f}\nTP: {tp:.4f}")
             time.sleep(3)
 
     # PATCH: rimuovi posizioni con saldo < 1 (polvere) anche nel ciclo principale
@@ -1149,9 +1158,14 @@ while True:
             position_data.pop(symbol, None)
             continue
 
+        entry = position_data.get(symbol, {})
+        holding_seconds = time.time() - entry.get("entry_time", 0)
+        if holding_seconds < MIN_HOLDING_MINUTES * 60:
+            log(f"[HOLDING][EXIT] {symbol}: attendo ancora {MIN_HOLDING_MINUTES - holding_seconds/60:.1f} min prima di poter vendere")
+            continue
+
         # 🔴 USCITA (EXIT)
         elif signal == "exit" and symbol in open_positions:
-            entry = position_data.get(symbol, {})
             entry_price = entry.get("entry_price", price)
             entry_cost = entry.get("entry_cost", ORDER_USDT)
             qty = entry.get("qty", get_free_qty(symbol))
@@ -1194,7 +1208,7 @@ while True:
         # Calcola da quanto tempo la posizione è aperta
         holding_seconds = time.time() - entry.get("entry_time", 0)
         if holding_seconds < MIN_HOLDING_MINUTES * 60:
-            log(f"[HOLDING] {symbol}: attendo ancora {MIN_HOLDING_MINUTES - holding_seconds/60:.1f} min prima di attivare SL/TSL")
+            log(f"[HOLDING][TRAILING/SL] {symbol}: attendo ancora {MIN_HOLDING_MINUTES - holding_seconds/60:.1f} min prima di attivare SL/TSL")
             continue
         current_price = get_last_price(symbol)
         if not current_price:
