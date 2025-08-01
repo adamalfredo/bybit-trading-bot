@@ -352,7 +352,7 @@ def market_cover(symbol: str, qty: float):
     log(f"RESPONSE: {response.status_code} {resp_json}")
     return response
 
-def fetch_history(symbol: str, interval=15, limit=100):
+def fetch_history(symbol: str, interval=15, limit=300):  # <-- aumenta il limit
     """
     Scarica la cronologia dei prezzi per il simbolo dato da Bybit (linear/futures).
     """
@@ -545,8 +545,11 @@ def sync_positions_from_wallet():
                     atr_val = price * 0.02
             else:
                 atr_val = price * 0.02
-            tp = price + (atr_val * TP_FACTOR)
-            sl = price - (atr_val * SL_FACTOR)
+            tp = price - (atr_val * TP_FACTOR)  # TP sotto entry per short
+            sl = price + (atr_val * SL_FACTOR)  # SL sopra entry per short
+            min_sl = price * 1.01
+            if sl < min_sl:
+                sl = min_sl
             position_data[symbol] = {
                 "entry_price": entry_price,
                 "tp": tp,
@@ -744,6 +747,9 @@ while True:
     for symbol in ASSETS:
         if symbol in STABLECOIN_BLACKLIST:
             continue
+        if not is_symbol_linear(symbol):
+            log(f"[SKIP] {symbol} non disponibile su futures linear, salto.")
+            continue
         signal, strategy, price = analyze_asset(symbol)
         log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
 
@@ -848,127 +854,6 @@ while True:
 
         # ✅ ENTRATA SHORT
         if signal == "entry":
-            # Cooldown
-            if symbol in last_exit_time:
-                elapsed = time.time() - last_exit_time[symbol]
-                if elapsed < COOLDOWN_MINUTES * 60:
-                    log(f"⏳ Cooldown attivo per {symbol} ({elapsed:.0f}s), salto ingresso")
-                    continue
-
-            if symbol in open_positions:
-                log(f"⏩ Ignoro apertura short: già in posizione su {symbol}")
-                continue
-
-            # --- LOGICA 70/30: verifica budget disponibile ---
-            is_volatile = symbol in VOLATILE_ASSETS
-            if is_volatile:
-                group_budget = volatile_budget
-                group_invested = volatile_invested
-                group_label = "VOLATILE"
-            else:
-                group_budget = stable_budget
-                group_invested = stable_invested
-                group_label = "MENO VOLATILE"
-
-            group_available = group_budget - group_invested
-            log(f"[BUDGET] {symbol} ({group_label}) - Budget gruppo: {group_budget:.2f}, Già investito: {group_invested:.2f}, Disponibile: {group_available:.2f}")
-            if group_available < ORDER_USDT:
-                log(f"💸 Budget {group_label} insufficiente per {symbol} (disponibile: {group_available:.2f})")
-                continue
-
-            # 📊 Valuta la forza del segnale in base alla strategia
-            strategy_strength = {
-                "Breakout Bollinger": 1.0,
-                "MACD bullish + ADX": 0.9,
-                "Incrocio SMA 20/50": 0.75,
-                "Incrocio EMA 20/50": 0.7,
-                "MACD bullish (stabile)": 0.65,
-                "Trend EMA + RSI": 0.6
-            }
-            strength = strategy_strength.get(strategy, 0.5)  # default prudente
-
-            # --- Adatta la size ordine in base alla volatilità (ATR/Prezzo) ---
-            df_hist = fetch_history(symbol)
-            if df_hist is not None and "atr" in df_hist.columns and "Close" in df_hist.columns:
-                last_hist = df_hist.iloc[-1]
-                atr_val = last_hist["atr"]
-                last_price = last_hist["Close"]
-                atr_ratio = atr_val / last_price if last_price > 0 else 0
-                # Se la volatilità è molto alta, riduci la size ordine
-                if atr_ratio > 0.08:
-                    strength *= 0.5
-                    log(f"[VOLATILITÀ] {symbol}: ATR/Prezzo molto alto ({atr_ratio:.2%}), size ordine dimezzata.")
-                elif atr_ratio > 0.04:
-                    strength *= 0.75
-                    log(f"[VOLATILITÀ] {symbol}: ATR/Prezzo elevato ({atr_ratio:.2%}), size ordine ridotta del 25%.")
-
-            max_invest = min(group_available, usdt_balance) * strength
-            order_amount = min(max_invest, group_available, usdt_balance, 250)
-            log(f"[FORZA] {symbol} - Strategia: {strategy}, Strength: {strength}, Investo: {order_amount:.2f} USDT (Saldo: {usdt_balance:.2f})")
-
-            # BLOCCO: non tentare short se order_amount < min_order_amt
-            min_order_amt = get_instrument_info(symbol).get("min_order_amt", 5)
-            if order_amount < min_order_amt:
-                log(f"❌ Saldo troppo basso per aprire short su {symbol}: {order_amount:.2f} < min_order_amt {min_order_amt}")
-                if not low_balance_alerted:
-                    notify_telegram(f"❗️ Saldo USDT troppo basso per nuovi short. Ricarica il wallet per continuare a operare.")
-                    low_balance_alerted = True
-                continue
-            else:
-                low_balance_alerted = False
-
-            # Logga la quantità calcolata PRIMA dell'apertura short
-            qty_str = calculate_quantity(symbol, order_amount)
-            log(f"[DEBUG-ENTRY] Quantità calcolata per {symbol} con {order_amount:.2f} USDT: {qty_str}")
-            if not qty_str:
-                log(f"❌ Quantità non valida per short di {symbol}")
-                continue
-
-            if TEST_MODE:
-                log(f"[TEST_MODE] SHORT inibiti per {symbol}")
-                continue
-
-            # APERTURA SHORT
-            qty = market_short(symbol, order_amount)
-            if not qty or qty == 0:
-                log(f"❌ Nessuna quantità shortata per {symbol}. Non registro la posizione.")
-                continue
-            actual_cost = qty * get_last_price(symbol)
-            log(f"🟢 SHORT aperto per {symbol}. Investito effettivo: {actual_cost:.2f} USDT")
-
-            # Calcolo ATR, SL, TP per SHORT
-            df = fetch_history(symbol)
-            if df is None or "Close" not in df.columns:
-                log(f"❌ Dati storici mancanti per {symbol}")
-                continue
-            atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
-            last = df.iloc[-1]
-            atr_val = last["atr"] if "atr" in last else atr.iloc[-1]
-            atr_ratio = atr_val / get_last_price(symbol) if get_last_price(symbol) > 0 else 0
-            tp_factor = min(TP_MAX, max(TP_MIN, TP_FACTOR + atr_ratio * 5))
-            sl_factor = min(SL_MAX, max(SL_MIN, SL_FACTOR + atr_ratio * 3))
-            tp = get_last_price(symbol) - (atr_val * tp_factor)  # TP SOTTO ENTRY
-            sl = get_last_price(symbol) + (atr_val * sl_factor)  # SL SOPRA ENTRY
-            min_sl = get_last_price(symbol) * 1.01  # SL almeno 1% SOPRA entry
-            if sl < min_sl:
-                log(f"[SL PATCH] SL troppo vicino al prezzo di ingresso ({sl:.4f} < {min_sl:.4f}), imposto SL a {min_sl:.4f}")
-                sl = min_sl
-
-            log(f"[ENTRY-DETAIL] {symbol} | Entry: {get_last_price(symbol):.4f} | SL: {sl:.4f} | TP: {tp:.4f} | ATR: {atr_val:.4f}")
-
-            position_data[symbol] = {
-                "entry_price": get_last_price(symbol),
-                "tp": tp,
-                "sl": sl,
-                "entry_cost": actual_cost,
-                "qty": qty,
-                "entry_time": time.time(),
-                "trailing_active": False,
-                "p_min": get_last_price(symbol)  # p_min per trailing SHORT
-            }
-            open_positions.add(symbol)
-            notify_telegram(f"🟢📉 SHORT aperto per {symbol}\nPrezzo: {get_last_price(symbol):.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f} USDT\nSL: {sl:.4f}\nTP: {tp:.4f}")
-            time.sleep(3)
             # Cooldown
             if symbol in last_exit_time:
                 elapsed = time.time() - last_exit_time[symbol]
