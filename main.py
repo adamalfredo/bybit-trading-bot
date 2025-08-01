@@ -661,57 +661,56 @@ def analyze_asset(symbol: str):
         # --- Nuova logica: almeno 2 condizioni di ingresso devono essere vere ---
         entry_conditions = []
         entry_strategies = []
-        # STRATEGIA AGGRESSIVA: basta UNA qualsiasi condizione elementare per generare entry
+        # Log dettagliato per ogni condizione
         if is_volatile:
-            # Condizioni per asset volatili (ognuna può scatenare un entry)
-            cond1 = last["Close"] >= last["bb_upper"] * 0.995
-            if cond1:
+            # Condizioni per asset volatili
+            cond1 = last["Close"] > last["bb_upper"]
+            cond2 = last["rsi"] < 70
+            if cond1 and cond2:
                 entry_conditions.append(True)
                 entry_strategies.append("Breakout Bollinger")
-            cond2 = last["rsi"] < 80  # ancora più permissivo
-            if cond2:
-                entry_conditions.append(True)
-                entry_strategies.append("RSI basso")
+            else:
+                log(f"[STRATEGY][{symbol}] Condizione Breakout Bollinger: Close={last['Close']:.4f} > bb_upper={last['bb_upper']:.4f} = {cond1}, RSI={last['rsi']:.2f} < 70 = {cond2}")
             cond3 = prev["sma20"] < prev["sma50"]
             cond4 = last["sma20"] > last["sma50"]
             if cond3 and cond4:
                 entry_conditions.append(True)
                 entry_strategies.append("Incrocio SMA 20/50")
+            else:
+                log(f"[STRATEGY][{symbol}] Condizione Incrocio SMA 20/50: prev_sma20={prev['sma20']:.4f} < prev_sma50={prev['sma50']:.4f} = {cond3}, last_sma20={last['sma20']:.4f} > last_sma50={last['sma50']:.4f} = {cond4}")
             cond5 = last["macd"] > last["macd_signal"]
-            if cond5:
+            cond6 = last["adx"] > adx_threshold
+            if cond5 and cond6:
                 entry_conditions.append(True)
-                entry_strategies.append("MACD bullish")
-            cond6 = last["adx"] >= adx_threshold - 5  # molto permissivo
-            if cond6:
-                entry_conditions.append(True)
-                entry_strategies.append("ADX forte")
+                entry_strategies.append("MACD bullish + ADX")
+            else:
+                log(f"[STRATEGY][{symbol}] Condizione MACD bullish + ADX: macd={last['macd']:.4f} > macd_signal={last['macd_signal']:.4f} = {cond5}, adx={last['adx']:.2f} > soglia={adx_threshold} = {cond6}")
         else:
-            # Condizioni per asset stabili (ognuna può scatenare un entry)
+            # Condizioni per asset stabili
             cond1 = prev["ema20"] < prev["ema50"]
             cond2 = last["ema20"] > last["ema50"]
             if cond1 and cond2:
                 entry_conditions.append(True)
                 entry_strategies.append("Incrocio EMA 20/50")
+            else:
+                log(f"[STRATEGY][{symbol}] Condizione Incrocio EMA 20/50: prev_ema20={prev['ema20']:.4f} < prev_ema50={prev['ema50']:.4f} = {cond1}, last_ema20={last['ema20']:.4f} > last_ema50={last['ema50']:.4f} = {cond2}")
             cond3 = last["macd"] > last["macd_signal"]
-            if cond3:
+            cond4 = last["adx"] > adx_threshold
+            if cond3 and cond4:
                 entry_conditions.append(True)
-                entry_strategies.append("MACD bullish")
-            cond4 = last["adx"] >= adx_threshold - 5
-            if cond4:
-                entry_conditions.append(True)
-                entry_strategies.append("ADX forte")
-            cond5 = last["rsi"] > 40  # ancora più permissivo
-            if cond5:
-                entry_conditions.append(True)
-                entry_strategies.append("RSI alto")
+                entry_strategies.append("MACD bullish (stabile)")
+            else:
+                log(f"[STRATEGY][{symbol}] Condizione MACD bullish (stabile): macd={last['macd']:.4f} > macd_signal={last['macd_signal']:.4f} = {cond3}, adx={last['adx']:.2f} > soglia={adx_threshold} = {cond4}")
+            cond5 = last["rsi"] > 50
             cond6 = last["ema20"] > last["ema50"]
-            if cond6:
+            if cond5 and cond6:
                 entry_conditions.append(True)
-                entry_strategies.append("EMA20 sopra EMA50")
+                entry_strategies.append("Trend EMA + RSI")
+            else:
+                log(f"[STRATEGY][{symbol}] Condizione Trend EMA + RSI: rsi={last['rsi']:.2f} > 50 = {cond5}, ema20={last['ema20']:.4f} > ema50={last['ema50']:.4f} = {cond6}")
 
-        # Ora basta almeno 1 condizione elementare per generare entry
-        if len(entry_conditions) >= 1:
-            log(f"[STRATEGY][{symbol}] Segnale ENTRY AGGRESSIVO generato: strategie attive: {entry_strategies}")
+        if len(entry_conditions) >= 2:
+            log(f"[STRATEGY][{symbol}] Segnale ENTRY generato: strategie attive: {entry_strategies}")
             return "entry", ", ".join(entry_strategies), price
         else:
             log(f"[STRATEGY][{symbol}] Nessun segnale ENTRY: condizioni soddisfatte = {len(entry_conditions)}")
@@ -984,15 +983,6 @@ while True:
         if signal is None or strategy is None or price is None:
             continue
 
-    # PATCH: rimuovi posizioni con saldo < 1 (polvere) anche nel ciclo principale
-    for symbol in list(open_positions):
-        saldo = get_free_qty(symbol)
-        if saldo is None or saldo < 1:
-            log(f"[CLEANUP] {symbol}: saldo troppo basso ({saldo}), rimuovo da open_positions e position_data (polvere)")
-            open_positions.discard(symbol)
-            position_data.pop(symbol, None)
-            continue
-
         # ✅ ENTRATA
         if signal == "entry":
             # Cooldown
@@ -1150,6 +1140,15 @@ while True:
                 notify_telegram(f"🟢📈 Acquisto per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}\nInvestito: {order_amount:.2f} USDT")
             time.sleep(3)
 
+    # PATCH: rimuovi posizioni con saldo < 1 (polvere) anche nel ciclo principale
+    for symbol in list(open_positions):
+        saldo = get_free_qty(symbol)
+        if saldo is None or saldo < 1:
+            log(f"[CLEANUP] {symbol}: saldo troppo basso ({saldo}), rimuovo da open_positions e position_data (polvere)")
+            open_positions.discard(symbol)
+            position_data.pop(symbol, None)
+            continue
+
         # 🔴 USCITA (EXIT)
         elif signal == "exit" and symbol in open_positions:
             entry = position_data.get(symbol, {})
@@ -1259,160 +1258,160 @@ while True:
     time.sleep(INTERVAL_MINUTES * 60)
 
 # --- FUNZIONE DI BACKTEST DELLA STRATEGIA ---
-import matplotlib.pyplot as plt
-def backtest_strategy(symbol, initial_balance=1000, fee_pct=0.001, start_idx=0, verbose=True):
-    """
-    Backtest della strategia su dati storici Bybit spot.
-    - symbol: simbolo (es. 'BTCUSDT')
-    - initial_balance: capitale iniziale in USDT
-    - fee_pct: commissione per trade (default 0.1%)
-    - start_idx: indice da cui partire (default 0, inizio dati)
-    """
-    df = fetch_history(symbol)
-    if df is None or len(df) < 50:
-        print(f"[BACKTEST] Dati insufficienti per {symbol}")
-        return
-    close = find_close_column(df)
-    if close is None:
-        print(f"[BACKTEST] Colonna close non trovata per {symbol}")
-        return
-    # Calcola indicatori richiesti
-    df["bb_upper"] = BollingerBands(close=close).bollinger_hband()
-    df["bb_lower"] = BollingerBands(close=close).bollinger_lband()
-    df["rsi"] = RSIIndicator(close=close).rsi()
-    df["sma20"] = SMAIndicator(close=close, window=20).sma_indicator()
-    df["sma50"] = SMAIndicator(close=close, window=50).sma_indicator()
-    df["ema20"] = EMAIndicator(close=close, window=20).ema_indicator()
-    df["ema50"] = EMAIndicator(close=close, window=50).ema_indicator()
-    df["ema200"] = EMAIndicator(close=close, window=200).ema_indicator()
-    macd = MACD(close=close)
-    df["macd"] = macd.macd()
-    df["macd_signal"] = macd.macd_signal()
-    df["adx"] = ADXIndicator(high=df["High"], low=df["Low"], close=close).adx()
-    atr = AverageTrueRange(high=df["High"], low=df["Low"], close=close, window=ATR_WINDOW)
-    df["atr"] = atr.average_true_range()
-    df = df.dropna().copy()
-    # Parametri
-    is_volatile = symbol in VOLATILE_ASSETS
-    adx_threshold = 20 if is_volatile else 15
-    # Stato
-    usdt = initial_balance
-    coin = 0
-    entry_price = 0
-    entry_idx = None
-    trade_log = []
-    equity_curve = []
-    max_equity = initial_balance
-    max_drawdown = 0
-    for i in range(start_idx+1, len(df)):
-        row = df.iloc[i]
-        prev = df.iloc[i-1]
-        price = float(row["Close"])
-        # --- Filtro trend di fondo ---
-        if row["ema50"] <= row["ema200"]:
-            equity_curve.append(usdt + coin * price)
-            continue
-        # --- Soglie dinamiche ---
-        atr_ratio = row["atr"] / price if price > 0 else 0
-        tp_dyn = min(TP_MAX, max(TP_MIN, TP_FACTOR + atr_ratio * 5))
-        sl_dyn = min(SL_MAX, max(SL_MIN, SL_FACTOR + atr_ratio * 3))
-        trailing_dyn = min(TRAILING_MAX, max(TRAILING_MIN, 0.005 + atr_ratio))
-        # --- Entry logic (almeno 2 condizioni) ---
-        entry_conditions = []
-        if is_volatile:
-            if row["Close"] > row["bb_upper"] and row["rsi"] < 70:
-                entry_conditions.append(True)
-            if prev["sma20"] < prev["sma50"] and row["sma20"] > row["sma50"]:
-                entry_conditions.append(True)
-            if row["macd"] > row["macd_signal"] and row["adx"] > adx_threshold:
-                entry_conditions.append(True)
-        else:
-            if prev["ema20"] < prev["ema50"] and row["ema20"] > row["ema50"]:
-                entry_conditions.append(True)
-            if row["macd"] > row["macd_signal"] and row["adx"] > adx_threshold:
-                entry_conditions.append(True)
-            if row["rsi"] > 50 and row["ema20"] > row["ema50"]:
-                entry_conditions.append(True)
-        # --- ENTRY ---
-        if coin == 0 and len(entry_conditions) >= 2:
-            # Compra tutto l'USDT
-            qty = usdt / price
-            entry_price = price
-            entry_idx = i
-            coin = qty * (1 - fee_pct)
-            usdt = 0
-            if verbose:
-                print(f"[BACKTEST][ENTRY] {df.index[i]}: BUY {qty:.4f} {symbol} @ {price:.4f}")
-            trade_log.append({"type": "buy", "price": price, "idx": i})
-        # --- EXIT ---
-        elif coin > 0:
-            exit_signal = False
-            reason = ""
-            # Take profit
-            if price >= entry_price + row["atr"] * tp_dyn:
-                exit_signal = True
-                reason = "TP"
-            # Stop loss
-            elif price <= entry_price - row["atr"] * sl_dyn:
-                exit_signal = True
-                reason = "SL"
-            # Exit signal
-            elif row["Close"] < row["bb_lower"] and row["rsi"] > 30:
-                exit_signal = True
-                reason = "RSI+BB"
-            elif row["macd"] < row["macd_signal"] and row["adx"] > adx_threshold:
-                exit_signal = True
-                reason = "MACD Bearish"
-            if exit_signal:
-                usdt = coin * price * (1 - fee_pct)
-                if verbose:
-                    print(f"[BACKTEST][EXIT] {df.index[i]}: SELL {coin:.4f} {symbol} @ {price:.4f} | Reason: {reason}")
-                trade_log.append({"type": "sell", "price": price, "idx": i, "reason": reason})
-                coin = 0
-                entry_price = 0
-                entry_idx = None
-        equity = usdt + coin * price
-        equity_curve.append(equity)
-        if equity > max_equity:
-            max_equity = equity
-        dd = (max_equity - equity) / max_equity
-        if dd > max_drawdown:
-            max_drawdown = dd
-    # --- Risultati ---
-    final_equity = usdt + coin * price
-    n_trades = len([t for t in trade_log if t["type"] == "buy"])
-    wins = 0
-    losses = 0
-    for j in range(1, len(trade_log)):
-        if trade_log[j]["type"] == "sell" and trade_log[j-1]["type"] == "buy":
-            pnl = (trade_log[j]["price"] - trade_log[j-1]["price"]) / trade_log[j-1]["price"]
-            if pnl > 0:
-                wins += 1
-            else:
-                losses += 1
-    winrate = wins / n_trades * 100 if n_trades > 0 else 0
-    print(f"\n[BACKTEST] {symbol} | Capitale iniziale: {initial_balance} USDT")
-    print(f"[BACKTEST] Capitale finale: {final_equity:.2f} USDT | PnL: {final_equity-initial_balance:.2f} USDT ({(final_equity/initial_balance-1)*100:.2f}%)")
-    print(f"[BACKTEST] Numero trade: {n_trades} | Win rate: {winrate:.1f}% | Max drawdown: {max_drawdown*100:.2f}%")
-    if n_trades > 0:
-        print(f"[BACKTEST] Trade vincenti: {wins} | Perdenti: {losses}")
-    # Plot equity curve
-    plt.figure(figsize=(10,4))
-    plt.plot(equity_curve, label="Equity")
-    plt.title(f"Backtest {symbol}")
-    plt.xlabel("Step")
-    plt.ylabel("USDT")
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-    return {
-        "final_equity": final_equity,
-        "n_trades": n_trades,
-        "winrate": winrate,
-        "max_drawdown": max_drawdown,
-        "trade_log": trade_log,
-        "equity_curve": equity_curve
-    }
+# import matplotlib.pyplot as plt
+# def backtest_strategy(symbol, initial_balance=1000, fee_pct=0.001, start_idx=0, verbose=True):
+#     """
+#     Backtest della strategia su dati storici Bybit spot.
+#     - symbol: simbolo (es. 'BTCUSDT')
+#     - initial_balance: capitale iniziale in USDT
+#     - fee_pct: commissione per trade (default 0.1%)
+#     - start_idx: indice da cui partire (default 0, inizio dati)
+#     """
+#     df = fetch_history(symbol)
+#     if df is None or len(df) < 50:
+#         print(f"[BACKTEST] Dati insufficienti per {symbol}")
+#         return
+#     close = find_close_column(df)
+#     if close is None:
+#         print(f"[BACKTEST] Colonna close non trovata per {symbol}")
+#         return
+#     # Calcola indicatori richiesti
+#     df["bb_upper"] = BollingerBands(close=close).bollinger_hband()
+#     df["bb_lower"] = BollingerBands(close=close).bollinger_lband()
+#     df["rsi"] = RSIIndicator(close=close).rsi()
+#     df["sma20"] = SMAIndicator(close=close, window=20).sma_indicator()
+#     df["sma50"] = SMAIndicator(close=close, window=50).sma_indicator()
+#     df["ema20"] = EMAIndicator(close=close, window=20).ema_indicator()
+#     df["ema50"] = EMAIndicator(close=close, window=50).ema_indicator()
+#     df["ema200"] = EMAIndicator(close=close, window=200).ema_indicator()
+#     macd = MACD(close=close)
+#     df["macd"] = macd.macd()
+#     df["macd_signal"] = macd.macd_signal()
+#     df["adx"] = ADXIndicator(high=df["High"], low=df["Low"], close=close).adx()
+#     atr = AverageTrueRange(high=df["High"], low=df["Low"], close=close, window=ATR_WINDOW)
+#     df["atr"] = atr.average_true_range()
+#     df = df.dropna().copy()
+#     # Parametri
+#     is_volatile = symbol in VOLATILE_ASSETS
+#     adx_threshold = 20 if is_volatile else 15
+#     # Stato
+#     usdt = initial_balance
+#     coin = 0
+#     entry_price = 0
+#     entry_idx = None
+#     trade_log = []
+#     equity_curve = []
+#     max_equity = initial_balance
+#     max_drawdown = 0
+#     for i in range(start_idx+1, len(df)):
+#         row = df.iloc[i]
+#         prev = df.iloc[i-1]
+#         price = float(row["Close"])
+#         # --- Filtro trend di fondo ---
+#         if row["ema50"] <= row["ema200"]:
+#             equity_curve.append(usdt + coin * price)
+#             continue
+#         # --- Soglie dinamiche ---
+#         atr_ratio = row["atr"] / price if price > 0 else 0
+#         tp_dyn = min(TP_MAX, max(TP_MIN, TP_FACTOR + atr_ratio * 5))
+#         sl_dyn = min(SL_MAX, max(SL_MIN, SL_FACTOR + atr_ratio * 3))
+#         trailing_dyn = min(TRAILING_MAX, max(TRAILING_MIN, 0.005 + atr_ratio))
+#         # --- Entry logic (almeno 2 condizioni) ---
+#         entry_conditions = []
+#         if is_volatile:
+#             if row["Close"] > row["bb_upper"] and row["rsi"] < 70:
+#                 entry_conditions.append(True)
+#             if prev["sma20"] < prev["sma50"] and row["sma20"] > row["sma50"]:
+#                 entry_conditions.append(True)
+#             if row["macd"] > row["macd_signal"] and row["adx"] > adx_threshold:
+#                 entry_conditions.append(True)
+#         else:
+#             if prev["ema20"] < prev["ema50"] and row["ema20"] > row["ema50"]:
+#                 entry_conditions.append(True)
+#             if row["macd"] > row["macd_signal"] and row["adx"] > adx_threshold:
+#                 entry_conditions.append(True)
+#             if row["rsi"] > 50 and row["ema20"] > row["ema50"]:
+#                 entry_conditions.append(True)
+#         # --- ENTRY ---
+#         if coin == 0 and len(entry_conditions) >= 2:
+#             # Compra tutto l'USDT
+#             qty = usdt / price
+#             entry_price = price
+#             entry_idx = i
+#             coin = qty * (1 - fee_pct)
+#             usdt = 0
+#             if verbose:
+#                 print(f"[BACKTEST][ENTRY] {df.index[i]}: BUY {qty:.4f} {symbol} @ {price:.4f}")
+#             trade_log.append({"type": "buy", "price": price, "idx": i})
+#         # --- EXIT ---
+#         elif coin > 0:
+#             exit_signal = False
+#             reason = ""
+#             # Take profit
+#             if price >= entry_price + row["atr"] * tp_dyn:
+#                 exit_signal = True
+#                 reason = "TP"
+#             # Stop loss
+#             elif price <= entry_price - row["atr"] * sl_dyn:
+#                 exit_signal = True
+#                 reason = "SL"
+#             # Exit signal
+#             elif row["Close"] < row["bb_lower"] and row["rsi"] > 30:
+#                 exit_signal = True
+#                 reason = "RSI+BB"
+#             elif row["macd"] < row["macd_signal"] and row["adx"] > adx_threshold:
+#                 exit_signal = True
+#                 reason = "MACD Bearish"
+#             if exit_signal:
+#                 usdt = coin * price * (1 - fee_pct)
+#                 if verbose:
+#                     print(f"[BACKTEST][EXIT] {df.index[i]}: SELL {coin:.4f} {symbol} @ {price:.4f} | Reason: {reason}")
+#                 trade_log.append({"type": "sell", "price": price, "idx": i, "reason": reason})
+#                 coin = 0
+#                 entry_price = 0
+#                 entry_idx = None
+#         equity = usdt + coin * price
+#         equity_curve.append(equity)
+#         if equity > max_equity:
+#             max_equity = equity
+#         dd = (max_equity - equity) / max_equity
+#         if dd > max_drawdown:
+#             max_drawdown = dd
+#     # --- Risultati ---
+#     final_equity = usdt + coin * price
+#     n_trades = len([t for t in trade_log if t["type"] == "buy"])
+#     wins = 0
+#     losses = 0
+#     for j in range(1, len(trade_log)):
+#         if trade_log[j]["type"] == "sell" and trade_log[j-1]["type"] == "buy":
+#             pnl = (trade_log[j]["price"] - trade_log[j-1]["price"]) / trade_log[j-1]["price"]
+#             if pnl > 0:
+#                 wins += 1
+#             else:
+#                 losses += 1
+#     winrate = wins / n_trades * 100 if n_trades > 0 else 0
+#     print(f"\n[BACKTEST] {symbol} | Capitale iniziale: {initial_balance} USDT")
+#     print(f"[BACKTEST] Capitale finale: {final_equity:.2f} USDT | PnL: {final_equity-initial_balance:.2f} USDT ({(final_equity/initial_balance-1)*100:.2f}%)")
+#     print(f"[BACKTEST] Numero trade: {n_trades} | Win rate: {winrate:.1f}% | Max drawdown: {max_drawdown*100:.2f}%")
+#     if n_trades > 0:
+#         print(f"[BACKTEST] Trade vincenti: {wins} | Perdenti: {losses}")
+#     # Plot equity curve
+#     plt.figure(figsize=(10,4))
+#     plt.plot(equity_curve, label="Equity")
+#     plt.title(f"Backtest {symbol}")
+#     plt.xlabel("Step")
+#     plt.ylabel("USDT")
+#     plt.legend()
+#     plt.tight_layout()
+#     plt.show()
+#     return {
+#         "final_equity": final_equity,
+#         "n_trades": n_trades,
+#         "winrate": winrate,
+#         "max_drawdown": max_drawdown,
+#         "trade_log": trade_log,
+#         "equity_curve": equity_curve
+#     }
 
 # Esempio di utilizzo (decommenta per lanciare il backtest):
 # backtest_strategy('BTCUSDT', initial_balance=1000, fee_pct=0.001)
