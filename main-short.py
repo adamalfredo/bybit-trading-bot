@@ -402,7 +402,7 @@ def is_symbol_linear(symbol):
         return data.get("retCode") == 0 and data["result"]["list"]
     except Exception:
         return False
-        
+    
 # 4. Inverti la logica di ingresso/uscita in analyze_asset
 # Esempio (solo la parte principale, da adattare):
 def analyze_asset(symbol: str):
