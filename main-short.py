@@ -390,7 +390,19 @@ def find_close_column(df):
         if col.lower() == "close":
             return df[col]
     return None
-
+def is_symbol_linear(symbol):
+    """
+    Verifica se il simbolo è disponibile su Bybit futures linear.
+    """
+    try:
+        endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
+        params = {"category": "linear", "symbol": symbol}
+        resp = requests.get(endpoint, params=params, timeout=10)
+        data = resp.json()
+        return data.get("retCode") == 0 and data["result"]["list"]
+    except Exception:
+        return False
+        
 # 4. Inverti la logica di ingresso/uscita in analyze_asset
 # Esempio (solo la parte principale, da adattare):
 def analyze_asset(symbol: str):
