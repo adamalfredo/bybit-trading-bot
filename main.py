@@ -709,7 +709,8 @@ def analyze_asset(symbol: str):
             else:
                 log(f"[STRATEGY][{symbol}] Condizione Trend EMA + RSI: rsi={last['rsi']:.2f} > 50 = {cond5}, ema20={last['ema20']:.4f} > ema50={last['ema50']:.4f} = {cond6}")
 
-        if len(entry_conditions) >= 2:
+        # PATCH: ora basta almeno 1 condizione per generare un segnale ENTRY
+        if len(entry_conditions) >= 1:
             log(f"[STRATEGY][{symbol}] Segnale ENTRY generato: strategie attive: {entry_strategies}")
             return "entry", ", ".join(entry_strategies), price
         else:
