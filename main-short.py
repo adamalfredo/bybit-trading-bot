@@ -124,6 +124,37 @@ def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] 
     log(f"[DECIMALI][FORMAT_QTY] qty={qty} | qty_step={qty_step} | precision={precision} | floored_qty={floored_qty} | quantize_str={quantize_str}")
     return fmt.format(floored_qty)
 
+def get_open_short_qty(symbol):
+    """
+    Restituisce la quantità short aperta su Bybit futures per il simbolo dato.
+    Se la posizione è short (side=Sell), restituisce la quantità assoluta (>0), altrimenti 0.
+    """
+    try:
+        endpoint = f"{BYBIT_BASE_URL}/v5/position/list"
+        params = {"category": "linear", "symbol": symbol}
+        ts = str(int(time.time() * 1000))
+        sign_payload = f"{ts}{KEY}5000"
+        sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000"
+        }
+        resp = requests.get(endpoint, headers=headers, params=params, timeout=10)
+        data = resp.json()
+        if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
+            return 0.0
+        for pos in data["result"]["list"]:
+            # Su Bybit, una posizione short ha "side": "Sell" e "size" > 0
+            if pos.get("side") == "Sell":
+                qty = float(pos.get("size", 0))
+                return qty if qty > 0 else 0.0
+        return 0.0
+    except Exception as e:
+        log(f"❌ Errore get_open_short_qty per {symbol}: {e}")
+        return 0.0
+
 # --- FUNZIONI DI SUPPORTO BYBIT E TELEGRAM ---
 def get_last_price(symbol):
     try:
@@ -542,7 +573,7 @@ def sync_positions_from_wallet():
     for symbol in ASSETS:
         if symbol == "USDT":
             continue
-        qty = get_free_qty(symbol)
+        qty = get_open_short_qty(symbol)
         if qty and qty > 0:
             price = get_last_price(symbol)
             if not price:
@@ -673,7 +704,7 @@ def trailing_stop_worker():
         for symbol in list(open_positions):
             if symbol not in position_data:
                 continue
-            saldo = get_free_qty(symbol)
+            saldo = get_open_short_qty(symbol)
             if saldo is None or saldo < 1:
                 log(f"[CLEANUP] {symbol}: saldo troppo basso ({saldo}), rimuovo da open_positions e position_data (polvere)")
                 open_positions.discard(symbol)
@@ -900,7 +931,7 @@ while True:
 
     # PATCH: rimuovi posizioni con saldo < 1 (polvere) anche nel ciclo principale
     for symbol in list(open_positions):
-        saldo = get_free_qty(symbol)
+        saldo = get_open_short_qty(symbol)
         if saldo is None or saldo < 1:
             log(f"[CLEANUP] {symbol}: saldo troppo basso ({saldo}), rimuovo da open_positions e position_data (polvere)")
             open_positions.discard(symbol)
@@ -917,7 +948,7 @@ while True:
         elif signal == "exit" and symbol in open_positions:
             entry_price = entry.get("entry_price", price)
             entry_cost = entry.get("entry_cost", ORDER_USDT)
-            qty = entry.get("qty", get_free_qty(symbol))
+            qty = entry.get("qty", get_open_short_qty(symbol))
 
             usdt_before = get_usdt_balance()
             resp = market_cover(symbol, qty)
