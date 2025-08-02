@@ -719,7 +719,7 @@ def analyze_asset(symbol: str):
             else:
                 log(f"[STRATEGY][{symbol}] Condizione Trend EMA + RSI: rsi={last['rsi']:.2f} > 50 = {cond5}, ema20={last['ema20']:.4f} > ema50={last['ema50']:.4f} = {cond6}")
 
-        if len(entry_conditions) >= 2:
+        if (is_volatile and len(entry_conditions) >= 1) or (not is_volatile and len(entry_conditions) >= 2):
             log(f"[STRATEGY][{symbol}] Segnale ENTRY generato: strategie attive: {entry_strategies}")
             return "entry", ", ".join(entry_strategies), price
         else:
@@ -1021,10 +1021,16 @@ while True:
 
             group_available = group_budget - group_invested
             log(f"[BUDGET] {symbol} ({group_label}) - Budget gruppo: {group_budget:.2f}, Già investito: {group_invested:.2f}, Disponibile: {group_available:.2f}")
-            if group_available < ORDER_USDT:
-                log(f"💸 Budget {group_label} insufficiente per {symbol} (disponibile: {group_available:.2f})")
-                continue
 
+            # PATCH: blocca acquisti se saldo USDT troppo basso
+            if usdt_balance < ORDER_USDT or group_available < ORDER_USDT:
+                log(f"💸 Saldo USDT ({usdt_balance:.2f}) o budget gruppo ({group_available:.2f}) insufficiente per {symbol}")
+                if not low_balance_alerted:
+                    notify_telegram(f"❗️ Saldo USDT troppo basso per nuovi acquisti. Ricarica il wallet per continuare a operare.")
+                    low_balance_alerted = True
+                continue
+            else:
+                low_balance_alerted = False
 
             # 📊 Valuta la forza del segnale in base alla strategia
             strategy_strength = {
@@ -1054,6 +1060,9 @@ while True:
 
             max_invest = min(group_available, usdt_balance) * strength
             order_amount = min(max_invest, group_available, usdt_balance, 250)
+            # PATCH: non superare mai il saldo USDT effettivo
+            if order_amount > usdt_balance:
+                order_amount = usdt_balance
             log(f"[FORZA] {symbol} - Strategia: {strategy}, Strength: {strength}, Investo: {order_amount:.2f} USDT (Saldo: {usdt_balance:.2f})")
 
             # BLOCCO: non tentare acquisto se order_amount < min_order_amt
