@@ -313,7 +313,12 @@ def market_short(symbol: str, usdt_amount: float):
     except Exception:
         resp_json = {}
     log(f"RESPONSE: {response.status_code} {resp_json}")
-    return response
+    # PATCH: restituisci la quantità effettiva shortata se l'ordine è OK
+    if resp_json.get("retCode") == 0:
+        # Bybit non restituisce sempre la qty eseguita, quindi usa qty_str come fallback
+        return float(qty_str)
+    else:
+        return None
 
 def market_cover(symbol: str, qty: float):
     price = get_last_price(symbol)
