@@ -497,7 +497,7 @@ def analyze_asset(symbol: str):
                 entry_conditions.append(True)
                 entry_strategies.append("Trend EMA + RSI (bearish)")
 
-        if len(entry_conditions) >= 2:
+        if len(entry_conditions) >= 1:
             log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT generato: strategie attive: {entry_strategies}")
             return "entry", ", ".join(entry_strategies), price
         else:
