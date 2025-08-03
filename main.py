@@ -482,7 +482,7 @@ def market_sell(symbol: str, qty: float):
     while fallback_count <= max_fallback:
         try:
             use_precision = max(0, orig_precision - fallback_count)
-            qty_str = format_qty_for_bybit(qty, qty_step, use_precision)
+            qty_str = format_quantity_bybit(qty, qty_step, use_precision)
             log(f"[DECIMALI][SELL] {symbol} | qty={qty} | qty_step={qty_step} | min_qty={min_qty} | min_order_amt={min_order_amt} | qty_str={qty_str} | fallback={fallback_count}")
             if Decimal(qty_str) < Decimal(str(min_qty)) or Decimal(qty_str) <= 0:
                 saldo_attuale = get_free_qty(symbol)
