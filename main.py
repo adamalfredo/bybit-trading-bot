@@ -481,26 +481,9 @@ def market_sell(symbol: str, qty: float):
     orig_precision = precision
     while fallback_count <= max_fallback:
         try:
-            dec_qty = Decimal(str(qty))
-            step = Decimal(str(qty_step))
-            min_dust = step * 2
-
-            # PATCH: lascia la polvere solo se il saldo è molto più grande del minimo richiesto
-            if dec_qty > (Decimal(str(min_qty)) + min_dust):
-                dec_qty = dec_qty - min_dust
-            # Se il saldo è piccolo, vendi tutto (ma sempre >= min_qty)
-            # Arrotonda per difetto al multiplo di step
-            floored_qty = (dec_qty // step) * step
             use_precision = max(0, orig_precision - fallback_count)
-            quantize_str = '1.' + '0'*use_precision if use_precision > 0 else '1'
-            floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
-            if (floored_qty / step) % 1 != 0:
-                floored_qty = (floored_qty // step) * step
-                floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
-            qty_str = f"{floored_qty:.{use_precision}f}"
-            # Log di debug dettagliato
-            log(f"[DECIMALI][SELL] {symbol} | qty={qty} | qty_step={qty_step} | min_qty={min_qty} | min_order_amt={min_order_amt} | floored_qty={floored_qty} | qty_str={qty_str} | fallback={fallback_count}")
-            # PATCH: ora il controllo è su min_qty, non solo su step
+            qty_str = format_qty_for_bybit(qty, qty_step, use_precision)
+            log(f"[DECIMALI][SELL] {symbol} | qty={qty} | qty_step={qty_step} | min_qty={min_qty} | min_order_amt={min_order_amt} | qty_str={qty_str} | fallback={fallback_count}")
             if Decimal(qty_str) < Decimal(str(min_qty)) or Decimal(qty_str) <= 0:
                 saldo_attuale = get_free_qty(symbol)
                 log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento, min_qty={min_qty})")
@@ -1445,6 +1428,23 @@ while True:
 #         print(f"[BACKTEST] Trade vincenti: {wins} | Perdenti: {losses}")
 #     # Plot equity curve
 #     plt.figure(figsize=(10,4))
+#     plt.plot(equity_curve, label="Equity")
+#     plt.title(f"Backtest {symbol}")
+#     plt.xlabel("Step")
+#     plt.ylabel("USDT")
+#     plt.legend()
+#     plt.tight_layout()
+#     plt.show()
+#     return {
+#         "final_equity": final_equity,
+#         "n_trades": n_trades,
+#         "winrate": winrate,
+#         "max_drawdown": max_drawdown,
+#         "trade_log": trade_log,
+#         "equity_curve": equity_curve
+#     }
+
+# Esempio di utilizzo (decommenta per lanciare il backtest):
 #     plt.plot(equity_curve, label="Equity")
 #     plt.title(f"Backtest {symbol}")
 #     plt.xlabel("Step")
