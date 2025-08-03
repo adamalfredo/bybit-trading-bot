@@ -1011,7 +1011,8 @@ while True:
             log(f"[BUDGET] {symbol} ({group_label}) - Budget gruppo: {group_budget:.2f}, Già investito: {group_invested:.2f}, Disponibile: {group_available:.2f}")
 
             # PATCH: blocca acquisti se saldo USDT troppo basso
-            if usdt_balance < ORDER_USDT or group_available < ORDER_USDT:
+            if usdt_balance < ORDER_USDT:
+                # Notifica solo se il saldo USDT è davvero basso
                 log(f"💸 Saldo USDT ({usdt_balance:.2f}) o budget gruppo ({group_available:.2f}) insufficiente per {symbol}")
                 if not low_balance_alerted:
                     notify_telegram(f"❗️ Saldo USDT troppo basso per nuovi acquisti. Ricarica il wallet per continuare a operare.")
