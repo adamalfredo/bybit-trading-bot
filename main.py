@@ -470,6 +470,8 @@ def market_sell(symbol: str, qty: float):
     info = get_instrument_info(symbol)
     qty_step = info.get("qty_step", 0.0001)
     precision = info.get("precision", 4)
+    min_qty = info.get("min_qty", qty_step)
+    min_order_amt = info.get("min_order_amt", 5)
     if not qty_step or qty_step <= 0:
         qty_step = 0.0001
         precision = 4
@@ -481,27 +483,28 @@ def market_sell(symbol: str, qty: float):
         try:
             dec_qty = Decimal(str(qty))
             step = Decimal(str(qty_step))
-            # LASCIA SEMPRE POLVERE: non vendere mai tutto, lascia almeno 2*qty_step
             min_dust = step * 2
-            if dec_qty > min_dust:
+
+            # PATCH: lascia la polvere solo se il saldo è molto più grande del minimo richiesto
+            if dec_qty > (Decimal(str(min_qty)) + min_dust):
                 dec_qty = dec_qty - min_dust
+            # Se il saldo è piccolo, vendi tutto (ma sempre >= min_qty)
             # Arrotonda per difetto al multiplo di step
             floored_qty = (dec_qty // step) * step
-            # Limita i decimali secondo la precisione Bybit (o fallback)
             use_precision = max(0, orig_precision - fallback_count)
             quantize_str = '1.' + '0'*use_precision if use_precision > 0 else '1'
             floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
-            # Garantisce che sia multiplo esatto di qty_step
             if (floored_qty / step) % 1 != 0:
                 floored_qty = (floored_qty // step) * step
                 floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
             qty_str = f"{floored_qty:.{use_precision}f}"
             # Log di debug dettagliato
-            log(f"[DECIMALI][SELL] {symbol} | qty={qty} | qty_step={qty_step} | precision={use_precision} | min_dust={min_dust} | floored_qty={floored_qty} | qty_str={qty_str} | fallback={fallback_count}")
-            if Decimal(qty_str) < step or Decimal(qty_str) <= 0:
+            log(f"[DECIMALI][SELL] {symbol} | qty={qty} | qty_step={qty_step} | min_qty={min_qty} | min_order_amt={min_order_amt} | floored_qty={floored_qty} | qty_str={qty_str} | fallback={fallback_count}")
+            # PATCH: ora il controllo è su min_qty, non solo su step
+            if Decimal(qty_str) < Decimal(str(min_qty)) or Decimal(qty_str) <= 0:
                 saldo_attuale = get_free_qty(symbol)
-                log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento e polvere, step={step})")
-                notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} (saldo troppo piccolo: {saldo_attuale}, step richiesto: {step})")
+                log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento, min_qty={min_qty})")
+                notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} (saldo troppo piccolo: {saldo_attuale}, min_qty richiesto: {min_qty})")
                 return
         except Exception as e:
             log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
@@ -710,7 +713,7 @@ def analyze_asset(symbol: str):
                 entry_conditions.append(True)
                 entry_strategies.append("MACD bullish (stabile)")
             else:
-                log(f"[STRATEGY][{symbol}] Condizione MACD bullish (stabile): macd={last['macd']:.4f} > macd_signal={last['macd_signal']:.4f} = {cond3}, adx={last['adx']:.2f} > soglia={adx_threshold} = {cond4}")
+                log(f"[STRATEGY][{symbol}] Condizione MACD bullish (stabile): macd={last['macd']:.4f} > macd_signal={last['macd_signal']:.4f} = {cond3}, adx={last['adx']:.2f} > soglia={adx_threshold} = {cond_exit4}")
             cond5 = last["rsi"] > 50
             cond6 = last["ema20"] > last["ema50"]
             if cond5 and cond6:
@@ -1313,7 +1316,7 @@ while True:
 #     - start_idx: indice da cui partire (default 0, inizio dati)
 #     """
 #     df = fetch_history(symbol)
-#     if df is None or len(df) < 50:
+#     if df is None or len(df) <  50:
 #         print(f"[BACKTEST] Dati insufficienti per {symbol}")
 #         return
 #     close = find_close_column(df)
