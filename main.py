@@ -897,9 +897,11 @@ def trailing_stop_worker():
             if symbol not in position_data:
                 continue
             saldo = get_free_qty(symbol)
-            # PATCH: se saldo < 1 (polvere), rimuovi la posizione
-            if saldo is None or saldo < 1:
-                log(f"[CLEANUP] {symbol}: saldo troppo basso ({saldo}), rimuovo da open_positions e position_data (polvere)")
+            prezzo = get_last_price(symbol)
+            valore_usd = saldo * prezzo if saldo and prezzo else 0
+            min_order_amt = get_instrument_info(symbol).get("min_order_amt", 5)
+            if saldo is None or valore_usd < min_order_amt:
+                log(f"[CLEANUP] {symbol}: valore troppo basso ({valore_usd:.2f} USD), rimuovo da open_positions e position_data (polvere)")
                 open_positions.discard(symbol)
                 position_data.pop(symbol, None)
                 continue
@@ -1225,8 +1227,11 @@ while True:
             continue
         # CONTROLLO SICUREZZA: se il saldo effettivo è zero, rimuovi la posizione
         saldo = get_free_qty(symbol)
-        if saldo is None or saldo < 1e-6:
-            log(f"[CLEANUP] {symbol}: saldo zero, rimuovo da open_positions e position_data")
+        prezzo = get_last_price(symbol)
+        valore_usd = saldo * prezzo if saldo and prezzo else 0
+        min_order_amt = get_instrument_info(symbol).get("min_order_amt", 5)
+        if saldo is None or valore_usd < min_order_amt:
+            log(f"[CLEANUP] {symbol}: valore troppo basso ({valore_usd:.2f} USD), rimuovo da open_positions e position_data")
             open_positions.discard(symbol)
             position_data.pop(symbol, None)
             continue
