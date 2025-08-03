@@ -1173,8 +1173,11 @@ while True:
     # PATCH: rimuovi posizioni con saldo < 1 (polvere) anche nel ciclo principale
     for symbol in list(open_positions):
         saldo = get_free_qty(symbol)
-        if saldo is None or saldo < 1:
-            log(f"[CLEANUP] {symbol}: saldo troppo basso ({saldo}), rimuovo da open_positions e position_data (polvere)")
+        prezzo = get_last_price(symbol)
+        valore_usd = saldo * prezzo if saldo and prezzo else 0
+        min_order_amt = get_instrument_info(symbol).get("min_order_amt", 5)
+        if saldo is None or valore_usd < min_order_amt:
+            log(f"[CLEANUP] {symbol}: valore troppo basso ({valore_usd:.2f} USD), rimuovo da open_positions e position_data (polvere)")
             open_positions.discard(symbol)
             position_data.pop(symbol, None)
             continue
