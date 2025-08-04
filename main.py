@@ -93,6 +93,9 @@ cooldown = {}
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
 
+log("=== INIZIO SCRIPT main.py ===")  # <-- QUI è sicuro e corretto!
+log(f"__file__ in esecuzione: {__file__}")
+
 def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] = None) -> str:
     """
     Restituisce la quantità formattata secondo i decimali accettati da Bybit per qty_step e basePrecision,
