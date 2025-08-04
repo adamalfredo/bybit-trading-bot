@@ -1189,12 +1189,16 @@ while True:
         if signal_cleanup == "exit" and symbol in open_positions:
             entry_price = entry.get("entry_price", price_cleanup)
             current_price = get_last_price(symbol)
-            if current_price and current_price > entry_price and not entry.get("trailing_active", False):
-                log(f"[SKIP][EXIT] {symbol}: prezzo attuale {current_price:.4f} sopra entry {entry_price:.4f}, nessun trailing attivo, NON vendo.")
+            trailing_active = entry.get("trailing_active", False)
+            log(f"[EXIT CHECK] {symbol} | entry_price={entry_price:.8f} | current_price={current_price:.8f} | trailing_active={trailing_active}")
+            # PATCH: blocca ogni vendita se il prezzo è sopra l'entry e non c'è trailing attivo
+            if current_price and current_price > entry_price and not trailing_active:
+                log(f"[SKIP][EXIT] {symbol}: prezzo attuale {current_price:.8f} sopra entry {entry_price:.8f}, nessun trailing attivo, NON vendo.")
                 continue
             entry_cost = entry.get("entry_cost", ORDER_USDT)
             qty = entry.get("qty", get_free_qty(symbol))
             usdt_before = get_usdt_balance()
+            log(f"[SELL ATTEMPT] {symbol} | qty={qty} | entry_cost={entry_cost} | usdt_before={usdt_before}")
             resp = market_sell(symbol, qty)
             if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                 price = get_last_price(symbol)
@@ -1211,7 +1215,13 @@ while True:
                 position_data.pop(symbol, None)
             else:
                 saldo_attuale = get_free_qty(symbol)
-                log(f"❌ Vendita fallita per {symbol}")
+                # PATCH: logga dettagli anche in caso di errore
+                log(f"❌ Vendita fallita per {symbol} | qty={qty} | entry_price={entry_price} | current_price={current_price} | trailing_active={trailing_active}")
+                if resp is not None:
+                    try:
+                        log(f"[BYBIT SELL ERROR] status={resp.status_code} resp={resp.json()}")
+                    except Exception:
+                        log(f"[BYBIT SELL ERROR] status={resp.status_code} resp=??")
                 notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} durante EXIT SIGNAL! (saldo attuale: {saldo_attuale})")
 
     time.sleep(1)
