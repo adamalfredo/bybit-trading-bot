@@ -702,7 +702,7 @@ def analyze_asset(symbol: str):
                 entry_conditions.append(True)
                 entry_strategies.append("MACD bullish (stabile)")
             else:
-                log(f"[STRATEGY][{symbol}] Condizione MACD bullish (stabile): macd={last['macd']:.4f} > macd_signal={last['macd_signal']:.4f} = {cond3}, adx={last['adx']:.2f} > soglia={adx_threshold} = {cond_exit4}")
+                log(f"[STRATEGY][{symbol}] Condizione MACD bullish (stabile): macd={last['macd']:.4f} > macd_signal={last['macd_signal']:.4f} = {cond3}, adx={last['adx']:.2f} > soglia={adx_threshold} = {cond4}")
             cond5 = last["rsi"] > 50
             cond6 = last["ema20"] > last["ema50"]
             if cond5 and cond6:
@@ -1114,7 +1114,6 @@ while True:
             if df is None or "Close" not in df.columns:
                 log(f"❌ Dati storici mancanti per {symbol}")
                 continue
-
 
             atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
             last = df.iloc[-1]
