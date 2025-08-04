@@ -475,9 +475,9 @@ def market_sell(symbol: str, qty: float):
         qty_step = 0.0001
         precision = 4
 
-    # PATCH: lascia sempre un margine di sicurezza maggiore (fee + polvere)
-    fee_pct = 0.002  # 0.2% margine di sicurezza (fee + arrotondamenti)
-    min_margin = max(qty * fee_pct, 10 * qty_step)
+    # PATCH: margine di sicurezza ancora maggiore (fee + polvere)
+    fee_pct = 0.005  # 0.5% margine di sicurezza (fee + arrotondamenti)
+    min_margin = max(qty * fee_pct, 20 * qty_step)
     safe_qty = qty - min_margin
     if safe_qty < min_qty:
         safe_qty = qty  # Se troppo piccolo, prova comunque tutto
@@ -1186,9 +1186,14 @@ while True:
         # 🔴 USCITA (EXIT)
         elif signal == "exit" and symbol in open_positions:
             entry_price = entry.get("entry_price", price)
+            current_price = get_last_price(symbol)
+            # PATCH: non vendere se il prezzo è sopra l'entry e non è stato triggerato uno stop/trailing
+            if current_price and current_price > entry_price and not entry.get("trailing_active", False):
+                log(f"[SKIP][EXIT] {symbol}: prezzo attuale {current_price:.4f} sopra entry {entry_price:.4f}, nessun trailing attivo, NON vendo.")
+                continue
             entry_cost = entry.get("entry_cost", ORDER_USDT)
             qty = entry.get("qty", get_free_qty(symbol))
-
+        
             usdt_before = get_usdt_balance()
             resp = market_sell(symbol, qty)
             if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
@@ -1198,12 +1203,12 @@ while True:
                 exit_value = price * qty
                 delta = exit_value - entry_cost
                 pnl = (delta / entry_cost) * 100
-
+        
                 log(f"🔴 Vendita completata per {symbol}")
                 log(f"📊 PnL stimato: {pnl:.2f}% | Delta: {delta:.2f}")
                 notify_telegram(f"🔴📉 Vendita [LONG] per {symbol} a {price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}%")
                 log_trade_to_google(symbol, entry_price, price, pnl, strategy, "Exit Signal", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
-
+        
                 open_positions.discard(symbol)
                 last_exit_time[symbol] = time.time()
                 position_data.pop(symbol, None)
