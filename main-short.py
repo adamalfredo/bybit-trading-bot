@@ -952,9 +952,15 @@ while True:
         elif signal == "exit" and symbol in open_positions:
             entry_price = entry.get("entry_price", price)
             entry_cost = entry.get("entry_cost", ORDER_USDT)
-            qty = entry.get("qty", get_open_short_qty(symbol))
-            log(f"[TEST][EXIT_SIGNAL] {symbol} | qty: {qty} | entry_price: {entry_price} | current_price: {price}")
-            notify_telegram(f"[TEST] EXIT_SIGNAL per {symbol}\nQty: {qty}\nEntry: {entry_price}\nPrezzo attuale: {price}")
+            qty = get_open_short_qty(symbol)  # PATCH: usa sempre la quantità effettiva short aperta
+            log(f"[TEST][EXIT_SIGNAL] {symbol} | qty effettiva: {qty} | entry_price: {entry_price} | current_price: {price}")
+            notify_telegram(f"[TEST] EXIT_SIGNAL per {symbol}\nQty effettiva: {qty}\nEntry: {entry_price}\nPrezzo attuale: {price}")
+            if qty <= 0:
+                log(f"[TEST][EXIT_FAIL] Nessuna quantità short effettiva da ricoprire per {symbol}")
+                notify_telegram(f"[TEST] ❌❗️ Nessuna quantità short effettiva da ricoprire per {symbol} durante EXIT SIGNAL!")
+                open_positions.discard(symbol)
+                position_data.pop(symbol, None)
+                continue
             usdt_before = get_usdt_balance()
             resp = market_cover(symbol, qty)
             if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
