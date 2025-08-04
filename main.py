@@ -1088,6 +1088,8 @@ while True:
             if last_price is None:
                 log(f"❌ Prezzo non disponibile per {symbol} (acquisto)")
                 continue
+            log(f"[DEBUG] Saldo USDT prima di acquistare {symbol}: {get_usdt_balance()}")
+            
             if last_price < 100:
                 # Coin piccole: usa market_buy (fallback con riacquisto differenza)
                 qty = market_buy(symbol, order_amount)
