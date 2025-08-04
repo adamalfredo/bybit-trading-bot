@@ -975,6 +975,7 @@ while True:
     perc_volatile = (volatile_invested / portfolio_value * 100) if portfolio_value > 0 else 0
     perc_stable = (stable_invested / portfolio_value * 100) if portfolio_value > 0 else 0
     log(f"[PORTAFOGLIO] Totale: {portfolio_value:.2f} USDT | Volatili: {volatile_invested:.2f} ({perc_volatile:.1f}%) | Meno volatili: {stable_invested:.2f} ({perc_stable:.1f}%) | USDT: {usdt_balance:.2f}")
+    log(f"[DEBUG] Saldo USDT attuale: {get_usdt_balance()}")
 
     # --- Avviso saldo basso: invia solo una volta finché non torna sopra soglia ---
     # low_balance_alerted ora è globale rispetto al ciclo
@@ -1089,7 +1090,7 @@ while True:
                 log(f"❌ Prezzo non disponibile per {symbol} (acquisto)")
                 continue
             log(f"[DEBUG] Saldo USDT prima di acquistare {symbol}: {get_usdt_balance()}")
-            
+
             if last_price < 100:
                 # Coin piccole: usa market_buy (fallback con riacquisto differenza)
                 qty = market_buy(symbol, order_amount)
