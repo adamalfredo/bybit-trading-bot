@@ -747,6 +747,8 @@ def trailing_stop_worker():
                 sl_type = "Stop Loss SHORT"
             if sl_triggered:
                 qty = get_free_qty(symbol)
+                log(f"[TEST][SL_TRIGGER] {symbol} | SL type: {sl_type} | qty: {qty} | current_price: {current_price} | SL: {entry['sl']}")
+                notify_telegram(f"[TEST] SL_TRIGGER {sl_type} per {symbol}\nQty: {qty}\nPrezzo attuale: {current_price}\nSL: {entry['sl']}")
                 if qty > 0:
                     usdt_before = get_usdt_balance()
                     resp = market_cover(symbol, qty)
@@ -757,17 +759,17 @@ def trailing_stop_worker():
                         exit_value = current_price * qty
                         delta = exit_value - entry_cost
                         pnl = (delta / entry_cost) * 100
-                        log(f"🔻 {sl_type} attivato per {symbol} → Prezzo: {current_price:.4f} | SL: {entry['sl']:.4f}")
-                        notify_telegram(f"🔻 {sl_type} [SHORT] ricoperto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
+                        log(f"[TEST][SL_OK] {symbol} | {sl_type} attivato → Prezzo: {current_price:.4f} | SL: {entry['sl']:.4f} | PnL: {pnl:.2f}%")
+                        notify_telegram(f"[TEST] {sl_type} [SHORT] ricoperto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
                         log_trade_to_google(symbol, entry_price, current_price, pnl, sl_type, "SL Triggered", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
                         open_positions.discard(symbol)
                         last_exit_time[symbol] = time.time()
                         position_data.pop(symbol, None)
                     else:
-                        log(f"❌ Ricopertura fallita con {sl_type} per {symbol}")
-                        notify_telegram(f"❌❗️ RICOPERTURA [SHORT] NON RIUSCITA per {symbol} durante {sl_type}!")
+                        log(f"[TEST][SL_FAIL] Ricopertura fallita con {sl_type} per {symbol}")
+                        notify_telegram(f"[TEST] ❌❗️ RICOPERTURA [SHORT] NON RIUSCITA per {symbol} durante {sl_type}!")
                 else:
-                    log(f"❌ Quantità nulla o troppo piccola per ricopertura {sl_type} su {symbol}")
+                    log(f"[TEST][SL_FAIL] Quantità nulla o troppo piccola per ricopertura {sl_type} su {symbol}")
         time.sleep(60)
 
 trailing_thread = threading.Thread(target=trailing_stop_worker, daemon=True)
@@ -951,7 +953,8 @@ while True:
             entry_price = entry.get("entry_price", price)
             entry_cost = entry.get("entry_cost", ORDER_USDT)
             qty = entry.get("qty", get_open_short_qty(symbol))
-
+            log(f"[TEST][EXIT_SIGNAL] {symbol} | qty: {qty} | entry_price: {entry_price} | current_price: {price}")
+            notify_telegram(f"[TEST] EXIT_SIGNAL per {symbol}\nQty: {qty}\nEntry: {entry_price}\nPrezzo attuale: {price}")
             usdt_before = get_usdt_balance()
             resp = market_cover(symbol, qty)
             if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
@@ -960,19 +963,16 @@ while True:
                 exit_value = price * qty
                 delta = exit_value - entry_cost
                 pnl = (delta / entry_cost) * 100
-
-                log(f"🔴 Ricopertura completata per {symbol}")
-                log(f"📊 PnL stimato: {pnl:.2f}% | Delta: {delta:.2f}")
-                notify_telegram(f"🔴📈 Ricopertura [SHORT] per {symbol} a {price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}%")
+                log(f"[TEST][EXIT_OK] Ricopertura completata per {symbol} | PnL stimato: {pnl:.2f}% | Delta: {delta:.2f}")
+                notify_telegram(f"[TEST] Ricopertura [SHORT] per {symbol} a {price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}%")
                 log_trade_to_google(symbol, entry_price, price, pnl, strategy, "Exit Signal", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
-
                 open_positions.discard(symbol)
                 last_exit_time[symbol] = time.time()
                 position_data.pop(symbol, None)
             else:
                 saldo_attuale = get_free_qty(symbol)
-                log(f"❌ Ricopertura fallita per {symbol}")
-                notify_telegram(f"❌❗️ RICOPERTURA [SHORT] NON RIUSCITA per {symbol} durante EXIT SIGNAL! (saldo attuale: {saldo_attuale})")
+                log(f"[TEST][EXIT_FAIL] Ricopertura fallita per {symbol}")
+                notify_telegram(f"[TEST] ❌❗️ RICOPERTURA [SHORT] NON RIUSCITA per {symbol} durante EXIT SIGNAL! (saldo attuale: {saldo_attuale})")
 
     # Sicurezza: attesa tra i cicli principali
     time.sleep(INTERVAL_MINUTES * 60)
