@@ -466,7 +466,6 @@ def market_sell(symbol: str, qty: float):
         log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
         return
 
-    # Recupera qty_step e precision con fallback robusto
     info = get_instrument_info(symbol)
     qty_step = info.get("qty_step", 0.0001)
     precision = info.get("precision", 4)
@@ -476,14 +475,19 @@ def market_sell(symbol: str, qty: float):
         qty_step = 0.0001
         precision = 4
 
-    max_fallback = 4  # Prova a ridurre la precisione fino a 4 volte
+    # PATCH: lascia sempre un margine di sicurezza
+    safe_qty = qty - (4 * qty_step)
+    if safe_qty < min_qty:
+        safe_qty = qty  # Se troppo piccolo, prova comunque tutto
+
+    max_fallback = 4
     fallback_count = 0
     orig_precision = precision
     while fallback_count <= max_fallback:
         try:
             use_precision = max(0, orig_precision - fallback_count)
-            qty_str = format_quantity_bybit(qty, qty_step, use_precision)
-            log(f"[DECIMALI][SELL] {symbol} | qty={qty} | qty_step={qty_step} | min_qty={min_qty} | min_order_amt={min_order_amt} | qty_str={qty_str} | fallback={fallback_count}")
+            qty_str = format_quantity_bybit(safe_qty, qty_step, use_precision)
+            log(f"[DECIMALI][SELL] {symbol} | qty={qty} | safe_qty={safe_qty} | qty_step={qty_step} | min_qty={min_qty} | min_order_amt={min_order_amt} | qty_str={qty_str} | fallback={fallback_count}")
             if Decimal(qty_str) < Decimal(str(min_qty)) or Decimal(qty_str) <= 0:
                 saldo_attuale = get_free_qty(symbol)
                 log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento, min_qty={min_qty})")
