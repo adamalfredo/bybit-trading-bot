@@ -475,8 +475,10 @@ def market_sell(symbol: str, qty: float):
         qty_step = 0.0001
         precision = 4
 
-    # PATCH: lascia sempre un margine di sicurezza
-    safe_qty = qty - (4 * qty_step)
+    # PATCH: lascia sempre un margine di sicurezza maggiore (fee + polvere)
+    fee_pct = 0.002  # 0.2% margine di sicurezza (fee + arrotondamenti)
+    min_margin = max(qty * fee_pct, 10 * qty_step)
+    safe_qty = qty - min_margin
     if safe_qty < min_qty:
         safe_qty = qty  # Se troppo piccolo, prova comunque tutto
 
