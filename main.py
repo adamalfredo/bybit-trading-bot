@@ -337,15 +337,12 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     try:
         raw_qty = Decimal(str(usdt_amount)) / Decimal(str(price))
         log(f"[DECIMALI][CALC_QTY] {symbol} | usdt_amount={usdt_amount} | price={price} | raw_qty={raw_qty} | qty_step={qty_step} | precision={precision}")
-        # PATCH: forza quantità intera per coin a prezzo bassissimo o qty_step==1
-        if float(qty_step) == 1 or price < 0.001:
-            qty_int = int(Decimal(raw_qty).to_integral_value(rounding=ROUND_DOWN))
-            qty_str = str(qty_int)
-            qty_dec = Decimal(qty_int)
-            log(f"[DECIMALI][FORCE_INT] {symbol} | qty_step={qty_step} | price={price} | qty_int={qty_int}")
-        else:
-            qty_str = format_quantity_bybit(float(raw_qty), float(qty_step), precision=precision)
-            qty_dec = Decimal(qty_str)
+        # PATCH: usa almeno 8 decimali per coin a prezzo molto basso
+        if price < 0.01:
+            precision = max(precision, 8)
+        qty_str = format_quantity_bybit(float(raw_qty), float(qty_step), precision=precision)
+        qty_dec = Decimal(qty_str)
+        log(f"[DECIMALI][FORMAT_QTY_PATCH] {symbol} | qty_step={qty_step} | price={price} | precision={precision} | qty_str={qty_str}")
         
         log(f"[DEBUG-QTY] {symbol} | qty_step={qty_step} | qty_str={qty_str} | qty_dec={qty_dec}")
 
