@@ -343,7 +343,6 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         qty_str = format_quantity_bybit(float(raw_qty), float(qty_step), precision=precision)
         qty_dec = Decimal(qty_str)
         log(f"[DECIMALI][FORMAT_QTY_PATCH] {symbol} | qty_step={qty_step} | price={price} | precision={precision} | qty_str={qty_str}")
-        
         log(f"[DEBUG-QTY] {symbol} | qty_step={qty_step} | qty_str={qty_str} | qty_dec={qty_dec}")
 
         min_qty_dec = Decimal(str(min_qty))
@@ -498,12 +497,11 @@ def market_sell(symbol: str, qty: float):
         qty_step = 0.0001
         precision = 4
 
-    # PATCH: margine di sicurezza ancora maggiore (fee + polvere)
-    fee_pct = 0.005  # 0.5% margine di sicurezza (fee + arrotondamenti)
-    min_margin = max(qty * fee_pct, 20 * qty_step)
-    safe_qty = qty - min_margin
+    # PATCH: vendi sempre il saldo effettivo arrotondato al passo consentito
+    safe_qty = get_free_qty(symbol)
     if safe_qty < min_qty:
-        safe_qty = qty  # Se troppo piccolo, prova comunque tutto
+        log(f"❌ Quantità troppo piccola per vendita {symbol}: {safe_qty} < min_qty {min_qty}")
+        return
 
     max_fallback = 4
     fallback_count = 0
