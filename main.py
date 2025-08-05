@@ -329,7 +329,7 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     qty_step = info.get("qty_step", 0.0001)
     min_order_amt = info.get("min_order_amt", 5)
     min_qty = info.get("min_qty", 0.0)
-    max_qty = info.get("max_qty", 0.0)  # <-- aggiungi questa riga
+    max_qty = info.get("max_qty", 0.0)  # <-- già presente
     precision = info.get("precision", 4)
     if usdt_amount < min_order_amt:
         log(f"❌ Budget troppo basso per {symbol}: {usdt_amount:.2f} < min_order_amt {min_order_amt}")
@@ -340,11 +340,18 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         qty_str = format_quantity_bybit(float(raw_qty), float(qty_step), precision=precision)
         qty_dec = Decimal(qty_str)
         min_qty_dec = Decimal(str(min_qty))
-        # PATCH: controllo max_qty
+
+        # PATCH: Limite massimo quantità Bybit (maxOrderQty) o limite prudente per coin a prezzo bassissimo
+        if price < 0.01:
+            # Se max_qty non è valorizzato o è troppo alto, imposta un limite prudente
+            if max_qty == 0.0 or max_qty > 500_000:
+                log(f"[MAX_QTY PATCH] {symbol}: max_qty API={max_qty} troppo alto o nullo, imposto max_qty=500000 per sicurezza")
+                max_qty = 500_000
         if max_qty > 0 and qty_dec > Decimal(str(max_qty)):
             log(f"❌ Quantità calcolata troppo grande per {symbol}: {qty_dec} > max_qty {max_qty}")
             qty_dec = Decimal(str(max_qty))
             qty_str = format_quantity_bybit(float(qty_dec), float(qty_step), precision=precision)
+
         if qty_dec < min_qty_dec:
             log(f"[DECIMALI][CALC_QTY] {symbol} | qty_dec < min_qty_dec: {qty_dec} < {min_qty_dec}")
             qty_dec = min_qty_dec
@@ -360,7 +367,7 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         investito_effettivo = float(qty_dec) * float(price)
         if investito_effettivo < 0.95 * usdt_amount:
             log(f"⚠️ Attenzione: valore effettivo investito ({investito_effettivo:.2f} USDT) molto inferiore a quello richiesto ({usdt_amount:.2f} USDT)")
-        log(f"[DECIMALI][CALC_QTY][RETURN] {symbol} | qty_str={qty_str}")
+        log(f"[DECIMALI][CALC_QTY][RETURN] {symbol} | qty_str={qty_str} | max_qty usato={max_qty}")
         return qty_str
     except Exception as e:
         log(f"❌ Errore calcolo quantità per {symbol}: {e}")
