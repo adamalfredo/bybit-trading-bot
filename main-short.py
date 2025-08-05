@@ -323,8 +323,7 @@ def market_short(symbol: str, usdt_amount: float):
         "symbol": symbol,
         "side": "Sell",  # PATCH: apertura short
         "orderType": "Market",
-        "qty": qty_str,
-        "positionIdx": 1  # 1 = Isolated, 0 = Cross
+        "qty": qty_str
     }
     ts = str(int(time.time() * 1000))
     body_json = json.dumps(body, separators=(",", ":"))
@@ -366,8 +365,7 @@ def market_cover(symbol: str, qty: float):
         "symbol": symbol,
         "side": "Buy",  # PATCH: chiusura short
         "orderType": "Market",
-        "qty": qty_str,
-        "positionIdx": 1  # 1 = Isolated, 0 = Cross
+        "qty": qty_str
     }
     ts = str(int(time.time() * 1000))
     body_json = json.dumps(body, separators=(",", ":"))
