@@ -93,9 +93,6 @@ cooldown = {}
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
 
-log("=== INIZIO SCRIPT main.py ===")  # <-- QUI è sicuro e corretto!
-log(f"__file__ in esecuzione: {__file__}")
-
 def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] = None) -> str:
     """
     Restituisce la quantità formattata secondo i decimali accettati da Bybit per qty_step e basePrecision,
@@ -1123,6 +1120,7 @@ try:
                     qty = market_buy(symbol, order_amount)
                     if not qty or qty == 0:
                         log(f"❌ Nessuna quantità acquistata per {symbol} dopo MARKET BUY. Non registro la posizione.")
+                        notify_telegram(f"❌ Nessuna quantità acquistata per {symbol} dopo MARKET BUY.")
                         continue
                     actual_cost = qty * last_price
                     log(f"🟢 Ordine MARKET piazzato per {symbol}. Attendi esecuzione. Investito effettivo: {actual_cost:.2f} USDT")
@@ -1137,6 +1135,7 @@ try:
                     qty = get_free_qty(symbol)
                     if not qty or qty == 0:
                         log(f"❌ Nessuna quantità acquistata per {symbol} dopo LIMIT BUY. Non registro la posizione.")
+                        notify_telegram(f"❌ Nessuna quantità acquistata per {symbol} dopo LIMIT BUY.")
                         continue
                     actual_cost = qty * last_price
 
