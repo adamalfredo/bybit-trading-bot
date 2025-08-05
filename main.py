@@ -650,8 +650,8 @@ def analyze_asset(symbol: str):
         price = float(last["Close"])
 
         # --- Filtro trend di fondo: solo se EMA50 > EMA200 (trend rialzista) ---
-        if last["ema50"] <= last["ema200"]:
-            log(f"[STRATEGY][{symbol}] Filtro trend NON superato: ema50={last['ema50']:.4f} <= ema200={last['ema200']:.4f}")
+        if last["ema50"] <= last["ema200"] * 0.98:
+            log(f"[STRATEGY][{symbol}] Filtro trend NON superato (soft): ema50={last['ema50']:.4f} <= 98% ema200={last['ema200']:.4f}")
             return None, None, None
 
         # --- Soglie dinamiche: TP/SL/trailing in base a volatilità ---
@@ -963,14 +963,10 @@ trailing_thread = threading.Thread(target=trailing_stop_worker, daemon=True)
 trailing_thread.start()
 
 try:
-    log(">>> PRIMA DEL WHILE TRUE <<<")
     while True:
-        log(">>> INIZIO CICLO WHILE TRUE <<<")
         # Aggiorna la lista asset dinamicamente ogni ciclo
         update_assets()
-        log(">>> DOPO update_assets <<<")
         portfolio_value, usdt_balance, coin_values = get_portfolio_value()
-        log(">>> DOPO get_portfolio_value <<<")
         volatile_budget = portfolio_value * 0.7
         stable_budget = portfolio_value * 0.3
         volatile_invested = sum(
@@ -983,8 +979,6 @@ try:
         tot_invested = volatile_invested + stable_invested
         perc_volatile = (volatile_invested / portfolio_value * 100) if portfolio_value > 0 else 0
         perc_stable = (stable_invested / portfolio_value * 100) if portfolio_value > 0 else 0
-        log(f"[PORTAFOGLIO] Totale: {portfolio_value:.2f} USDT | Volatili: {volatile_invested:.2f} ({perc_volatile:.1f}%) | Meno volatili: {stable_invested:.2f} ({perc_stable:.1f}%) | USDT: {usdt_balance:.2f}")
-        log(f"[DEBUG] Saldo USDT attuale: {get_usdt_balance()}")
 
         # --- Avviso saldo basso: invia solo una volta finché non torna sopra soglia ---
         # low_balance_alerted ora è globale rispetto al ciclo
