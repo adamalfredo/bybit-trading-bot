@@ -503,15 +503,16 @@ def market_sell(symbol: str, qty: float):
         log(f"❌ Quantità troppo piccola per vendita {symbol}: {safe_qty} < min_qty {min_qty}")
         return
 
-    max_fallback = 4
+    max_fallback = 5    
     fallback_count = 0
     orig_precision = precision
+    qty_to_try = safe_qty
     while fallback_count <= max_fallback:
         try:
             use_precision = max(0, orig_precision - fallback_count)
-            qty_str = format_quantity_bybit(safe_qty, qty_step, use_precision)
+            qty_str = format_quantity_bybit(qty_to_try, qty_step, use_precision)
             valore_usd = float(qty_str) * price
-            log(f"[DECIMALI][SELL] {symbol} | qty={qty} | safe_qty={safe_qty} | qty_step={qty_step} | min_qty={min_qty} | min_order_amt={min_order_amt} | qty_str={qty_str} | valore_usd={valore_usd:.4f} | fallback={fallback_count}")
+            log(f"[DECIMALI][SELL] {symbol} | qty={qty} | safe_qty={qty_to_try} | qty_step={qty_step} | min_qty={min_qty} | min_order_amt={min_order_amt} | qty_str={qty_str} | valore_usd={valore_usd:.4f} | fallback={fallback_count}")
             if valore_usd < min_order_amt or Decimal(qty_str) < Decimal(str(min_qty)) or Decimal(qty_str) <= 0:
                 saldo_attuale = get_free_qty(symbol)
                 log(f"❌ Quantità troppo piccola o valore troppo basso per {symbol} (qty={qty_str}, valore_usd={valore_usd:.4f}, min_order_amt={min_order_amt})")
@@ -555,6 +556,12 @@ def market_sell(symbol: str, qty: float):
                 resp_json = {}
             if resp.status_code == 200 and resp_json.get("retCode") == 0:
                 return resp
+            elif resp_json.get("retMsg", "").lower().find("insufficient balance") >= 0:
+                # PATCH: riduci la quantità e riprova
+                fallback_count += 1
+                qty_to_try = float(qty_str) - 2 * float(qty_step)
+                log(f"[DECIMALI][SELL][FALLBACK] {symbol} | Insufficient balance, riprovo con qty={qty_to_try}")
+                continue
             elif resp_json.get("retMsg", "").lower().find("too many decimals") >= 0:
                 fallback_count += 1
                 log(f"[DECIMALI][SELL][FALLBACK] {symbol} | Troppi decimali, provo con precisione {orig_precision-fallback_count}")
@@ -566,9 +573,8 @@ def market_sell(symbol: str, qty: float):
             log(f"❌ Errore invio ordine SELL: {e}")
             notify_telegram(f"❌❗️ Errore invio ordine SELL per {symbol}: {e}")
             return None
-    # Se esce dal ciclo, vendita fallita per troppi decimali
-    log(f"❌ Tutti i tentativi di vendita falliti per {symbol} (decimali)")
-    notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} (tutti i fallback decimali esauriti)")
+    log(f"❌ Tutti i tentativi di vendita falliti per {symbol} (decimali/bilancio)")
+    notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} (tutti i fallback decimali/bilancio esauriti)")
     return None
 
 def fetch_history(symbol: str):
