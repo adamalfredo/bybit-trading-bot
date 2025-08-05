@@ -481,15 +481,15 @@ def analyze_asset(symbol: str):
             return None, None, None
 
         is_volatile = symbol in VOLATILE_ASSETS
-        adx_threshold = 20 if is_volatile else 15
+        adx_threshold = 15 if is_volatile else 10
 
         last = df.iloc[-1]
         prev = df.iloc[-2]
         price = float(last["Close"])
 
         # --- Filtro trend di fondo: solo se EMA50 < EMA200 (trend ribassista) ---
-        if last["ema50"] >= last["ema200"]:
-            log(f"[STRATEGY][{symbol}] Filtro trend NON superato: ema50={last['ema50']:.4f} >= ema200={last['ema200']:.4f}")
+        if last["ema50"] >= last["ema200"] * 1.02:
+            log(f"[STRATEGY][{symbol}] Filtro trend NON superato (soft): ema50={last['ema50']:.4f} >= 102% ema200={last['ema200']:.4f}")
             return None, None, None
 
         # --- SHORT: almeno 2 condizioni ribassiste devono essere vere ---
@@ -530,7 +530,7 @@ def analyze_asset(symbol: str):
                 entry_conditions.append(True)
                 entry_strategies.append("Trend EMA + RSI (bearish)")
 
-        if len(entry_conditions) >= 2:
+        if len(entry_conditions) >= 1:
             log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT generato: strategie attive: {entry_strategies}")
             return "entry", ", ".join(entry_strategies), price
         else:
