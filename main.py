@@ -329,7 +329,7 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     qty_step = info.get("qty_step", 0.0001)
     min_order_amt = info.get("min_order_amt", 5)
     min_qty = info.get("min_qty", 0.0)
-    max_qty = info.get("max_qty", 0.0)  # <-- già presente
+    max_qty = info.get("max_qty", 0.0)
     precision = info.get("precision", 4)
     if usdt_amount < min_order_amt:
         log(f"❌ Budget troppo basso per {symbol}: {usdt_amount:.2f} < min_order_amt {min_order_amt}")
@@ -341,45 +341,39 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         qty_dec = Decimal(qty_str)
         min_qty_dec = Decimal(str(min_qty))
 
-        # PATCH: Limite massimo quantità Bybit (maxOrderQty) o limite prudente per coin a prezzo bassissimo
-        if price < 0.01:
-            # Se max_qty non è valorizzato o è troppo alto, imposta un limite prudente
-            if max_qty == 0.0 or max_qty > 500_000:
-                log(f"[MAX_QTY PATCH] {symbol}: max_qty API={max_qty} troppo alto o nullo, imposto max_qty=500000 per sicurezza")
-                max_qty = 500_000
-        if max_qty > 0 and qty_dec > Decimal(str(max_qty)):
-            log(f"❌ Quantità calcolata troppo grande per {symbol}: {qty_dec} > max_qty {max_qty}")
-            qty_dec = Decimal(str(max_qty))
-            qty_str = format_quantity_bybit(float(qty_dec), float(qty_step), precision=precision)
-
+        # NON applicare limiti artificiali sulla quantità!
+        # Solo controllo Bybit: min_qty e min_order_amt
         if qty_dec < min_qty_dec:
             log(f"[DECIMALI][CALC_QTY] {symbol} | qty_dec < min_qty_dec: {qty_dec} < {min_qty_dec}")
             qty_dec = min_qty_dec
             qty_str = format_quantity_bybit(float(qty_dec), float(qty_step), precision=precision)
         order_value = qty_dec * Decimal(str(price))
         log(f"[DECIMALI][CALC_QTY] {symbol} | qty_dec={qty_dec} | order_value={order_value}")
+
         if order_value < Decimal(str(min_order_amt)):
             log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
             return None
         if qty_dec <= 0:
             log(f"❌ Quantità calcolata troppo piccola per {symbol}")
             return None
+
         investito_effettivo = float(qty_dec) * float(price)
         if investito_effettivo < 0.95 * usdt_amount:
             log(f"⚠️ Attenzione: valore effettivo investito ({investito_effettivo:.2f} USDT) molto inferiore a quello richiesto ({usdt_amount:.2f} USDT)")
-        log(f"[DECIMALI][CALC_QTY][RETURN] {symbol} | qty_str={qty_str} | max_qty usato={max_qty}")
+
+        # LOG DIAGNOSTICO FINALE
+        log(f"[DEBUG-ORDER] {symbol} | USDT da investire: {usdt_amount} | Prezzo: {price} | Quantità calcolata: {qty_dec} | Valore ordine: {order_value:.8f} USDT | qty_step: {qty_step} | precision: {precision}")
+
         return qty_str
     except Exception as e:
         log(f"❌ Errore calcolo quantità per {symbol}: {e}")
         return None
 
 def market_buy(symbol: str, usdt_amount: float):
-    # Solo per coin a basso prezzo (< 100 USDT): logica fallback con riacquisto differenza
     price = get_last_price(symbol)
     if not price:
         log(f"❌ Prezzo non disponibile per {symbol}")
         return None
-    # Applica un margine di sicurezza per evitare insufficient balance
     safe_usdt_amount = usdt_amount * 0.98
     qty_str = calculate_quantity(symbol, safe_usdt_amount)
     if not qty_str:
@@ -417,7 +411,9 @@ def market_buy(symbol: str, usdt_amount: float):
         except Exception:
             resp_json = {}
         log(f"RESPONSE: {response.status_code} {resp_json}")
-        # Logga dettagli filled/cumExecQty/orderStatus se presenti
+        # LOG MOTIVO ERRORE BYBIT
+        if resp_json.get("retCode") != 0:
+            log(f"[BYBIT ERROR] Motivo rifiuto acquisto {symbol}: {resp_json.get('retMsg')}")
         if 'result' in resp_json:
             result = resp_json['result']
             filled = result.get('cumExecQty') or result.get('execQty') or result.get('qty')
@@ -433,18 +429,13 @@ def market_buy(symbol: str, usdt_amount: float):
             if not qty_after or qty_after == 0:
                 time.sleep(3)
                 qty_after = get_free_qty(symbol)
-
-            # Calcola la quantità richiesta in float
             try:
                 qty_requested = float(qty_str)
             except Exception:
                 qty_requested = None
-
-            # Se la quantità effettiva è molto inferiore a quella richiesta, logga e notifica
             if qty_requested and qty_after < 0.8 * qty_requested:
                 log(f"⚠️ Quantità acquistata ({qty_after}) molto inferiore a quella richiesta ({qty_requested}) per {symbol}")
                 notify_telegram(f"⚠️ Ordine parzialmente eseguito per {symbol}: richiesto {qty_requested}, ottenuto {qty_after}")
-                # Tenta un solo riacquisto della differenza se supera i minimi
                 diff = qty_requested - qty_after
                 price2 = get_last_price(symbol)
                 if diff > min_qty and price2 and (diff * price2) > min_order_amt:
@@ -467,6 +458,13 @@ def market_buy(symbol: str, usdt_amount: float):
                 return qty_after
             else:
                 log(f"⚠️ Acquisto riuscito ma saldo non aggiornato per {symbol}")
+        else:
+            # LOG MOTIVO ERRORE BYBIT anche qui
+            try:
+                resp_json = response.json()
+                log(f"[BYBIT ERROR] Motivo rifiuto acquisto {symbol}: {resp_json.get('retMsg')}")
+            except Exception:
+                pass
         return None
 
     except Exception as e:
