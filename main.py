@@ -157,19 +157,21 @@ def get_instrument_info(symbol):
             precision = int(info.get("basePrecision", 4))
             min_order_amt = float(info.get("minOrderAmt", 5))
             min_qty = float(info.get("lotSizeFilter", {}).get("minOrderQty", 0.0))
+            max_qty = float(info.get("lotSizeFilter", {}).get("maxOrderQty", 0.0))  # <-- aggiunto max_qty
             return {
                 "qty_step": qty_step,
                 "price_step": price_step,
                 "precision": precision,
                 "min_order_amt": min_order_amt,
-                "min_qty": min_qty
+                "min_qty": min_qty,
+                "max_qty": max_qty  # <-- aggiunto max_qty
             }
         else:
             log(f"[BYBIT] Errore get_instrument_info {symbol}: {data}")
-            return {"qty_step": 0.0001, "precision": 4, "min_order_amt": 5, "min_qty": 0.0}
+            return {"qty_step": 0.0001, "precision": 4, "min_order_amt": 5, "min_qty": 0.0, "max_qty": 0.0}
     except Exception as e:
         log(f"[BYBIT] Errore get_instrument_info {symbol}: {e}")
-        return {"qty_step": 0.0001, "precision": 4, "min_order_amt": 5, "min_qty": 0.0}
+        return {"qty_step": 0.0001, "precision": 4, "min_order_amt": 5, "min_qty": 0.0, "max_qty": 0.0}
 
 def get_free_qty(symbol):
     if symbol.endswith("USDT") and len(symbol) > 4:
@@ -327,6 +329,7 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     qty_step = info.get("qty_step", 0.0001)
     min_order_amt = info.get("min_order_amt", 5)
     min_qty = info.get("min_qty", 0.0)
+    max_qty = info.get("max_qty", 0.0)  # <-- aggiungi questa riga
     precision = info.get("precision", 4)
     if usdt_amount < min_order_amt:
         log(f"❌ Budget troppo basso per {symbol}: {usdt_amount:.2f} < min_order_amt {min_order_amt}")
@@ -337,6 +340,11 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         qty_str = format_quantity_bybit(float(raw_qty), float(qty_step), precision=precision)
         qty_dec = Decimal(qty_str)
         min_qty_dec = Decimal(str(min_qty))
+        # PATCH: controllo max_qty
+        if max_qty > 0 and qty_dec > Decimal(str(max_qty)):
+            log(f"❌ Quantità calcolata troppo grande per {symbol}: {qty_dec} > max_qty {max_qty}")
+            qty_dec = Decimal(str(max_qty))
+            qty_str = format_quantity_bybit(float(qty_dec), float(qty_step), precision=precision)
         if qty_dec < min_qty_dec:
             log(f"[DECIMALI][CALC_QTY] {symbol} | qty_dec < min_qty_dec: {qty_dec} < {min_qty_dec}")
             qty_dec = min_qty_dec
