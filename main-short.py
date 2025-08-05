@@ -440,7 +440,6 @@ def is_symbol_linear(symbol):
         return False
     
 # 4. Inverti la logica di ingresso/uscita in analyze_asset
-# Esempio (solo la parte principale, da adattare):
 def analyze_asset(symbol: str):
     try:
         df = fetch_history(symbol)
@@ -485,9 +484,9 @@ def analyze_asset(symbol: str):
         prev = df.iloc[-2]
         price = float(last["Close"])
 
-        # --- Filtro trend di fondo: solo se EMA50 < EMA200 (trend ribassista) ---
-        if last["ema50"] >= last["ema200"] * 1.02:
-            log(f"[STRATEGY][{symbol}] Filtro trend NON superato (soft): ema50={last['ema50']:.4f} >= 102% ema200={last['ema200']:.4f}")
+        # PATCH: filtro trend più rigoroso (solo se EMA50 < EMA200)
+        if last["ema50"] >= last["ema200"]:
+            log(f"[STRATEGY][{symbol}] Filtro trend NON superato (EMA50 >= EMA200): ema50={last['ema50']:.4f} >= ema200={last['ema200']:.4f}")
             return None, None, None
 
         # --- SHORT: almeno 2 condizioni ribassiste devono essere vere ---
@@ -496,7 +495,7 @@ def analyze_asset(symbol: str):
         if is_volatile:
             # SHORT: breakdown BB, incrocio SMA ribassista, MACD bearish
             cond1 = last["Close"] < last["bb_lower"]
-            cond2 = last["rsi"] > 30
+            cond2 = last["rsi"] < 50  # PATCH: RSI sotto 50, più ribassista
             if cond1 and cond2:
                 entry_conditions.append(True)
                 entry_strategies.append("Breakdown Bollinger")
@@ -522,13 +521,14 @@ def analyze_asset(symbol: str):
             if cond3 and cond4:
                 entry_conditions.append(True)
                 entry_strategies.append("MACD bearish (stabile)")
-            cond5 = last["rsi"] < 50
+            cond5 = last["rsi"] < 45  # PATCH: RSI sotto 45, più ribassista
             cond6 = last["ema20"] < last["ema50"]
             if cond5 and cond6:
                 entry_conditions.append(True)
                 entry_strategies.append("Trend EMA + RSI (bearish)")
 
-        if len(entry_conditions) >= 1:
+        # PATCH: almeno 2 condizioni ribassiste vere per entrare short
+        if len(entry_conditions) >= 2:
             log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT generato: strategie attive: {entry_strategies}")
             return "entry", ", ".join(entry_strategies), price
         else:
@@ -536,7 +536,7 @@ def analyze_asset(symbol: str):
 
         # --- EXIT SHORT: almeno una condizione bullish ---
         cond_exit1 = last["Close"] > last["bb_upper"]
-        cond_exit2 = last["rsi"] < 70
+        cond_exit2 = last["rsi"] > 60  # PATCH: RSI sopra 60, più bullish
         if cond_exit1 and cond_exit2:
             log(f"[STRATEGY][{symbol}] Segnale EXIT SHORT: Rimbalzo RSI + BB (bullish)")
             return "exit", "Rimbalzo RSI + BB (bullish)", price
@@ -551,6 +551,8 @@ def analyze_asset(symbol: str):
     except Exception as e:
         log(f"Errore analisi {symbol}: {e}")
         return None, None, None
+
+# ...existing code...
 
 log("🔄 Avvio sistema di monitoraggio segnali reali")
 notify_telegram("🤖 BOT [SHORT] AVVIATO - In ascolto per segnali di ingresso/uscita")
