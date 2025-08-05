@@ -492,11 +492,12 @@ def market_sell(symbol: str, qty: float):
         try:
             use_precision = max(0, orig_precision - fallback_count)
             qty_str = format_quantity_bybit(safe_qty, qty_step, use_precision)
-            log(f"[DECIMALI][SELL] {symbol} | qty={qty} | safe_qty={safe_qty} | qty_step={qty_step} | min_qty={min_qty} | min_order_amt={min_order_amt} | qty_str={qty_str} | fallback={fallback_count}")
-            if Decimal(qty_str) < Decimal(str(min_qty)) or Decimal(qty_str) <= 0:
+            valore_usd = float(qty_str) * price
+            log(f"[DECIMALI][SELL] {symbol} | qty={qty} | safe_qty={safe_qty} | qty_step={qty_step} | min_qty={min_qty} | min_order_amt={min_order_amt} | qty_str={qty_str} | valore_usd={valore_usd:.4f} | fallback={fallback_count}")
+            if valore_usd < min_order_amt or Decimal(qty_str) < Decimal(str(min_qty)) or Decimal(qty_str) <= 0:
                 saldo_attuale = get_free_qty(symbol)
-                log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento, min_qty={min_qty})")
-                notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} (saldo troppo piccolo: {saldo_attuale}, min_qty richiesto: {min_qty})")
+                log(f"❌ Quantità troppo piccola o valore troppo basso per {symbol} (qty={qty_str}, valore_usd={valore_usd:.4f}, min_order_amt={min_order_amt})")
+                notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} (valore troppo basso: {valore_usd:.4f} USDT, min richiesto: {min_order_amt})")
                 return
         except Exception as e:
             log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
