@@ -337,8 +337,18 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     try:
         raw_qty = Decimal(str(usdt_amount)) / Decimal(str(price))
         log(f"[DECIMALI][CALC_QTY] {symbol} | usdt_amount={usdt_amount} | price={price} | raw_qty={raw_qty} | qty_step={qty_step} | precision={precision}")
-        qty_str = format_quantity_bybit(float(raw_qty), float(qty_step), precision=precision)
-        qty_dec = Decimal(qty_str)
+        # PATCH: forza quantità intera se qty_step == 1
+        if float(qty_step) == 1:
+            qty_int = int(Decimal(raw_qty).to_integral_value(rounding=ROUND_DOWN))
+            qty_str = str(qty_int)
+            qty_dec = Decimal(qty_int)
+            log(f"[DECIMALI][FORCE_INT] {symbol} | qty_step={qty_step} | qty_int={qty_int}")
+        else:
+            qty_str = format_quantity_bybit(float(raw_qty), float(qty_step), precision=precision)
+            qty_dec = Decimal(qty_str)
+        
+        log(f"[DEBUG-QTY] {symbol} | qty_step={qty_step} | qty_str={qty_str} | qty_dec={qty_dec}")
+        
         min_qty_dec = Decimal(str(min_qty))
 
         # NON applicare limiti artificiali sulla quantità!
