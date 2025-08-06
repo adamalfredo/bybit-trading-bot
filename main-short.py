@@ -702,8 +702,10 @@ def get_portfolio_value():
 
 low_balance_alerted = False  # Deve essere fuori dal ciclo per persistere tra i cicli
 def trailing_stop_worker():
+    log("[DEBUG] Avvio ciclo trailing_stop_worker")
     while True:
         for symbol in list(open_positions):
+            log("[DEBUG] Nessuna posizione aperta nel worker")
             if symbol not in position_data:
                 continue
             saldo = get_open_short_qty(symbol)
