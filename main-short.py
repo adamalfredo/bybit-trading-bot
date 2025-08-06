@@ -128,18 +128,21 @@ def get_open_short_qty(symbol):
     try:
         endpoint = f"{BYBIT_BASE_URL}/v5/position/list"
         params = {"category": "linear", "symbol": symbol}
+        from urllib.parse import urlencode
+        query_string = urlencode(sorted(params.items()))
         ts = str(int(time.time() * 1000))
-        sign_payload = f"{ts}{KEY}5000"
+        recv_window = "5000"
+        sign_payload = f"{ts}{KEY}{recv_window}{query_string}"
         sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
         headers = {
             "X-BAPI-API-KEY": KEY,
             "X-BAPI-SIGN": sign,
             "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": "5000"
+            "X-BAPI-RECV-WINDOW": recv_window
         }
         resp = requests.get(endpoint, headers=headers, params=params, timeout=10)
         data = resp.json()
-        log(f"[BYBIT-RAW] get_open_short_qty {symbol}: {json.dumps(data)}")  # PATCH DIAGNOSTICA
+        log(f"[BYBIT-RAW] get_open_short_qty {symbol}: {json.dumps(data)}")
         if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
             return 0.0
         for pos in data["result"]["list"]:
