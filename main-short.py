@@ -710,9 +710,11 @@ def trailing_stop_worker():
             if symbol not in position_data:
                 continue
             saldo = get_open_short_qty(symbol)
+            info = get_instrument_info(symbol)
+            min_qty = info.get("min_qty", 0.0)
             log(f"[DEBUG] Quantità short effettiva per {symbol}: {saldo}")
-            if saldo is None or saldo < 1:
-                log(f"[CLEANUP] {symbol}: saldo troppo basso ({saldo}), rimuovo da open_positions e position_data (polvere)")
+            if saldo is None or saldo < min_qty:
+                log(f"[CLEANUP] {symbol}: saldo troppo basso ({saldo}), rimuovo da open_positions e position_data (polvere, min_qty={min_qty})")
                 open_positions.discard(symbol)
                 position_data.pop(symbol, None)
                 continue
@@ -960,8 +962,10 @@ while True:
     # PATCH: rimuovi posizioni con saldo < 1 (polvere) anche nel ciclo principale
     for symbol in list(open_positions):
         saldo = get_open_short_qty(symbol)
-        if saldo is None or saldo < 1:
-            log(f"[CLEANUP] {symbol}: saldo troppo basso ({saldo}), rimuovo da open_positions e position_data (polvere)")
+        info = get_instrument_info(symbol)
+        min_qty = info.get("min_qty", 0.0)
+        if saldo is None or saldo < min_qty:
+            log(f"[CLEANUP] {symbol}: saldo troppo basso ({saldo}), rimuovo da open_positions e position_data (polvere, min_qty={min_qty})")
             open_positions.discard(symbol)
             position_data.pop(symbol, None)
             continue
