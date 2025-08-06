@@ -1081,9 +1081,8 @@ try:
 
                 max_invest = min(group_available, usdt_balance) * strength
                 order_amount = min(max_invest, group_available, usdt_balance, 250)
-                # PATCH: non superare mai il saldo USDT effettivo
-                if order_amount > usdt_balance:
-                    order_amount = usdt_balance
+                usdt_balance = get_usdt_balance()  # <-- aggiorna saldo reale subito prima dell'acquisto
+                order_amount = min(order_amount, usdt_balance)
                 log(f"[FORZA] {symbol} - Strategia: {strategy}, Strength: {strength}, Investo: {order_amount:.2f} USDT (Saldo: {usdt_balance:.2f})")
 
                 # BLOCCO: non tentare acquisto se order_amount < min_order_amt
