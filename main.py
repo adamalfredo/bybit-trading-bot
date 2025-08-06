@@ -205,7 +205,8 @@ def get_free_qty(symbol):
         coin_list = data["result"]["list"][0].get("coin", [])
         for c in coin_list:
             if c["coin"] == coin:
-                raw = c.get("walletBalance", "0")
+                log(f"[BYBIT BALANCE DEBUG] {coin}: {c}")
+                raw = c.get("availableToWithdraw") or c.get("availableBalance") or c.get("walletBalance", "0")
                 try:
                     qty = float(raw) if raw else 0.0
                     if qty > 0:
