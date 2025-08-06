@@ -1181,7 +1181,9 @@ try:
                     "tp_partial": tp_partial,
                     "entry_time": time.time(),
                     "trailing_active": False,
-                    "p_max": price
+                    "p_max": price,
+                    "trailing_tp_active": False,
+                    "tp_max": price
                 }
 
                 open_positions.add(symbol)
@@ -1297,6 +1299,44 @@ try:
                     if new_sl > entry["sl"]:
                         log(f"📉 SL aggiornato per {symbol}: da {entry['sl']:.4f} a {new_sl:.4f}")
                         entry["sl"] = new_sl
+            # PATCH TRAILING TP: attiva trailing TP se supera TP
+            if not entry.get("trailing_tp_active", False) and current_price >= entry["tp"]:
+                entry["trailing_tp_active"] = True
+                entry["tp_max"] = current_price
+                log(f"🔛 Trailing TP attivato per {symbol} sopra TP → Prezzo: {current_price:.4f}")
+                notify_telegram(f"🔛 Trailing TP attivo su {symbol}\nPrezzo: {current_price:.4f}")
+            
+            if entry.get("trailing_tp_active", False):
+                if current_price > entry["tp_max"]:
+                    entry["tp_max"] = current_price
+                    log(f"⬆️ TP massimo aggiornato per {symbol}: {entry['tp_max']:.4f}")
+                tp_trailing_buffer = 0.01  # 1% sotto il massimo raggiunto
+                trailing_tp_price = entry["tp_max"] * (1 - tp_trailing_buffer)
+                if current_price <= trailing_tp_price:
+                    log(f"🔻 Trailing TP attivato per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
+                    notify_telegram(f"🔻 Trailing TP venduto per {symbol} a {current_price:.4f}")
+                    qty = get_free_qty(symbol)
+                    if qty > 0:
+                        usdt_before = get_usdt_balance()
+                        resp = market_sell(symbol, qty)
+                        if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+                            entry_price = entry["entry_price"]
+                            entry_cost = entry.get("entry_cost", ORDER_USDT)
+                            qty = entry.get("qty", qty)
+                            exit_value = current_price * qty
+                            delta = exit_value - entry_cost
+                            pnl = (delta / entry_cost) * 100
+                            log(f"🔻 Trailing TP venduto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
+                            notify_telegram(f"🔻 Trailing TP venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
+                            log_trade_to_google(symbol, entry_price, current_price, pnl, "Trailing TP", "TP Triggered", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
+                            open_positions.discard(symbol)
+                            last_exit_time[symbol] = time.time()
+                            position_data.pop(symbol, None)
+                        else:
+                            log(f"❌ Vendita fallita con Trailing TP per {symbol}")
+                            notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} durante Trailing TP!")
+                    else:
+                        log(f"❌ Quantità nulla o troppo piccola per vendita Trailing TP su {symbol}")
             # --- CHIUSURA AUTOMATICA: Trailing Stop o Stop Loss statico ---
             sl_triggered = False
             sl_type = None
