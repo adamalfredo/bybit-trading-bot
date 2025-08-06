@@ -569,15 +569,14 @@ position_data = {}
 last_exit_time = {}
 
 def sync_positions_from_wallet():
-    """
-    Popola open_positions e position_data con tutte le coin con saldo short > 0 all'avvio/ciclo.
-    """
     log("[SYNC] Avvio scansione posizioni short dal wallet...")
     trovate = 0
     for symbol in ASSETS:
         if symbol == "USDT":
             continue
+        # PATCH: log dettagliato per ogni asset
         qty = get_open_short_qty(symbol)
+        log(f"[SYNC-DEBUG] {symbol}: qty short trovata = {qty}")
         if qty and qty > 0:
             price = get_last_price(symbol)
             if not price:
