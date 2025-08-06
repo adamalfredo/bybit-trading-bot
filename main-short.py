@@ -705,10 +705,11 @@ def trailing_stop_worker():
     log("[DEBUG] Avvio ciclo trailing_stop_worker")
     while True:
         for symbol in list(open_positions):
-            log("[DEBUG] Nessuna posizione aperta nel worker")
+            log(f"[DEBUG] Worker processa: {symbol} | open_positions: {open_positions} | position_data: {position_data.keys()}")
             if symbol not in position_data:
                 continue
             saldo = get_open_short_qty(symbol)
+            log(f"[DEBUG] Quantità short effettiva per {symbol}: {saldo}")
             if saldo is None or saldo < 1:
                 log(f"[CLEANUP] {symbol}: saldo troppo basso ({saldo}), rimuovo da open_positions e position_data (polvere)")
                 open_positions.discard(symbol)
