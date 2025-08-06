@@ -720,6 +720,25 @@ def trailing_stop_worker():
             current_price = get_last_price(symbol)
             if not current_price:
                 continue
+            entry_price = entry.get("entry_price", current_price)
+            entry_cost = entry.get("entry_cost", ORDER_USDT)
+            qty = get_open_short_qty(symbol)
+            # PATCH MAX LOSS SHORT
+            if qty > 0 and entry_price and current_price:
+                pnl_pct = ((entry_price - current_price) / entry_price) * 100
+                max_loss_pct = -2.0  # Soglia massima di perdita accettata (-2%)
+                if pnl_pct < max_loss_pct:
+                    log(f"🔴 [MAX LOSS] Ricopro SHORT su {symbol} per perdita superiore al {abs(max_loss_pct)}% | PnL: {pnl_pct:.2f}%")
+                    notify_telegram(f"🔴 [MAX LOSS] Ricopertura SHORT su {symbol} per perdita > {abs(max_loss_pct)}%\nPnL: {pnl_pct:.2f}%")
+                    resp = market_cover(symbol, qty)
+                    if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+                        exit_value = current_price * qty
+                        delta = exit_value - entry_cost
+                        log_trade_to_google(symbol, entry_price, current_price, pnl_pct, "MAX LOSS", "Forced Exit", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
+                        open_positions.discard(symbol)
+                        last_exit_time[symbol] = time.time()
+                        position_data.pop(symbol, None)
+                    continue
             if symbol in VOLATILE_ASSETS:
                 trailing_threshold = 0.02
             else:
