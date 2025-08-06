@@ -125,10 +125,6 @@ def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] 
     return fmt.format(floored_qty)
 
 def get_open_short_qty(symbol):
-    """
-    Restituisce la quantità short aperta su Bybit futures per il simbolo dato.
-    Se la posizione è short (side=Sell), restituisce la quantità assoluta (>0), altrimenti 0.
-    """
     try:
         endpoint = f"{BYBIT_BASE_URL}/v5/position/list"
         params = {"category": "linear", "symbol": symbol}
@@ -143,10 +139,10 @@ def get_open_short_qty(symbol):
         }
         resp = requests.get(endpoint, headers=headers, params=params, timeout=10)
         data = resp.json()
+        log(f"[BYBIT-RAW] get_open_short_qty {symbol}: {json.dumps(data)}")  # PATCH DIAGNOSTICA
         if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
             return 0.0
         for pos in data["result"]["list"]:
-            # Su Bybit, una posizione short ha "side": "Sell" e "size" > 0
             if pos.get("side") == "Sell":
                 qty = float(pos.get("size", 0))
                 return qty if qty > 0 else 0.0
