@@ -570,8 +570,10 @@ last_exit_time = {}
 
 def sync_positions_from_wallet():
     """
-    Popola open_positions e position_data con tutte le coin con saldo > 0 all'avvio.
+    Popola open_positions e position_data con tutte le coin con saldo short > 0 all'avvio/ciclo.
     """
+    log("[SYNC] Avvio scansione posizioni short dal wallet...")
+    trovate = 0
     for symbol in ASSETS:
         if symbol == "USDT":
             continue
@@ -581,7 +583,6 @@ def sync_positions_from_wallet():
             if not price:
                 continue
             open_positions.add(symbol)
-            # Stima entry_price come prezzo attuale, entry_cost come qty*prezzo
             entry_price = price
             entry_cost = qty * price
             # Calcola ATR e SL/TP di default
@@ -595,8 +596,8 @@ def sync_positions_from_wallet():
                     atr_val = price * 0.02
             else:
                 atr_val = price * 0.02
-            tp = price - (atr_val * TP_FACTOR)  # TP sotto entry per short
-            sl = price + (atr_val * SL_FACTOR)  # SL sopra entry per short
+            tp = price - (atr_val * TP_FACTOR)
+            sl = price + (atr_val * SL_FACTOR)
             min_sl = price * 1.01
             if sl < min_sl:
                 sl = min_sl
@@ -608,9 +609,11 @@ def sync_positions_from_wallet():
                 "qty": qty,
                 "entry_time": time.time(),
                 "trailing_active": False,
-                "p_max": price
+                "p_min": price
             }
-            log(f"[SYNC] Posizione trovata in wallet: {symbol} qty={qty} entry={entry_price:.4f} SL={sl:.4f} TP={tp:.4f}")
+            trovate += 1
+            log(f"[SYNC] Posizione trovata: {symbol} qty={qty} entry={entry_price:.4f} SL={sl:.4f} TP={tp:.4f}")
+    log(f"[SYNC] Totale posizioni short recuperate dal wallet: {trovate}")
 
 # --- Esegui sync all'avvio ---
 
@@ -800,6 +803,7 @@ trailing_thread.start()
 while True:
     # Aggiorna la lista asset dinamicamente ogni ciclo
     update_assets()
+    sync_positions_from_wallet()
     portfolio_value, usdt_balance, coin_values = get_portfolio_value()
     volatile_budget = portfolio_value * 0.7
     stable_budget = portfolio_value * 0.3
