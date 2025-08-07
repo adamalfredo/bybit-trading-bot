@@ -758,14 +758,41 @@ def trailing_stop_worker():
             if not entry["trailing_active"] and current_price <= soglia_attivazione:
                 entry["trailing_active"] = True
                 log(f"🔛 Trailing Stop SHORT attivato per {symbol} sotto soglia → Prezzo: {current_price:.4f}")
-                notify_telegram(f"🔛 Trailing Stop SHORT attivato su {symbol}\nPrezzo: {current_price:.4f}")
+                notify_telegram(f"🔛🔻 Trailing Stop SHORT attivato su {symbol}\nPrezzo: {current_price:.4f}")
             if entry["trailing_active"]:
+                # Aggiorna il minimo raggiunto
                 if current_price < entry.get("p_min", entry["entry_price"]):
                     entry["p_min"] = current_price
-                    new_sl = current_price * (1 + TRAILING_SL_BUFFER)
-                    if new_sl < entry["sl"]:
-                        log(f"📉 SL SHORT aggiornato per {symbol}: da {entry['sl']:.4f} a {new_sl:.4f}")
-                        entry["sl"] = new_sl
+                    log(f"⬇️ Nuovo minimo raggiunto per {symbol}: {entry['p_min']:.4f}")
+                # Trailing Take Profit SHORT: se il prezzo risale di X% dal minimo, chiudi la posizione
+                tp_trailing_buffer = 0.01  # 1% sopra il minimo raggiunto
+                trailing_tp_price = entry["p_min"] * (1 + tp_trailing_buffer)
+                if current_price >= trailing_tp_price:
+                    log(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
+                    notify_telegram(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} a {current_price:.4f}")
+                    qty = get_free_qty(symbol)
+                    if qty > 0:
+                        usdt_before = get_usdt_balance()
+                        resp = market_cover(symbol, qty)
+                        if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+                            entry_price = entry["entry_price"]
+                            entry_cost = entry.get("entry_cost", ORDER_USDT)
+                            qty = entry.get("qty", qty)
+                            exit_value = current_price * qty
+                            delta = exit_value - entry_cost
+                            pnl = (delta / entry_cost) * 100
+                            log(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
+                            notify_telegram(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
+                            log_trade_to_google(symbol, entry_price, current_price, pnl, "Trailing TP SHORT", "TP Triggered", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
+                            open_positions.discard(symbol)
+                            last_exit_time[symbol] = time.time()
+                            position_data.pop(symbol, None)
+                    continue
+                # Continua ad aggiornare lo SL trailing come prima
+                new_sl = current_price * (1 + TRAILING_SL_BUFFER)
+                if new_sl < entry["sl"]:
+                    log(f"📉 SL SHORT aggiornato per {symbol}: da {entry['sl']:.4f} a {new_sl:.4f}")
+                    entry["sl"] = new_sl
             sl_triggered = False
             sl_type = None
             if entry["trailing_active"] and current_price >= entry["sl"]:
