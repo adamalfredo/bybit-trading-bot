@@ -316,7 +316,7 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
             log(f"❌ Errore invio ordine LIMIT BUY: {e}")
             retry += 1
     log(f"❌ Tutti i tentativi LIMIT BUY falliti per {symbol}")
-    notify_telegram(f"❌ Tutti i tentativi LIMIT BUY falliti per {symbol}")
+    # notify_telegram(f"❌ Tutti i tentativi LIMIT BUY falliti per {symbol}")
     return None
 
 def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
@@ -972,7 +972,7 @@ def trailing_stop_worker():
                         delta = exit_value - entry_cost
                         pnl = (delta / entry_cost) * 100
                         log(f"🔻 {sl_type} attivato per {symbol} → Prezzo: {current_price:.4f} | SL: {entry['sl']:.4f}")
-                        notify_telegram(f"🔻 {sl_type} venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
+                        notify_telegram(f"🎯🔻{sl_type} venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
                         log_trade_to_google(symbol, entry_price, current_price, pnl, sl_type, "SL Triggered", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
                         open_positions.discard(symbol)
                         last_exit_time[symbol] = time.time()
@@ -1332,7 +1332,7 @@ try:
                 trailing_tp_price = entry["tp_max"] * (1 - tp_trailing_buffer)
                 if current_price <= trailing_tp_price:
                     log(f"🔺Trailing TP venduto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
-                    notify_telegram(f"🔺Trailing TP venduto per {symbol} a {current_price:.4f}")
+                    notify_telegram(f"🎯🔺Trailing TP venduto per {symbol} a {current_price:.4f}")
                     qty = get_free_qty(symbol)
                     if qty > 0:
                         usdt_before = get_usdt_balance()
@@ -1345,7 +1345,7 @@ try:
                             delta = exit_value - entry_cost
                             pnl = (delta / entry_cost) * 100
                             log(f"🔺Trailing TP venduto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
-                            notify_telegram(f"🔺Trailing TP venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
+                            notify_telegram(f"🎯🔺Trailing TP venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
                             log_trade_to_google(symbol, entry_price, current_price, pnl, "Trailing TP", "TP Triggered", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
                             open_positions.discard(symbol)
                             last_exit_time[symbol] = time.time()
@@ -1380,7 +1380,7 @@ try:
                         delta = exit_value - entry_cost
                         pnl = (delta / entry_cost) * 100
                         log(f"🔻 {sl_type} attivato per {symbol} → Prezzo: {current_price:.4f} | SL: {entry['sl']:.4f}")
-                        notify_telegram(f"🔻 {sl_type} venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
+                        notify_telegram(f"🎯🔻{sl_type} venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
                         log_trade_to_google(symbol, entry_price, current_price, pnl, sl_type, "SL Triggered", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
                         # 🗑️ Pulizia
                         open_positions.discard(symbol)
