@@ -206,7 +206,11 @@ def get_free_qty(symbol):
         for c in coin_list:
             if c["coin"] == coin:
                 log(f"[BYBIT BALANCE DEBUG] {coin}: {c}")
-                raw = c.get("availableToWithdraw") or c.get("availableBalance") or c.get("walletBalance", "0")
+                raw = c.get("availableToWithdraw")
+                if raw is None or raw == "":
+                    # Se non disponibile, considera saldo zero (NON usare altri campi!)
+                    raw = "0"
+                qty = float(raw) if raw else 0.0
                 try:
                     qty = float(raw) if raw else 0.0
                     if qty > 0:
@@ -974,6 +978,7 @@ def trailing_stop_worker():
                         open_positions.discard(symbol)
                         last_exit_time[symbol] = time.time()
                         position_data.pop(symbol, None)
+                        continue
                     else:
                         log(f"❌ Vendita fallita con {sl_type} per {symbol}")
                         notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} durante {sl_type}!")
@@ -1082,7 +1087,21 @@ try:
                 max_invest = min(group_available, usdt_balance) * strength
                 order_amount = min(max_invest, group_available, usdt_balance, 250)
                 usdt_balance = get_usdt_balance()  # <-- aggiorna saldo reale subito prima dell'acquisto
-                order_amount = min(order_amount, usdt_balance)
+                safe_usdt_balance = usdt_balance * 0.98  # Usa solo il 98% del saldo per sicurezza
+                order_amount = min(order_amount, safe_usdt_balance)
+                log(f"[DEBUG] Saldo USDT availableToWithdraw: {usdt_balance:.6f}")
+                log(f"[DEBUG] Saldo USDT usato per acquisto (con margine sicurezza): {safe_usdt_balance:.6f}")
+                log(f"[DEBUG] Valore ordine previsto: {order_amount:.6f}")
+                # PATCH D: Blocca acquisti troppo piccoli
+                min_order_amt = get_instrument_info(symbol).get("min_order_amt", 5)
+                if order_amount < min_order_amt:
+                    log(f"❌ Saldo troppo basso per acquisto di {symbol}: {order_amount:.2f} < min_order_amt {min_order_amt}")
+                    if not low_balance_alerted:
+                        notify_telegram(f"❗️ Saldo USDT troppo basso per nuovi acquisti. Ricarica il wallet per continuare a operare.")
+                        low_balance_alerted = True
+                    continue
+                else:
+                    low_balance_alerted = False
                 log(f"[FORZA] {symbol} - Strategia: {strategy}, Strength: {strength}, Investo: {order_amount:.2f} USDT (Saldo: {usdt_balance:.2f})")
 
                 # BLOCCO: non tentare acquisto se order_amount < min_order_amt
@@ -1243,6 +1262,7 @@ try:
                     open_positions.discard(symbol)
                     last_exit_time[symbol] = time.time()
                     position_data.pop(symbol, None)
+                    continue
                 else:
                     saldo_attuale = get_free_qty(symbol)
                     # PATCH: logga dettagli anche in caso di errore
@@ -1332,6 +1352,7 @@ try:
                             open_positions.discard(symbol)
                             last_exit_time[symbol] = time.time()
                             position_data.pop(symbol, None)
+                            continue
                         else:
                             log(f"❌ Vendita fallita con Trailing TP per {symbol}")
                             notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} durante Trailing TP!")
@@ -1367,6 +1388,7 @@ try:
                         open_positions.discard(symbol)
                         last_exit_time[symbol] = time.time()
                         position_data.pop(symbol, None)
+                        continue
                     else:
                         log(f"❌ Vendita fallita con {sl_type} per {symbol}")
                         notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} durante {sl_type}!")
