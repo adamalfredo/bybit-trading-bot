@@ -207,13 +207,7 @@ def get_free_qty(symbol):
             if c["coin"] == coin:
                 log(f"[BYBIT BALANCE DEBUG] {coin}: {c}")
                 # Ordine di priorità: availableToWithdraw > walletBalance > equity
-                raw = c.get("availableToWithdraw")
-                if raw is None or raw == "" or float(raw) == 0:
-                    log(f"[BYBIT BALANCE FALLBACK] {coin}: availableToWithdraw non valido ({raw}), provo walletBalance")
-                    raw = c.get("walletBalance", "0")
-                if raw is None or raw == "" or float(raw) == 0:
-                    log(f"[BYBIT BALANCE FALLBACK] {coin}: walletBalance non valido ({raw}), provo equity")
-                    raw = c.get("equity", "0")
+                raw = c.get("walletBalance", "0")
                 try:
                     qty = float(raw) if raw else 0.0
                     if qty > 0:
@@ -1091,12 +1085,9 @@ try:
                 max_invest = min(group_available, usdt_balance) * strength
                 order_amount = min(max_invest, group_available, usdt_balance, 250)
                 usdt_balance = get_usdt_balance()  # <-- aggiorna saldo reale subito prima dell'acquisto
-                safe_usdt_balance = usdt_balance * 0.98  # Usa solo il 98% del saldo per sicurezza
-                order_amount = min(order_amount, safe_usdt_balance)
-                log(f"[DEBUG] Saldo USDT availableToWithdraw: {usdt_balance:.6f}")
-                log(f"[DEBUG] Saldo USDT usato per acquisto (con margine sicurezza): {safe_usdt_balance:.6f}")
+                order_amount = min(order_amount, usdt_balance)
+                log(f"[DEBUG] Saldo USDT: {usdt_balance:.6f}")
                 log(f"[DEBUG] Valore ordine previsto: {order_amount:.6f}")
-                # PATCH D: Blocca acquisti troppo piccoli
                 min_order_amt = get_instrument_info(symbol).get("min_order_amt", 5)
                 if order_amount < min_order_amt:
                     log(f"❌ Saldo troppo basso per acquisto di {symbol}: {order_amount:.2f} < min_order_amt {min_order_amt}")
