@@ -490,13 +490,13 @@ def analyze_asset(symbol: str):
             log(f"[STRATEGY][{symbol}] Filtro trend NON superato (EMA50 >= EMA200): ema50={last['ema50']:.4f} >= ema200={last['ema200']:.4f}")
             return None, None, None
 
-        # --- SHORT: almeno 2 condizioni ribassiste devono essere vere ---
+        # --- SHORT: condizioni ribassiste ---
         entry_conditions = []
         entry_strategies = []
         if is_volatile:
             # SHORT: breakdown BB, incrocio SMA ribassista, MACD bearish
             cond1 = last["Close"] < last["bb_lower"]
-            cond2 = last["rsi"] < 50  # PATCH: RSI sotto 50, più ribassista
+            cond2 = last["rsi"] < 45  # PATCH: RSI sotto 45, più selettivo
             if cond1 and cond2:
                 entry_conditions.append(True)
                 entry_strategies.append("Breakdown Bollinger")
@@ -510,6 +510,12 @@ def analyze_asset(symbol: str):
             if cond5 and cond6:
                 entry_conditions.append(True)
                 entry_strategies.append("MACD bearish + ADX")
+            # PATCH: almeno 3 condizioni ribassiste vere per entrare short su volatili
+            if len(entry_conditions) >= 3:
+                log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT generato: strategie attive: {entry_strategies}")
+                return "entry", ", ".join(entry_strategies), price
+            else:
+                log(f"[STRATEGY][{symbol}] Nessun segnale ENTRY SHORT: condizioni soddisfatte = {len(entry_conditions)}")
         else:
             # SHORT: incrocio EMA ribassista, MACD bearish, trend EMA+RSI ribassista
             cond1 = prev["ema20"] > prev["ema50"]
@@ -522,22 +528,21 @@ def analyze_asset(symbol: str):
             if cond3 and cond4:
                 entry_conditions.append(True)
                 entry_strategies.append("MACD bearish (stabile)")
-            cond5 = last["rsi"] < 45  # PATCH: RSI sotto 45, più ribassista
+            cond5 = last["rsi"] < 40  # PATCH: RSI sotto 40, più selettivo
             cond6 = last["ema20"] < last["ema50"]
             if cond5 and cond6:
                 entry_conditions.append(True)
                 entry_strategies.append("Trend EMA + RSI (bearish)")
-
-        # PATCH: almeno 2 condizioni ribassiste vere per entrare short
-        if len(entry_conditions) >= 2:
-            log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT generato: strategie attive: {entry_strategies}")
-            return "entry", ", ".join(entry_strategies), price
-        else:
-            log(f"[STRATEGY][{symbol}] Nessun segnale ENTRY SHORT: condizioni soddisfatte = {len(entry_conditions)}")
+            # PATCH: almeno 2 condizioni ribassiste vere per entrare short su meno volatili
+            if len(entry_conditions) >= 2:
+                log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT generato: strategie attive: {entry_strategies}")
+                return "entry", ", ".join(entry_strategies), price
+            else:
+                log(f"[STRATEGY][{symbol}] Nessun segnale ENTRY SHORT: condizioni soddisfatte = {len(entry_conditions)}")
 
         # --- EXIT SHORT: almeno una condizione bullish ---
         cond_exit1 = last["Close"] > last["bb_upper"]
-        cond_exit2 = last["rsi"] > 60  # PATCH: RSI sopra 60, più bullish
+        cond_exit2 = last["rsi"] > 60
         if cond_exit1 and cond_exit2:
             log(f"[STRATEGY][{symbol}] Segnale EXIT SHORT: Rimbalzo RSI + BB (bullish)")
             return "exit", "Rimbalzo RSI + BB (bullish)", price
@@ -553,15 +558,10 @@ def analyze_asset(symbol: str):
         log(f"Errore analisi {symbol}: {e}")
         return None, None, None
 
-# ...existing code...
-
 log("🔄 Avvio sistema di monitoraggio segnali reali")
 notify_telegram("🤖 BOT [SHORT] AVVIATO - In ascolto per segnali di ingresso/uscita")
 
-
 TEST_MODE = False  # Acquisti e vendite normali abilitati
-
-
 
 MIN_HOLDING_MINUTES = 1  # Tempo minimo in minuti da attendere dopo l'acquisto prima di poter attivare uno stop loss
 # --- SYNC POSIZIONI APERTE DA WALLET ALL'AVVIO ---
@@ -748,9 +748,9 @@ def trailing_stop_worker():
                         position_data.pop(symbol, None)
                     continue
             if symbol in VOLATILE_ASSETS:
-                trailing_threshold = 0.02
+                trailing_threshold = 0.03
             else:
-                trailing_threshold = 0.005
+                trailing_threshold = 0.01
             soglia_attivazione = entry["entry_price"] * (1 - trailing_threshold)
             log(f"[TRAILING CHECK][SHORT] {symbol} | entry_price={entry['entry_price']:.4f} | current_price={current_price:.4f} | soglia={soglia_attivazione:.4f} | trailing_active={entry['trailing_active']} | threshold={trailing_threshold}")
             if not entry["trailing_active"] and current_price <= soglia_attivazione:
@@ -804,7 +804,7 @@ def trailing_stop_worker():
                         log(f"[TEST][SL_FAIL] Ricopertura fallita con {sl_type} per {symbol}")
                 else:
                     log(f"[TEST][SL_FAIL] Quantità nulla o troppo piccola per ricopertura {sl_type} su {symbol}")
-        time.sleep(60)
+        time.sleep(15)
 
 trailing_thread = threading.Thread(target=trailing_stop_worker, daemon=True)
 trailing_thread.start()
