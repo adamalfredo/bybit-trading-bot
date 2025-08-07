@@ -440,7 +440,7 @@ def market_buy(symbol: str, usdt_amount: float):
                 qty_requested = None
             if qty_requested and qty_after < 0.8 * qty_requested:
                 log(f"⚠️ Quantità acquistata ({qty_after}) molto inferiore a quella richiesta ({qty_requested}) per {symbol}")
-                notify_telegram(f"⚠️ Ordine parzialmente eseguito per {symbol}: richiesto {qty_requested}, ottenuto {qty_after}")
+                # notify_telegram(f"⚠️ Ordine parzialmente eseguito per {symbol}: richiesto {qty_requested}, ottenuto {qty_after}")
                 diff = qty_requested - qty_after
                 price2 = get_last_price(symbol)
                 if diff > min_qty and price2 and (diff * price2) > min_order_amt:
@@ -942,8 +942,8 @@ def trailing_stop_worker():
             log(f"[TRAILING CHECK][FAST] {symbol} | entry_price={entry['entry_price']:.4f} | current_price={current_price:.4f} | soglia={soglia_attivazione:.4f} | trailing_active={entry['trailing_active']} | threshold={trailing_threshold}")
             if not entry["trailing_active"] and current_price >= soglia_attivazione:
                 entry["trailing_active"] = True
-                log(f"🔛 Trailing Stop attivato per {symbol} sopra soglia → Prezzo: {current_price:.4f}")
-                notify_telegram(f"🔛 Trailing Stop attivo su {symbol}\nPrezzo: {current_price:.4f}")
+                log(f"🔛 Trailing SL attivato per {symbol} sopra soglia → Prezzo: {current_price:.4f}")
+                notify_telegram(f"🔛🔻 Trailing SL attivo su {symbol}\nPrezzo: {current_price:.4f}")
             if entry["trailing_active"]:
                 if current_price > entry["p_max"]:
                     entry["p_max"] = current_price
@@ -983,7 +983,7 @@ def trailing_stop_worker():
                         notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} durante {sl_type}!")
                 else:
                     log(f"❌ Quantità nulla o troppo piccola per vendita {sl_type} su {symbol}")
-        time.sleep(60)
+        time.sleep(15)
 
 trailing_thread = threading.Thread(target=trailing_stop_worker, daemon=True)
 trailing_thread.start()
@@ -1051,7 +1051,7 @@ try:
                     # Notifica solo se il saldo USDT è davvero basso
                     log(f"💸 Saldo USDT ({usdt_balance:.2f}) o budget gruppo ({group_available:.2f}) insufficiente per {symbol}")
                     if not low_balance_alerted:
-                        notify_telegram(f"❗️ Saldo USDT troppo basso per nuovi acquisti. Ricarica il wallet per continuare a operare.")
+                        # notify_telegram(f"❗️ Saldo USDT troppo basso per nuovi acquisti. Ricarica il wallet per continuare a operare.")
                         low_balance_alerted = True
                     continue
                 else:
@@ -1093,7 +1093,7 @@ try:
                 if order_amount < min_order_amt:
                     log(f"❌ Saldo troppo basso per acquisto di {symbol}: {order_amount:.2f} < min_order_amt {min_order_amt}")
                     if not low_balance_alerted:
-                        notify_telegram(f"❗️ Saldo USDT troppo basso per nuovi acquisti. Ricarica il wallet per continuare a operare.")
+                        # notify_telegram(f"❗️ Saldo USDT troppo basso per nuovi acquisti. Ricarica il wallet per continuare a operare.")
                         low_balance_alerted = True
                     continue
                 else:
@@ -1105,7 +1105,7 @@ try:
                 if order_amount < min_order_amt:
                     log(f"❌ Saldo troppo basso per acquisto di {symbol}: {order_amount:.2f} < min_order_amt {min_order_amt}")
                     if not low_balance_alerted:
-                        notify_telegram(f"❗️ Saldo USDT troppo basso per nuovi acquisti. Ricarica il wallet per continuare a operare.")
+                        # notify_telegram(f"❗️ Saldo USDT troppo basso per nuovi acquisti. Ricarica il wallet per continuare a operare.")
                         low_balance_alerted = True
                     continue
                 else:
@@ -1205,9 +1205,9 @@ try:
                 log(f"🟢 Acquisto registrato per {symbol} | Entry: {price:.4f} | TP: {tp:.4f} | SL: {sl:.4f} | TP parziale su {qty_partial:.4f} a {tp_partial:.4f}")
                 # Notifica con importo effettivo investito per market_buy, altrimenti usa order_amount
                 if last_price < 100:
-                    notify_telegram(f"🟢📈 Acquisto [LONG] per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f} USDT\nSL: {sl:.4f}\nTP: {tp:.4f}")
+                    notify_telegram(f"🟢📈 Acquisto per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f} USDT\nSL: {sl:.4f}\nTP: {tp:.4f}")
                 else:
-                    notify_telegram(f"🟢📈 Acquisto [LONG] per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}\nInvestito: {order_amount:.2f} USDT\nSL: {sl:.4f}\nTP: {tp:.4f}")
+                    notify_telegram(f"🟢📈 Acquisto per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}\nInvestito: {order_amount:.2f} USDT\nSL: {sl:.4f}\nTP: {tp:.4f}")
                 time.sleep(3)
 
         # PATCH: rimuovi posizioni con saldo < 1 (polvere) anche nel ciclo principale
@@ -1235,7 +1235,7 @@ try:
                 entry_price = entry.get("entry_price", price_cleanup)
                 current_price = get_last_price(symbol)
                 trailing_active = entry.get("trailing_active", False)
-                log(f"[EXIT CHECK] {symbol} | entry_price={entry_price:.8f} | current_price={current_price:.8f} | trailing_active={trailing_active}")
+                tp = entry.get("tp", None)
                 # PATCH: blocca ogni vendita se il prezzo è sopra l'entry e non c'è trailing attivo
                 if current_price and current_price > entry_price and not trailing_active:
                     log(f"[SKIP][EXIT] {symbol}: prezzo attuale {current_price:.8f} sopra entry {entry_price:.8f}, nessun trailing attivo, NON vendo.")
@@ -1251,9 +1251,11 @@ try:
                     exit_value = price * qty
                     delta = exit_value - entry_cost
                     pnl = (delta / entry_cost) * 100
-                    log(f"🔴 Vendita completata per {symbol}")
-                    log(f"📊 PnL stimato: {pnl:.2f}% | Delta: {delta:.2f}")
-                    notify_telegram(f"🔴📉 Vendita [LONG] per {symbol} a {price:.4f}\nStrategia: {strategy_cleanup}\nPnL: {pnl:.2f}%")
+                    # PATCH: notifica take profit se prezzo >= TP
+                    if tp and price >= tp:
+                        notify_telegram(f"🟢🎯 TP raggiunto per {symbol} a {price:.4f}\nPnL: {pnl:.2f}%")
+                    else:
+                        notify_telegram(f"🔴📉 Vendita per {symbol} a {price:.4f}\nStrategia: {strategy_cleanup}\nPnL: {pnl:.2f}%")
                     log_trade_to_google(symbol, entry_price, price, pnl, strategy_cleanup, "Exit Signal", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
                     open_positions.discard(symbol)
                     last_exit_time[symbol] = time.time()
@@ -1305,8 +1307,8 @@ try:
             # 🧪 Attiva Trailing se supera la soglia
             if not entry["trailing_active"] and current_price >= soglia_attivazione:
                 entry["trailing_active"] = True
-                log(f"🔛 Trailing Stop attivato per {symbol} sopra soglia → Prezzo: {current_price:.4f}")
-                notify_telegram(f"🔛 Trailing Stop attivo su {symbol}\nPrezzo: {current_price:.4f}")
+                log(f"🔛 Trailing SL attivato per {symbol} sopra soglia → Prezzo: {current_price:.4f}")
+                notify_telegram(f"🔛🔻 Trailing SL attivo su {symbol}\nPrezzo: {current_price:.4f}")
             # ⬆️ Aggiorna massimo e SL se prezzo cresce
             if entry["trailing_active"]:
                 if current_price > entry["p_max"]:
@@ -1329,8 +1331,8 @@ try:
                 tp_trailing_buffer = 0.01  # 1% sotto il massimo raggiunto
                 trailing_tp_price = entry["tp_max"] * (1 - tp_trailing_buffer)
                 if current_price <= trailing_tp_price:
-                    log(f"🔻 Trailing TP attivato per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
-                    notify_telegram(f"🔻 Trailing TP venduto per {symbol} a {current_price:.4f}")
+                    log(f"🔺Trailing TP venduto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
+                    notify_telegram(f"🔺Trailing TP venduto per {symbol} a {current_price:.4f}")
                     qty = get_free_qty(symbol)
                     if qty > 0:
                         usdt_before = get_usdt_balance()
@@ -1342,8 +1344,8 @@ try:
                             exit_value = current_price * qty
                             delta = exit_value - entry_cost
                             pnl = (delta / entry_cost) * 100
-                            log(f"🔻 Trailing TP venduto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
-                            notify_telegram(f"🔻 Trailing TP venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
+                            log(f"🔺Trailing TP venduto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
+                            notify_telegram(f"🔺Trailing TP venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
                             log_trade_to_google(symbol, entry_price, current_price, pnl, "Trailing TP", "TP Triggered", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
                             open_positions.discard(symbol)
                             last_exit_time[symbol] = time.time()
