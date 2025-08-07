@@ -142,7 +142,9 @@ def get_open_short_qty(symbol):
         }
         resp = requests.get(endpoint, headers=headers, params=params, timeout=10)
         data = resp.json()
-        log(f"[BYBIT-RAW] get_open_short_qty {symbol}: {json.dumps(data)}")
+        if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
+            log(f"[BYBIT-RAW][ERRORE] get_open_short_qty {symbol}: {json.dumps(data)}")
+            return 0.0
         if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
             return 0.0
         for pos in data["result"]["list"]:
