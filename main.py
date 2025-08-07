@@ -206,11 +206,14 @@ def get_free_qty(symbol):
         for c in coin_list:
             if c["coin"] == coin:
                 log(f"[BYBIT BALANCE DEBUG] {coin}: {c}")
+                # Ordine di priorità: availableToWithdraw > walletBalance > equity
                 raw = c.get("availableToWithdraw")
-                if raw is None or raw == "":
-                    # Se non disponibile, considera saldo zero (NON usare altri campi!)
-                    raw = "0"
-                qty = float(raw) if raw else 0.0
+                if raw is None or raw == "" or float(raw) == 0:
+                    log(f"[BYBIT BALANCE FALLBACK] {coin}: availableToWithdraw non valido ({raw}), provo walletBalance")
+                    raw = c.get("walletBalance", "0")
+                if raw is None or raw == "" or float(raw) == 0:
+                    log(f"[BYBIT BALANCE FALLBACK] {coin}: walletBalance non valido ({raw}), provo equity")
+                    raw = c.get("equity", "0")
                 try:
                     qty = float(raw) if raw else 0.0
                     if qty > 0:
@@ -219,7 +222,7 @@ def get_free_qty(symbol):
                         log(f"🟡 Nessun saldo disponibile per {coin}")
                     return qty
                 except Exception as e:
-                    log(f"⚠️ Errore conversione quantità {coin}: {e}")
+                    log(f"⚠️ Errore conversione quantità {coin}: {e} (raw={raw})")
                     return 0.0
 
         log(f"🔍 Coin {coin} non trovata nel saldo.")
