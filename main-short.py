@@ -64,9 +64,11 @@ def update_assets(top_n=18, n_stable=7):
         # Prendi i top N
         top = usdt_tickers[:top_n]
         ASSETS = [t["symbol"] for t in top]
+        # --- PATCH: filtra solo simboli disponibili su futures linear ---
+        ASSETS = [s for s in ASSETS if is_symbol_linear(s)]
         # Ordina per market cap stimata (lastPrice * totalVolume)
         top.sort(key=lambda x: float(x.get("lastPrice", 0)) * float(x.get("totalVolume", 0)), reverse=True)
-        LESS_VOLATILE_ASSETS = [t["symbol"] for t in top[:n_stable]]
+        LESS_VOLATILE_ASSETS = [t["symbol"] for t in top[:n_stable] if t["symbol"] in ASSETS]
         VOLATILE_ASSETS = [s for s in ASSETS if s not in LESS_VOLATILE_ASSETS]
         log(f"[ASSETS] Aggiornati: {ASSETS}\nMeno volatili: {LESS_VOLATILE_ASSETS}\nVolatili: {VOLATILE_ASSETS}")
     except Exception as e:
