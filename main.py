@@ -738,6 +738,7 @@ def analyze_asset(symbol: str):
             else:
                 log(f"[STRATEGY][{symbol}] Condizione Trend EMA + RSI: rsi={last['rsi']:.2f} > 50 = {cond5}, ema20={last['ema20']:.4f} > ema50={last['ema50']:.4f} = {cond6}")
 
+        # CONDIZIONI DA RISPETTARE PER ACQUISTO
         # if (is_volatile and len(entry_conditions) >= 1) or (not is_volatile and len(entry_conditions) >= 2):
         if len(entry_conditions) >= 1:
             log(f"[STRATEGY][{symbol}] Segnale ENTRY generato: strategie attive: {entry_strategies}")
@@ -1134,7 +1135,7 @@ try:
                     qty = market_buy(symbol, order_amount)
                     if not qty or qty == 0:
                         log(f"❌ Nessuna quantità acquistata per {symbol} dopo MARKET BUY. Non registro la posizione.")
-                        notify_telegram(f"❌ Nessuna quantità acquistata per {symbol} dopo MARKET BUY.")
+                        # notify_telegram(f"❌ Nessuna quantità acquistata per {symbol} dopo MARKET BUY.")
                         continue
                     actual_cost = qty * last_price
                     log(f"🟢 Ordine MARKET piazzato per {symbol}. Attendi esecuzione. Investito effettivo: {actual_cost:.2f} USDT")
@@ -1149,7 +1150,7 @@ try:
                     qty = get_free_qty(symbol)
                     if not qty or qty == 0:
                         log(f"❌ Nessuna quantità acquistata per {symbol} dopo LIMIT BUY. Non registro la posizione.")
-                        notify_telegram(f"❌ Nessuna quantità acquistata per {symbol} dopo LIMIT BUY.")
+                        # notify_telegram(f"❌ Nessuna quantità acquistata per {symbol} dopo LIMIT BUY.")
                         continue
                     actual_cost = qty * last_price
 
