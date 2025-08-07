@@ -679,6 +679,10 @@ def analyze_asset(symbol: str):
 
         # --- Soglie dinamiche: TP/SL/trailing in base a volatilità ---
         atr_ratio = last["atr"] / price if price > 0 else 0
+        VOLATILITY_MIN_RATIO = 0.01  # 1% minimo, aumenta se vuoi solo asset più "movimentati"
+        if atr_ratio < VOLATILITY_MIN_RATIO:
+            log(f"[VOLATILITY FILTER][{symbol}] ATR/Prezzo troppo basso ({atr_ratio:.2%}), nessun segnale ENTRY.")
+            return None, None, None
         # TP dinamico tra 1.5x e 3x ATR
         tp_dyn = min(TP_MAX, max(TP_MIN, TP_FACTOR + atr_ratio * 5))
         # SL dinamico tra 1x e 2.5x ATR
