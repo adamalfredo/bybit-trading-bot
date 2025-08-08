@@ -442,12 +442,19 @@ def market_buy(symbol: str, usdt_amount: float):
             return None
         usdt_balance_now = get_usdt_balance()
         # Usa solo il 95% del saldo per sicurezza
-        usdt_for_qty = min(safe_usdt_amount, usdt_balance_now) * 0.95
+        usdt_for_qty = min(safe_usdt_amount, usdt_balance_now) * 0.90  # Usa solo il 90% del saldo per sicurezza
         qty_decimal = Decimal(usdt_for_qty) / Decimal(str(price_now))
         # Arrotonda al passo consentito
         step_dec = Decimal(str(qty_step))
         qty_decimal = (qty_decimal // step_dec) * step_dec
         qty_decimal = qty_decimal.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
+        # Controlla che la quantità sia nei limiti Bybit
+        if qty_decimal < Decimal(str(min_qty)):
+            log(f"❌ Quantità calcolata troppo piccola per {symbol} (qty={qty_decimal}, min_qty={min_qty})")
+            return None
+        if max_qty and qty_decimal > Decimal(str(max_qty)):
+            qty_decimal = Decimal(str(max_qty))
+            log(f"⚠️ Quantità calcolata troppo grande per {symbol}, imposto a max_qty={max_qty}")
         log(f"[FALLBACK][BUY] {symbol} | Ricalcolo qty con prezzo attuale {price_now} e usdt {usdt_for_qty} → qty={qty_decimal}")
         response, resp_json = _send_order(str(qty_decimal))
         if response.status_code == 200 and resp_json.get("retCode") == 0:
