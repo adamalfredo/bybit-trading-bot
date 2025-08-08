@@ -391,14 +391,24 @@ def market_buy(symbol: str, usdt_amount: float):
         log(f"❌ Quantità non valida per acquisto di {symbol} (con margine sicurezza)")
         return None
 
-    def _send_order(qty_str):
-        body = {
-            "category": "spot",
-            "symbol": symbol,
-            "side": "Buy",
-            "orderType": "Market",
-            "qty": qty_str
-        }
+    def _send_order(qty_str, usdt_for_qty):
+        # Se la coin è "piccola", usa quoteOrderQty invece di qty
+        if price_now < 1:
+            body = {
+                "category": "spot",
+                "symbol": symbol,
+                "side": "Buy",
+                "orderType": "Market",
+                "quoteOrderQty": f"{usdt_for_qty:.2f}"
+            }
+        else:
+            body = {
+                "category": "spot",
+                "symbol": symbol,
+                "side": "Buy",
+                "orderType": "Market",
+                "qty": qty_str
+            }
         ts = str(int(time.time() * 1000))
         body_json = json.dumps(body, separators=(",", ":"))
         payload = f"{ts}{KEY}5000{body_json}"
@@ -418,7 +428,6 @@ def market_buy(symbol: str, usdt_amount: float):
         except Exception:
             resp_json = {}
         log(f"RESPONSE: {response.status_code} {resp_json}")
-        # LOG MOTIVO ERRORE BYBIT
         if resp_json.get("retCode") != 0:
             log(f"[BYBIT ERROR] Motivo rifiuto acquisto {symbol}: {resp_json.get('retMsg')}")
         if 'result' in resp_json:
@@ -457,7 +466,7 @@ def market_buy(symbol: str, usdt_amount: float):
         # PATCH: logga tutti i parametri Bybit solo per coin piccole
         if price_now < 1:
             log(f"[BYBIT PARAMS] {symbol} | qty_step={qty_step} | min_qty={min_qty} | max_qty={max_qty} | precision={precision} | min_order_amt={min_order_amt} | qty_decimal={qty_decimal} | order_value={order_value} | price_now={price_now} | usdt_balance_now={usdt_balance_now}")
-        response, resp_json = _send_order(str(qty_decimal))
+        response, resp_json = _send_order(str(qty_decimal), usdt_for_qty)
         if response.status_code == 200 and resp_json.get("retCode") == 0:
             time.sleep(2)
             qty_after = get_free_qty(symbol)
