@@ -435,6 +435,20 @@ def market_buy(symbol: str, usdt_amount: float):
 
     qty_decimal = Decimal(qty_str)
     while fallback_count <= max_fallback:
+        # Ricalcola il prezzo e la quantità ad ogni fallback!
+        price_now = get_last_price(symbol)
+        if not price_now:
+            log(f"❌ Prezzo non disponibile per {symbol} durante fallback")
+            return None
+        usdt_balance_now = get_usdt_balance()
+        # Usa solo il 95% del saldo per sicurezza
+        usdt_for_qty = min(safe_usdt_amount, usdt_balance_now) * 0.95
+        qty_decimal = Decimal(usdt_for_qty) / Decimal(str(price_now))
+        # Arrotonda al passo consentito
+        step_dec = Decimal(str(qty_step))
+        qty_decimal = (qty_decimal // step_dec) * step_dec
+        qty_decimal = qty_decimal.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
+        log(f"[FALLBACK][BUY] {symbol} | Ricalcolo qty con prezzo attuale {price_now} e usdt {usdt_for_qty} → qty={qty_decimal}")
         response, resp_json = _send_order(str(qty_decimal))
         if response.status_code == 200 and resp_json.get("retCode") == 0:
             time.sleep(2)
@@ -467,13 +481,6 @@ def market_buy(symbol: str, usdt_amount: float):
                 return None
         elif resp_json.get("retMsg", "").lower().find("insufficient balance") >= 0:
             fallback_count += 1
-            # Riduci la quantità del 3% e riprova
-            qty_decimal = qty_decimal * Decimal("0.97")
-            # Arrotonda al passo consentito
-            step_dec = Decimal(str(qty_step))
-            qty_decimal = (qty_decimal // step_dec) * step_dec
-            qty_decimal = qty_decimal.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
-            log(f"[FALLBACK][BUY] {symbol} | Insufficient balance, riprovo con qty={qty_decimal}")
             continue
         elif resp_json.get("retMsg", "").lower().find("too many decimals") >= 0:
             fallback_count += 1
