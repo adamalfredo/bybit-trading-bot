@@ -407,23 +407,13 @@ def market_buy(symbol: str, usdt_amount: float):
         return None
 
     def _send_order(qty_str, usdt_for_qty):
-        # Se la coin è "piccola", usa quoteOrderQty invece di qty
-        if price_now < 1:
-            body = {
-                "category": "spot",
-                "symbol": symbol,
-                "side": "Buy",
-                "orderType": "Market",
-                "quoteOrderQty": f"{usdt_for_qty:.2f}"
-            }
-        else:
-            body = {
-                "category": "spot",
-                "symbol": symbol,
-                "side": "Buy",
-                "orderType": "Market",
-                "qty": qty_str
-            }
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": "Buy",
+            "orderType": "Market",
+            "qty": qty_str
+        }
         ts = str(int(time.time() * 1000))
         body_json = json.dumps(body, separators=(",", ":"))
         payload = f"{ts}{KEY}5000{body_json}"
