@@ -450,11 +450,15 @@ def market_buy(symbol: str, usdt_amount: float):
             log(f"❌ Prezzo non disponibile per {symbol} durante fallback")
             return None
         usdt_balance_now = get_usdt_balance()
-        usdt_for_qty = min(safe_usdt_amount, usdt_balance_now) * 0.85
-        qty_decimal = (Decimal(usdt_for_qty) / Decimal(str(price_now))) * Decimal("0.98")
+        if price_now < 0.01:
+            usdt_for_qty = min(safe_usdt_amount, usdt_balance_now) * 0.85
+            qty_decimal = (Decimal(usdt_for_qty) / Decimal(str(price_now))) * Decimal("0.98")
+            # Riduci drasticamente la quantità ad ogni fallback (del 20% ogni volta SOLO per coin piccole)
+            qty_decimal = qty_decimal * (Decimal("0.8") ** fallback_count)
+        else:
+            usdt_for_qty = min(safe_usdt_amount, usdt_balance_now)
+            qty_decimal = (Decimal(usdt_for_qty) / Decimal(str(price_now))) * Decimal("0.98")
         step_dec = Decimal(str(qty_step))
-        # Riduci drasticamente la quantità ad ogni fallback (del 10% ogni volta)
-        qty_decimal = qty_decimal * (Decimal("0.9") ** fallback_count)
         qty_decimal = (qty_decimal // step_dec) * step_dec
         qty_decimal = qty_decimal.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
         log(f"[CHECK QTY] {symbol} | qty_decimal={qty_decimal} | precision={precision} | step_dec={step_dec}")
@@ -470,7 +474,7 @@ def market_buy(symbol: str, usdt_amount: float):
         order_value = float(qty_decimal) * float(price_now)
         log(f"[DEBUG][ORDER_VALUE] {symbol} | qty={qty_decimal} | price={price_now} | order_value={order_value} | usdt_balance_now={usdt_balance_now}")
         # PATCH: logga tutti i parametri Bybit solo per coin piccole
-        if price_now < 1:
+        if price_now < 0.01:
             log(f"[BYBIT PARAMS] {symbol} | qty_step={qty_step} | min_qty={min_qty} | max_qty={max_qty} | precision={precision} | min_order_amt={min_order_amt} | qty_decimal={qty_decimal} | order_value={order_value} | price_now={price_now} | usdt_balance_now={usdt_balance_now}")
         response, resp_json = _send_order(str(qty_decimal), usdt_for_qty)
         if response.status_code == 200 and resp_json.get("retCode") == 0:
