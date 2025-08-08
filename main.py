@@ -454,7 +454,7 @@ def market_buy(symbol: str, usdt_amount: float):
         qty_decimal = (Decimal(usdt_for_qty) / Decimal(str(price_now))) * Decimal("0.98")
         step_dec = Decimal(str(qty_step))
         # Riduci drasticamente la quantità ad ogni fallback (del 10% ogni volta)
-        qty_decimal = qty_decimal * Decimal("0.9" ** fallback_count)
+        qty_decimal = qty_decimal * (Decimal("0.9") ** fallback_count)
         qty_decimal = (qty_decimal // step_dec) * step_dec
         qty_decimal = qty_decimal.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
         log(f"[CHECK QTY] {symbol} | qty_decimal={qty_decimal} | precision={precision} | step_dec={step_dec}")
