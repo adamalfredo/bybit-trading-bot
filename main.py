@@ -692,13 +692,13 @@ def analyze_asset(symbol: str):
         price = float(last["Close"])
 
         # --- Filtro trend di fondo: solo se EMA50 > EMA200 (trend rialzista) ---
-        if last["ema50"] <= last["ema200"] * 0.98:
-            log(f"[STRATEGY][{symbol}] Filtro trend NON superato (soft): ema50={last['ema50']:.4f} <= 98% ema200={last['ema200']:.4f}")
+        if last["ema50"] <= last["ema200"] * 0.99:
+            log(f"[STRATEGY][{symbol}] Filtro trend NON superato (soft): ema50={last['ema50']:.4f} <= 99% ema200={last['ema200']:.4f}")
             return None, None, None
 
         # --- Soglie dinamiche: TP/SL/trailing in base a volatilità ---
         atr_ratio = last["atr"] / price if price > 0 else 0
-        VOLATILITY_MIN_RATIO = 0.01  # 1% minimo, aumenta se vuoi solo asset più "movimentati"
+        VOLATILITY_MIN_RATIO = 0.007  # 0.7%
         if atr_ratio < VOLATILITY_MIN_RATIO:
             log(f"[VOLATILITY FILTER][{symbol}] ATR/Prezzo troppo basso ({atr_ratio:.2%}), nessun segnale ENTRY.")
             return None, None, None
@@ -958,9 +958,9 @@ def trailing_stop_worker():
             if not current_price:
                 continue
             if symbol in VOLATILE_ASSETS:
-                trailing_threshold = 0.02
+                trailing_threshold = 0.015  # <--- MODIFICATO da 0.02 a 0.015
             else:
-                trailing_threshold = 0.005
+                trailing_threshold = 0.004  # <--- MODIFICATO da 0.005 a 0.004
             soglia_attivazione = entry["entry_price"] * (1 + trailing_threshold)
             log(f"[TRAILING CHECK][FAST] {symbol} | entry_price={entry['entry_price']:.4f} | current_price={current_price:.4f} | soglia={soglia_attivazione:.4f} | trailing_active={entry['trailing_active']} | threshold={trailing_threshold}")
             if not entry["trailing_active"] and current_price >= soglia_attivazione:
@@ -1322,9 +1322,9 @@ try:
                 continue
             # Soglia trailing dinamica: 0.02 per asset volatili, 0.005 per asset stabili
             if symbol in VOLATILE_ASSETS:
-                trailing_threshold = 0.02
+                trailing_threshold = 0.015  # <--- MODIFICATO da 0.02 a 0.015
             else:
-                trailing_threshold = 0.005
+                trailing_threshold = 0.004  # <--- MODIFICATO da 0.005 a 0.004
             soglia_attivazione = entry["entry_price"] * (1 + trailing_threshold)
             log(f"[TRAILING CHECK] {symbol} | entry_price={entry['entry_price']:.4f} | current_price={current_price:.4f} | soglia={soglia_attivazione:.4f} | trailing_active={entry['trailing_active']} | threshold={trailing_threshold}")
             # 🧪 Attiva Trailing se supera la soglia
