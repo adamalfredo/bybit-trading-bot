@@ -454,6 +454,9 @@ def market_buy(symbol: str, usdt_amount: float):
         log(f"[DEBUG][ORDER] {symbol} | qty_decimal={qty_decimal} | str(qty_decimal)={str(qty_decimal)} | type={type(qty_decimal)}")
         order_value = float(qty_decimal) * float(price_now)
         log(f"[DEBUG][ORDER_VALUE] {symbol} | qty={qty_decimal} | price={price_now} | order_value={order_value} | usdt_balance_now={usdt_balance_now}")
+        # PATCH: logga tutti i parametri Bybit solo per coin piccole
+        if price_now < 1:
+            log(f"[BYBIT PARAMS] {symbol} | qty_step={qty_step} | min_qty={min_qty} | max_qty={max_qty} | precision={precision} | min_order_amt={min_order_amt} | qty_decimal={qty_decimal} | order_value={order_value} | price_now={price_now} | usdt_balance_now={usdt_balance_now}")
         response, resp_json = _send_order(str(qty_decimal))
         if response.status_code == 200 and resp_json.get("retCode") == 0:
             time.sleep(2)
