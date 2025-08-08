@@ -380,14 +380,21 @@ def market_buy(symbol: str, usdt_amount: float):
         log(f"❌ Prezzo non disponibile per {symbol}")
         return None
     safe_usdt_amount = usdt_amount * 0.98
-    qty_str = calculate_quantity(symbol, safe_usdt_amount)
-    if not qty_str:
-        log(f"❌ Quantità non valida per acquisto di {symbol} (con margine sicurezza)")
-        return None
     info = get_instrument_info(symbol)
     min_qty = info.get("min_qty", 0.0)
     min_order_amt = info.get("min_order_amt", 5)
     precision = info.get("precision", 4)
+    qty_step = info.get("qty_step", 0.0001)
+    max_qty = info.get("max_qty", 0.0)
+    log(f"[BYBIT LIMITS] {symbol} | min_qty={min_qty} | max_qty={max_qty} | qty_step={qty_step} | precision={precision} | min_order_amt={min_order_amt}")
+
+    # PATCH: fallback automatico in caso di insufficient balance
+    max_fallback = 5
+    fallback_count = 0
+    qty_str = calculate_quantity(symbol, safe_usdt_amount)
+    if not qty_str:
+        log(f"❌ Quantità non valida per acquisto di {symbol} (con margine sicurezza)")
+        return None
 
     def _send_order(qty_str):
         body = {
@@ -424,37 +431,31 @@ def market_buy(symbol: str, usdt_amount: float):
             filled = result.get('cumExecQty') or result.get('execQty') or result.get('qty')
             order_status = result.get('orderStatus')
             log(f"[BYBIT ORDER RESULT] filled: {filled}, orderStatus: {order_status}, result: {result}")
-        return response
+        return response, resp_json
 
-    try:
-        response = _send_order(qty_str)
-        if response.status_code == 200 and response.json().get("retCode") == 0:
+    qty_decimal = Decimal(qty_str)
+    while fallback_count <= max_fallback:
+        response, resp_json = _send_order(str(qty_decimal))
+        if response.status_code == 200 and resp_json.get("retCode") == 0:
             time.sleep(2)
             qty_after = get_free_qty(symbol)
             if not qty_after or qty_after == 0:
                 time.sleep(3)
                 qty_after = get_free_qty(symbol)
             try:
-                qty_requested = float(qty_str)
+                qty_requested = float(qty_decimal)
             except Exception:
                 qty_requested = None
             if qty_requested and qty_after < 0.8 * qty_requested:
                 log(f"⚠️ Quantità acquistata ({qty_after}) molto inferiore a quella richiesta ({qty_requested}) per {symbol}")
-                # notify_telegram(f"⚠️ Ordine parzialmente eseguito per {symbol}: richiesto {qty_requested}, ottenuto {qty_after}")
                 diff = qty_requested - qty_after
                 price2 = get_last_price(symbol)
                 if diff > min_qty and price2 and (diff * price2) > min_order_amt:
                     diff_str = f"{diff:.{precision}f}".rstrip('0').rstrip('.')
                     log(f"🔁 TENTO RIACQUISTO della differenza: {diff_str} {symbol}")
-                    response2 = _send_order(diff_str)
-                    if response2.status_code == 200 and response2.json().get("retCode") == 0:
-                        time.sleep(2)
-                        qty_final = get_free_qty(symbol)
-                        log(f"🟢 Acquisto finale per {symbol}: {qty_final}")
-                        return qty_final
-                    else:
-                        log(f"❌ Riacquisto fallito per {symbol}")
-                        return qty_after
+                    fallback_count += 1
+                    qty_decimal = Decimal(diff_str)
+                    continue
                 else:
                     log(f"❌ Differenza troppo piccola per riacquisto su {symbol}")
                     return qty_after
@@ -463,18 +464,29 @@ def market_buy(symbol: str, usdt_amount: float):
                 return qty_after
             else:
                 log(f"⚠️ Acquisto riuscito ma saldo non aggiornato per {symbol}")
+                return None
+        elif resp_json.get("retMsg", "").lower().find("insufficient balance") >= 0:
+            fallback_count += 1
+            # Riduci la quantità del 3% e riprova
+            qty_decimal = qty_decimal * Decimal("0.97")
+            # Arrotonda al passo consentito
+            step_dec = Decimal(str(qty_step))
+            qty_decimal = (qty_decimal // step_dec) * step_dec
+            qty_decimal = qty_decimal.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
+            log(f"[FALLBACK][BUY] {symbol} | Insufficient balance, riprovo con qty={qty_decimal}")
+            continue
+        elif resp_json.get("retMsg", "").lower().find("too many decimals") >= 0:
+            fallback_count += 1
+            # Riduci la precisione
+            precision = max(0, precision - 1)
+            qty_decimal = qty_decimal.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
+            log(f"[FALLBACK][BUY] {symbol} | Troppi decimali, provo con precisione {precision}")
+            continue
         else:
-            # LOG MOTIVO ERRORE BYBIT anche qui
-            try:
-                resp_json = response.json()
-                log(f"[BYBIT ERROR] Motivo rifiuto acquisto {symbol}: {resp_json.get('retMsg')}")
-            except Exception:
-                pass
-        return None
-
-    except Exception as e:
-        log(f"❌ Errore invio ordine market per {symbol}: {e}")
-        return None
+            log(f"❌ Ordine MARKET fallito per {symbol}: {resp_json.get('retMsg')}")
+            return None
+    log(f"❌ Tutti i tentativi MARKET BUY falliti per {symbol}")
+    return None
 
 def market_sell(symbol: str, qty: float):
     price = get_last_price(symbol)
