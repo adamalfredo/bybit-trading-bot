@@ -135,6 +135,21 @@ def get_last_price(symbol):
     except Exception as e:
         log(f"[BYBIT] Errore get_last_price {symbol}: {e}")
         return None
+    
+def get_best_ask(symbol):
+    try:
+        endpoint = f"{BYBIT_BASE_URL}/v5/market/orderbook"
+        params = {"category": "spot", "symbol": symbol}
+        resp = requests.get(endpoint, params=params, timeout=10)
+        data = resp.json()
+        if data.get("retCode") == 0:
+            asks = data["result"]["a"]
+            if asks and len(asks) > 0:
+                return float(asks[0][0])
+        return None
+    except Exception as e:
+        log(f"[BYBIT] Errore get_best_ask {symbol}: {e}")
+        return None
 
 def get_instrument_info(symbol):
     try:
@@ -440,14 +455,16 @@ def market_buy(symbol: str, usdt_amount: float):
     qty_decimal = Decimal(qty_str)
     while fallback_count <= max_fallback:
         # Ricalcola il prezzo e la quantità ad ogni fallback!
-        price_now = get_last_price(symbol)
+        # Usa il miglior ask disponibile, se possibile, altrimenti il last price
+        price_now = get_best_ask(symbol) or get_last_price(symbol)
         if not price_now:
             log(f"❌ Prezzo non disponibile per {symbol} durante fallback")
             return None
         usdt_balance_now = get_usdt_balance()
-        # Usa solo il 95% del saldo per sicurezza
-        usdt_for_qty = min(safe_usdt_amount, usdt_balance_now) * 0.85  # Usa solo il 90% del saldo per sicurezza
-        qty_decimal = Decimal(usdt_for_qty) / Decimal(str(price_now))
+        # Usa solo l'85% del saldo per sicurezza
+        usdt_for_qty = min(safe_usdt_amount, usdt_balance_now) * 0.85
+        # Calcola la quantità e riduci del 2% per coprire slippage
+        qty_decimal = (Decimal(usdt_for_qty) / Decimal(str(price_now))) * Decimal("0.98")
         # Arrotonda al passo consentito
         step_dec = Decimal(str(qty_step))
         qty_decimal = (qty_decimal // step_dec) * step_dec
