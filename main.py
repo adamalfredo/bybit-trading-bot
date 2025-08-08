@@ -453,9 +453,11 @@ def market_buy(symbol: str, usdt_amount: float):
         usdt_for_qty = min(safe_usdt_amount, usdt_balance_now) * 0.85
         qty_decimal = (Decimal(usdt_for_qty) / Decimal(str(price_now))) * Decimal("0.98")
         step_dec = Decimal(str(qty_step))
-        # RIDUCI LA QUANTITÀ DI 2 STEP AD OGNI FALLBACK!
-        qty_decimal = (qty_decimal // step_dec) * step_dec - (fallback_count * 2 * step_dec)
+        # Riduci drasticamente la quantità ad ogni fallback (del 10% ogni volta)
+        qty_decimal = qty_decimal * Decimal("0.9" ** fallback_count)
+        qty_decimal = (qty_decimal // step_dec) * step_dec
         qty_decimal = qty_decimal.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
+        log(f"[CHECK QTY] {symbol} | qty_decimal={qty_decimal} | precision={precision} | step_dec={step_dec}")
         # Controlla che la quantità sia nei limiti Bybit
         if qty_decimal < Decimal(str(min_qty)):
             log(f"❌ Quantità calcolata troppo piccola per {symbol} (qty={qty_decimal}, min_qty={min_qty})")
