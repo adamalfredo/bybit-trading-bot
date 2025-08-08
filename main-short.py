@@ -767,6 +767,7 @@ def trailing_stop_worker():
                 # Trailing Take Profit SHORT: se il prezzo risale di X% dal minimo, chiudi la posizione
                 tp_trailing_buffer = 0.01  # 1% sopra il minimo raggiunto
                 trailing_tp_price = entry["p_min"] * (1 + tp_trailing_buffer)
+                log(f"[DEBUG][TRAILING_TP] {symbol} | current_price={current_price:.4f} | trailing_tp_price={trailing_tp_price:.4f} | p_min={entry['p_min']:.4f}")
                 if current_price >= trailing_tp_price:
                     log(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
                     notify_telegram(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} a {current_price:.4f}")
@@ -790,6 +791,7 @@ def trailing_stop_worker():
                     continue
                 # Continua ad aggiornare lo SL trailing come prima
                 new_sl = current_price * (1 + TRAILING_SL_BUFFER)
+                log(f"[DEBUG][TRAILING_SL] {symbol} | current_price={current_price:.4f} | new_sl={new_sl:.4f} | old_sl={entry['sl']:.4f}")
                 if new_sl < entry["sl"]:
                     log(f"📉 SL SHORT aggiornato per {symbol}: da {entry['sl']:.4f} a {new_sl:.4f}")
                     entry["sl"] = new_sl

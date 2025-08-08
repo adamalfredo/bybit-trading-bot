@@ -515,7 +515,7 @@ def market_sell(symbol: str, qty: float):
             if valore_usd < min_order_amt or Decimal(qty_str) < Decimal(str(min_qty)) or Decimal(qty_str) <= 0:
                 saldo_attuale = get_free_qty(symbol)
                 log(f"❌ Quantità troppo piccola o valore troppo basso per {symbol} (qty={qty_str}, valore_usd={valore_usd:.4f}, min_order_amt={min_order_amt})")
-                notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} (valore troppo basso: {valore_usd:.4f} USDT, min richiesto: {min_order_amt})")
+                # notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} (valore troppo basso: {valore_usd:.4f} USDT, min richiesto: {min_order_amt})")
                 return
         except Exception as e:
             log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
@@ -1326,7 +1326,7 @@ try:
                 entry["trailing_tp_active"] = True
                 entry["tp_max"] = current_price
                 log(f"🔛 Trailing TP attivato per {symbol} sopra TP → Prezzo: {current_price:.4f}")
-                notify_telegram(f"🔛 Trailing TP attivo su {symbol}\nPrezzo: {current_price:.4f}")
+                notify_telegram(f"🔛🔺Trailing TP attivato su {symbol}\nPrezzo: {current_price:.4f}")
             
             if entry.get("trailing_tp_active", False):
                 if current_price > entry["tp_max"]:
