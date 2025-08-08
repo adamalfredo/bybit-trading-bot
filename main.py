@@ -94,25 +94,20 @@ def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
 
 def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] = None) -> str:
-    """
-    Restituisce la quantità formattata secondo i decimali accettati da Bybit per qty_step e basePrecision,
-    troncando senza arrotondare e garantendo che sia un multiplo esatto di qty_step.
-    """
     from decimal import Decimal, ROUND_DOWN
     def get_decimals(step):
         s = str(step)
         if '.' in s:
             return len(s.split('.')[-1].rstrip('0'))
         return 0
-    if hasattr(qty_step, '__precision_override__'):
-        precision = qty_step.__precision_override__
     if precision is None:
         precision = get_decimals(qty_step)
+    # Forza almeno 8 decimali per coin piccole
+    if qty_step < 0.01:
+        precision = max(precision, 8)
     step_dec = Decimal(str(qty_step))
     qty_dec = Decimal(str(qty))
-    # Tronca la quantità al multiplo più basso di qty_step
     floored_qty = (qty_dec // step_dec) * step_dec
-    # Troncamento ai decimali accettati
     quantize_str = '1.' + '0'*precision if precision > 0 else '1'
     floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
     # Garantisce che sia multiplo esatto di qty_step
@@ -456,6 +451,7 @@ def market_buy(symbol: str, usdt_amount: float):
             qty_decimal = Decimal(str(max_qty))
             log(f"⚠️ Quantità calcolata troppo grande per {symbol}, imposto a max_qty={max_qty}")
         log(f"[FALLBACK][BUY] {symbol} | Ricalcolo qty con prezzo attuale {price_now} e usdt {usdt_for_qty} → qty={qty_decimal}")
+        log(f"[DEBUG][ORDER] {symbol} | qty_decimal={qty_decimal} | str(qty_decimal)={str(qty_decimal)} | type={type(qty_decimal)}")
         response, resp_json = _send_order(str(qty_decimal))
         if response.status_code == 200 and resp_json.get("retCode") == 0:
             time.sleep(2)
