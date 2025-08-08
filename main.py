@@ -947,7 +947,7 @@ def trailing_stop_worker():
             if not entry["trailing_active"] and current_price >= soglia_attivazione:
                 entry["trailing_active"] = True
                 log(f"🔛 Trailing SL attivato per {symbol} sopra soglia → Prezzo: {current_price:.4f}")
-                notify_telegram(f"🔛🔻 Trailing SL attivo su {symbol}\nPrezzo: {current_price:.4f}")
+                notify_telegram(f"🔛🔻Trailing SL attivato su {symbol}\nPrezzo: {current_price:.4f}")
             if entry["trailing_active"]:
                 if current_price > entry["p_max"]:
                     entry["p_max"] = current_price
@@ -959,10 +959,10 @@ def trailing_stop_worker():
             sl_type = None
             if entry["trailing_active"] and current_price <= entry["sl"]:
                 sl_triggered = True
-                sl_type = "Trailing Stop"
+                sl_type = "Trailing SL"
             elif not entry["trailing_active"] and current_price <= entry["sl"]:
                 sl_triggered = True
-                sl_type = "Stop Loss"
+                sl_type = "SL"
             if sl_triggered:
                 qty = get_free_qty(symbol)
                 if qty > 0:
@@ -1312,7 +1312,7 @@ try:
             if not entry["trailing_active"] and current_price >= soglia_attivazione:
                 entry["trailing_active"] = True
                 log(f"🔛 Trailing SL attivato per {symbol} sopra soglia → Prezzo: {current_price:.4f}")
-                notify_telegram(f"🔛🔻 Trailing SL attivo su {symbol}\nPrezzo: {current_price:.4f}")
+                notify_telegram(f"🔛🔻Trailing SL attivato su {symbol}\nPrezzo: {current_price:.4f}")
             # ⬆️ Aggiorna massimo e SL se prezzo cresce
             if entry["trailing_active"]:
                 if current_price > entry["p_max"]:
@@ -1366,11 +1366,11 @@ try:
             # Trailing SL
             if entry["trailing_active"] and current_price <= entry["sl"]:
                 sl_triggered = True
-                sl_type = "Trailing Stop"
+                sl_type = "Trailing SL"
             # Stop Loss statico
             elif not entry["trailing_active"] and current_price <= entry["sl"]:
                 sl_triggered = True
-                sl_type = "Stop Loss"
+                sl_type = "SL"
             if sl_triggered:
                 qty = get_free_qty(symbol)
                 if qty > 0:
