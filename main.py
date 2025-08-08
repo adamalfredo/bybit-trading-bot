@@ -445,19 +445,16 @@ def market_buy(symbol: str, usdt_amount: float):
     qty_decimal = Decimal(qty_str)
     while fallback_count <= max_fallback:
         # Ricalcola il prezzo e la quantità ad ogni fallback!
-        # Usa il miglior ask disponibile, se possibile, altrimenti il last price
         price_now = get_best_ask(symbol) or get_last_price(symbol)
         if not price_now:
             log(f"❌ Prezzo non disponibile per {symbol} durante fallback")
             return None
         usdt_balance_now = get_usdt_balance()
-        # Usa solo l'85% del saldo per sicurezza
         usdt_for_qty = min(safe_usdt_amount, usdt_balance_now) * 0.85
-        # Calcola la quantità e riduci del 2% per coprire slippage
         qty_decimal = (Decimal(usdt_for_qty) / Decimal(str(price_now))) * Decimal("0.98")
-        # Arrotonda al passo consentito
         step_dec = Decimal(str(qty_step))
-        qty_decimal = (qty_decimal // step_dec) * step_dec
+        # RIDUCI LA QUANTITÀ DI 2 STEP AD OGNI FALLBACK!
+        qty_decimal = (qty_decimal // step_dec) * step_dec - (fallback_count * 2 * step_dec)
         qty_decimal = qty_decimal.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
         # Controlla che la quantità sia nei limiti Bybit
         if qty_decimal < Decimal(str(min_qty)):
