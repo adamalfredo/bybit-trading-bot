@@ -102,9 +102,9 @@ def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] 
         return 0
     if precision is None:
         precision = get_decimals(qty_step)
-    # Forza almeno 8 decimali per coin piccole
-    if qty_step < 0.01:
-        precision = max(precision, 8)
+    # RIMUOVI questa forzatura!
+    # if qty_step < 0.01:
+    #     precision = max(precision, 8)
     step_dec = Decimal(str(qty_step))
     qty_dec = Decimal(str(qty))
     floored_qty = (qty_dec // step_dec) * step_dec
@@ -115,7 +115,6 @@ def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] 
         floored_qty = (floored_qty // step_dec) * step_dec
         floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
     fmt = f"{{0:.{precision}f}}"
-    # LOG DIAGNOSTICO
     log(f"[DECIMALI][FORMAT_QTY] qty={qty} | qty_step={qty_step} | precision={precision} | floored_qty={floored_qty} | quantize_str={quantize_str}")
     return fmt.format(floored_qty)
 
@@ -1180,17 +1179,8 @@ try:
                     continue
                 log(f"[DEBUG] Saldo USDT prima di acquistare {symbol}: {get_usdt_balance()}")
 
-                if last_price < 100:
-                    # Coin piccole: usa market_buy (fallback con riacquisto differenza)
-                    qty = market_buy(symbol, order_amount)
-                    if not qty or qty == 0:
-                        log(f"❌ Nessuna quantità acquistata per {symbol} dopo MARKET BUY. Non registro la posizione.")
-                        # notify_telegram(f"❌ Nessuna quantità acquistata per {symbol} dopo MARKET BUY.")
-                        continue
-                    actual_cost = qty * last_price
-                    log(f"🟢 Ordine MARKET piazzato per {symbol}. Attendi esecuzione. Investito effettivo: {actual_cost:.2f} USDT")
-                else:
-                    # Coin grandi: usa limit_buy (come ora)
+                if last_price < 0.01:
+                    # Coin molto piccole: usa LIMIT BUY
                     resp = limit_buy(symbol, order_amount)
                     if resp is None:
                         log(f"❌ Acquisto LIMIT fallito per {symbol}")
@@ -1200,7 +1190,27 @@ try:
                     qty = get_free_qty(symbol)
                     if not qty or qty == 0:
                         log(f"❌ Nessuna quantità acquistata per {symbol} dopo LIMIT BUY. Non registro la posizione.")
-                        # notify_telegram(f"❌ Nessuna quantità acquistata per {symbol} dopo LIMIT BUY.")
+                        continue
+                    actual_cost = qty * last_price
+                elif last_price < 100:
+                    # Coin piccole: usa MARKET BUY
+                    qty = market_buy(symbol, order_amount)
+                    if not qty or qty == 0:
+                        log(f"❌ Nessuna quantità acquistata per {symbol} dopo MARKET BUY. Non registro la posizione.")
+                        continue
+                    actual_cost = qty * last_price
+                    log(f"🟢 Ordine MARKET piazzato per {symbol}. Attendi esecuzione. Investito effettivo: {actual_cost:.2f} USDT")
+                else:
+                    # Coin grandi: usa LIMIT BUY
+                    resp = limit_buy(symbol, order_amount)
+                    if resp is None:
+                        log(f"❌ Acquisto LIMIT fallito per {symbol}")
+                        continue
+                    log(f"🟢 Ordine LIMIT piazzato per {symbol}. Attendi esecuzione.")
+                    time.sleep(2)
+                    qty = get_free_qty(symbol)
+                    if not qty or qty == 0:
+                        log(f"❌ Nessuna quantità acquistata per {symbol} dopo LIMIT BUY. Non registro la posizione.")
                         continue
                     actual_cost = qty * last_price
 
