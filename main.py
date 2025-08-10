@@ -58,6 +58,7 @@ def update_assets(top_n=18, n_stable=7):
             if t["symbol"].endswith("USDT")
             and float(t.get("turnover24h", 0)) >= LIQUIDITY_MIN_VOLUME
             and t["symbol"] not in STABLECOIN_BLACKLIST
+            and float(t.get("lastPrice", 0)) >= 0.01  # <--- FILTRO PREZZO!
         ]
         # Ordina per volume 24h (turnover24h)
         usdt_tickers.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
@@ -1193,23 +1194,13 @@ try:
                 if last_price is None:
                     log(f"❌ Prezzo non disponibile per {symbol} (acquisto)")
                     continue
-                log(f"[DEBUG] Saldo USDT prima di acquistare {symbol}: {get_usdt_balance()}")
-
                 if last_price < 0.01:
-                    # Coin molto piccole: usa LIMIT BUY
-                    resp = limit_buy(symbol, order_amount)
-                    if resp is None:
-                        log(f"❌ Acquisto LIMIT fallito per {symbol}")
-                        continue
-                    log(f"🟢 Ordine LIMIT piazzato per {symbol}. Attendi esecuzione.")
-                    time.sleep(2)
-                    qty = get_free_qty(symbol)
-                    if not qty or qty == 0:
-                        log(f"❌ Nessuna quantità acquistata per {symbol} dopo LIMIT BUY. Non registro la posizione.")
-                        continue
-                    actual_cost = qty * last_price
-                elif last_price < 100:
-                    # Coin piccole: usa MARKET BUY
+                    log(f"[SKIP] {symbol}: prezzo troppo basso ({last_price}), salto acquisto.")
+                    continue
+                log(f"[DEBUG] Saldo USDT prima di acquistare {symbol}: {get_usdt_balance()}")
+                
+                if last_price < 100:
+                    # Coin normali: usa MARKET BUY
                     qty = market_buy(symbol, order_amount)
                     if not qty or qty == 0:
                         log(f"❌ Nessuna quantità acquistata per {symbol} dopo MARKET BUY. Non registro la posizione.")
