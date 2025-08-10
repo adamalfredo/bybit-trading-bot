@@ -118,6 +118,33 @@ def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] 
     log(f"[DECIMALI][FORMAT_QTY] qty={qty} | qty_step={qty_step} | precision={precision} | floored_qty={floored_qty} | quantize_str={quantize_str}")
     return fmt.format(floored_qty)
 
+def get_max_qty_from_orderbook(symbol, usdt_amount, qty_step, precision):
+    endpoint = f"{BYBIT_BASE_URL}/v5/market/orderbook"
+    params = {"category": "spot", "symbol": symbol}
+    resp = requests.get(endpoint, params=params, timeout=10)
+    data = resp.json()
+    if data.get("retCode") != 0:
+        log(f"[ORDERBOOK] Errore API: {data}")
+        return None
+    asks = data["result"]["a"]
+    total_qty = Decimal("0")
+    total_usdt = Decimal("0")
+    for ask in asks:
+        price = Decimal(str(ask[0]))
+        qty = Decimal(str(ask[1]))
+        value = price * qty
+        if total_usdt + value >= Decimal(str(usdt_amount)):
+            needed = (Decimal(str(usdt_amount)) - total_usdt) / price
+            total_qty += needed
+            break
+        else:
+            total_qty += qty
+            total_usdt += value
+    step_dec = Decimal(str(qty_step))
+    total_qty = (total_qty // step_dec) * step_dec
+    total_qty = total_qty.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
+    return str(total_qty)
+
 # --- FUNZIONI DI SUPPORTO BYBIT E TELEGRAM ---
 def get_last_price(symbol):
     try:
@@ -266,10 +293,16 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     price_decimals = step_decimals(price_step)
     retry = 0
     max_retry = 2
-    qty_str = calculate_quantity(symbol, usdt_amount)
-    if not qty_str:
-        log(f"❌ Quantità non valida per acquisto di {symbol}")
-        return None
+    if price < 0.01:
+        qty_str = get_max_qty_from_orderbook(symbol, usdt_amount, qty_step, precision)
+        if not qty_str or Decimal(qty_str) < Decimal(str(min_qty)):
+            log(f"❌ Quantità calcolata troppo piccola dal book per {symbol}")
+            return None
+    else:
+        qty_str = calculate_quantity(symbol, usdt_amount)
+        if not qty_str:
+            log(f"❌ Quantità non valida per acquisto di {symbol}")
+            return None
     qty_step_dec = Decimal(str(qty_step))
     qty_decimal = Decimal(qty_str)
     while retry <= max_retry:
