@@ -102,9 +102,6 @@ def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] 
         return 0
     if precision is None:
         precision = get_decimals(qty_step)
-    # RIMUOVI questa forzatura!
-    # if qty_step < 0.01:
-    #     precision = max(precision, 8)
     step_dec = Decimal(str(qty_step))
     qty_dec = Decimal(str(qty))
     floored_qty = (qty_dec // step_dec) * step_dec
@@ -293,16 +290,10 @@ def limit_buy(symbol, usdt_amount, price_increase_pct=0.005):
     price_decimals = step_decimals(price_step)
     retry = 0
     max_retry = 2
-    if price < 0.01:
-        qty_str = get_max_qty_from_orderbook(symbol, usdt_amount, qty_step, precision)
-        if not qty_str or Decimal(qty_str) < Decimal(str(min_qty)):
-            log(f"❌ Quantità calcolata troppo piccola dal book per {symbol}")
-            return None
-    else:
-        qty_str = calculate_quantity(symbol, usdt_amount)
-        if not qty_str:
-            log(f"❌ Quantità non valida per acquisto di {symbol}")
-            return None
+    qty_str = calculate_quantity(symbol, usdt_amount)
+    if not qty_str:
+        log(f"❌ Quantità non valida per acquisto di {symbol}")
+        return None
     qty_step_dec = Decimal(str(qty_step))
     qty_decimal = Decimal(qty_str)
     while retry <= max_retry:
@@ -378,9 +369,6 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     try:
         raw_qty = Decimal(str(usdt_amount)) / Decimal(str(price))
         log(f"[DECIMALI][CALC_QTY] {symbol} | usdt_amount={usdt_amount} | price={price} | raw_qty={raw_qty} | qty_step={qty_step} | precision={precision}")
-        # PATCH: usa almeno 8 decimali per coin a prezzo molto basso
-        if price < 0.01:
-            precision = max(precision, 8)
         qty_str = format_quantity_bybit(float(raw_qty), float(qty_step), precision=precision)
         qty_dec = Decimal(qty_str)
         log(f"[DECIMALI][FORMAT_QTY_PATCH] {symbol} | qty_step={qty_step} | price={price} | precision={precision} | qty_str={qty_str}")
@@ -482,14 +470,8 @@ def market_buy(symbol: str, usdt_amount: float):
             log(f"❌ Prezzo non disponibile per {symbol} durante fallback")
             return None
         usdt_balance_now = get_usdt_balance()
-        if price_now < 0.01:
-            usdt_for_qty = min(safe_usdt_amount, usdt_balance_now) * 0.85
-            qty_decimal = (Decimal(usdt_for_qty) / Decimal(str(price_now))) * Decimal("0.98")
-            # Riduci drasticamente la quantità ad ogni fallback (del 20% ogni volta SOLO per coin piccole)
-            qty_decimal = qty_decimal * (Decimal("0.8") ** fallback_count)
-        else:
-            usdt_for_qty = min(safe_usdt_amount, usdt_balance_now)
-            qty_decimal = (Decimal(usdt_for_qty) / Decimal(str(price_now))) * Decimal("0.98")
+        usdt_for_qty = min(safe_usdt_amount, usdt_balance_now)
+        qty_decimal = (Decimal(usdt_for_qty) / Decimal(str(price_now))) * Decimal("0.98")
         step_dec = Decimal(str(qty_step))
         qty_decimal = (qty_decimal // step_dec) * step_dec
         qty_decimal = qty_decimal.quantize(Decimal('1.' + '0'*precision), rounding=ROUND_DOWN)
@@ -505,9 +487,6 @@ def market_buy(symbol: str, usdt_amount: float):
         log(f"[DEBUG][ORDER] {symbol} | qty_decimal={qty_decimal} | str(qty_decimal)={str(qty_decimal)} | type={type(qty_decimal)}")
         order_value = float(qty_decimal) * float(price_now)
         log(f"[DEBUG][ORDER_VALUE] {symbol} | qty={qty_decimal} | price={price_now} | order_value={order_value} | usdt_balance_now={usdt_balance_now}")
-        # PATCH: logga tutti i parametri Bybit solo per coin piccole
-        if price_now < 0.01:
-            log(f"[BYBIT PARAMS] {symbol} | qty_step={qty_step} | min_qty={min_qty} | max_qty={max_qty} | precision={precision} | min_order_amt={min_order_amt} | qty_decimal={qty_decimal} | order_value={order_value} | price_now={price_now} | usdt_balance_now={usdt_balance_now}")
         response, resp_json = _send_order(str(qty_decimal), usdt_for_qty)
         if response.status_code == 200 and resp_json.get("retCode") == 0:
             time.sleep(2)
@@ -871,11 +850,15 @@ def sync_positions_from_wallet():
     for symbol in ASSETS:
         if symbol == "USDT":
             continue
+        price = get_last_price(symbol)
+        if price is None:
+            continue
+        if price < 0.01:
+            log(f"[SKIP] {symbol}: prezzo troppo basso ({price}), salto acquisto/vendita.")
+            continue
         qty = get_free_qty(symbol)
         if qty and qty > 0:
-            price = get_last_price(symbol)
-            if not price:
-                continue
+            # ...resto del codice...
             open_positions.add(symbol)
             # Stima entry_price come prezzo attuale, entry_cost come qty*prezzo
             entry_price = price
