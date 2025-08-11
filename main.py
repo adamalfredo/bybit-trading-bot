@@ -239,7 +239,7 @@ def get_free_qty(symbol):
         coin_list = data["result"]["list"][0].get("coin", [])
         for c in coin_list:
             if c["coin"] == coin:
-                log(f"[BYBIT BALANCE DEBUG] {coin}: {c}")
+                # log(f"[BYBIT BALANCE DEBUG] {coin}: {c}")
                 # Ordine di priorità: availableToWithdraw > walletBalance > equity
                 raw = c.get("walletBalance", "0")
                 try:
@@ -748,7 +748,6 @@ def analyze_asset(symbol: str):
         # Trailing dinamico tra 0.5% e 3%
         trailing_dyn = min(TRAILING_MAX, max(TRAILING_MIN, 0.005 + atr_ratio))
 
-
         # --- Nuova logica: almeno 2 condizioni di ingresso devono essere vere ---
         entry_conditions = []
         entry_strategies = []
@@ -833,10 +832,7 @@ def analyze_asset(symbol: str):
 log("🔄 Avvio sistema di monitoraggio segnali reali")
 notify_telegram("🤖 BOT AVVIATO - In ascolto per segnali di ingresso/uscita")
 
-
 TEST_MODE = False  # Acquisti e vendite normali abilitati
-
-
 
 MIN_HOLDING_MINUTES = 3  # Tempo minimo in minuti da attendere dopo l'acquisto prima di poter attivare uno stop loss
 # --- SYNC POSIZIONI APERTE DA WALLET ALL'AVVIO ---
@@ -890,7 +886,6 @@ def sync_positions_from_wallet():
             log(f"[SYNC] Posizione trovata in wallet: {symbol} qty={qty} entry={entry_price:.4f} SL={sl:.4f} TP={tp:.4f}")
 
 # --- Esegui sync all'avvio ---
-
 # Aggiorna la lista asset all'avvio
 update_assets()
 sync_positions_from_wallet()
@@ -903,7 +898,6 @@ def calculate_stop_loss(entry_price, current_price, p_max, trailing_active):
         return entry_price * (1 - INITIAL_STOP_LOSS_PCT)
     else:
         return p_max * (1 - TRAILING_DISTANCE)
-
 
 import threading
 import gspread
@@ -957,8 +951,6 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type, usd
         ])
     except Exception as e:
         log(f"❌ Errore log su Google Sheets: {e}")
-
-
 
 # --- LOGICA 70/30 SU VALORE TOTALE PORTAFOGLIO (USDT + coin) ---
 def get_portfolio_value():
