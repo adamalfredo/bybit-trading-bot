@@ -85,7 +85,7 @@ SL_MAX = 2.5
 TRAILING_MIN = 0.005  # 0.5%
 TRAILING_MAX = 0.03   # 3%
 TRAILING_ACTIVATION_THRESHOLD = 0.02
-TRAILING_SL_BUFFER = 0.007
+TRAILING_SL_BUFFER = 0.01
 TRAILING_DISTANCE = 0.02
 INITIAL_STOP_LOSS_PCT = 0.02
 COOLDOWN_MINUTES = 60
@@ -838,7 +838,7 @@ TEST_MODE = False  # Acquisti e vendite normali abilitati
 
 
 
-MIN_HOLDING_MINUTES = 1  # Tempo minimo in minuti da attendere dopo l'acquisto prima di poter attivare uno stop loss
+MIN_HOLDING_MINUTES = 3  # Tempo minimo in minuti da attendere dopo l'acquisto prima di poter attivare uno stop loss
 # --- SYNC POSIZIONI APERTE DA WALLET ALL'AVVIO ---
 open_positions = set()
 position_data = {}
@@ -1237,8 +1237,8 @@ try:
                 tp = price + (atr_val * tp_factor)
                 sl = price - (atr_val * sl_factor)
 
-                # PATCH 1: SL deve essere almeno 1% sotto il prezzo di ingresso
-                min_sl = price * 0.99  # 1% sotto
+                # PATCH 1: SL deve essere almeno 1.5% sotto il prezzo di ingresso
+                min_sl = price * 0.985  # 1.5% sotto
                 if sl > min_sl:
                     log(f"[SL PATCH] SL troppo vicino al prezzo di ingresso ({sl:.4f} > {min_sl:.4f}), imposto SL a {min_sl:.4f}")
                     sl = min_sl
@@ -1395,7 +1395,7 @@ try:
                 if current_price > entry["tp_max"]:
                     entry["tp_max"] = current_price
                     log(f"⬆️ TP massimo aggiornato per {symbol}: {entry['tp_max']:.4f}")
-                tp_trailing_buffer = 0.01  # 1% sotto il massimo raggiunto
+                tp_trailing_buffer = 0.015  # 1.5% sotto il massimo raggiunto
                 trailing_tp_price = entry["tp_max"] * (1 - tp_trailing_buffer)
                 if current_price <= trailing_tp_price:
                     log(f"🔺Trailing TP venduto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
