@@ -731,13 +731,13 @@ def analyze_asset(symbol: str):
         price = float(last["Close"])
 
         # --- Filtro trend di fondo: solo se EMA50 > EMA200 (trend rialzista) ---
-        if last["ema50"] <= last["ema200"] * 0.97:
-            log(f"[STRATEGY][{symbol}] Filtro trend NON superato (soft): ema50={last['ema50']:.4f} <= 97% ema200={last['ema200']:.4f}")
+        if last["ema50"] <= last["ema200"] * 0.99:
+            log(f"[STRATEGY][{symbol}] Filtro trend NON superato (soft): ema50={last['ema50']:.4f} <= 99% ema200={last['ema200']:.4f}")
             return None, None, None
 
         # --- Soglie dinamiche: TP/SL/trailing in base a volatilità ---
         atr_ratio = last["atr"] / price if price > 0 else 0
-        VOLATILITY_MIN_RATIO = 0.004  # 0.4%
+        VOLATILITY_MIN_RATIO = 0.007  # 0.7%
         if atr_ratio < VOLATILITY_MIN_RATIO:
             log(f"[VOLATILITY FILTER][{symbol}] ATR/Prezzo troppo basso ({atr_ratio:.2%}), nessun segnale ENTRY.")
             return None, None, None
@@ -801,7 +801,7 @@ def analyze_asset(symbol: str):
 
         # CONDIZIONI DA RISPETTARE PER ACQUISTO
         # if (is_volatile and len(entry_conditions) >= 1) or (not is_volatile and len(entry_conditions) >= 2):
-        if len(entry_conditions) >= 1:
+        if len(entry_conditions) >= 2:
             log(f"[STRATEGY][{symbol}] Segnale ENTRY generato: strategie attive: {entry_strategies}")
             return "entry", ", ".join(entry_strategies), price
         else:
