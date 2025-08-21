@@ -85,7 +85,7 @@ SL_MAX = 2.5
 TRAILING_MIN = 0.005  # 0.5%
 TRAILING_MAX = 0.03   # 3%
 TRAILING_ACTIVATION_THRESHOLD = 0.02
-TRAILING_SL_BUFFER = 0.01
+TRAILING_SL_BUFFER = 0.015  # 1.5% invece di 1%
 TRAILING_DISTANCE = 0.02
 INITIAL_STOP_LOSS_PCT = 0.02
 COOLDOWN_MINUTES = 60
@@ -808,23 +808,34 @@ def analyze_asset(symbol: str):
             log(f"[STRATEGY][{symbol}] Nessun segnale ENTRY: condizioni soddisfatte = {len(entry_conditions)}")
 
         # EXIT comune a tutti
+        exit_conditions = []
+        exit_strategies = []
+
+        # Rimbalzo RSI + BB
         cond_exit1 = last["Close"] < last["bb_lower"]
         cond_exit2 = last["rsi"] > 30
         if cond_exit1 and cond_exit2:
-            log(f"[STRATEGY][{symbol}] Segnale EXIT: Rimbalzo RSI + BB")
-            return "exit", "Rimbalzo RSI + BB", price
+            exit_conditions.append(True)
+            exit_strategies.append("Rimbalzo RSI + BB")
         else:
             log(f"[STRATEGY][{symbol}] Condizione EXIT Rimbalzo RSI + BB: Close={last['Close']:.4f} < bb_lower={last['bb_lower']:.4f} = {cond_exit1}, RSI={last['rsi']:.2f} > 30 = {cond_exit2}")
+
+        # MACD bearish + ADX
         cond_exit3 = last["macd"] < last["macd_signal"]
         cond_exit4 = last["adx"] > adx_threshold
         if cond_exit3 and cond_exit4:
-            log(f"[STRATEGY][{symbol}] Segnale EXIT: MACD bearish + ADX")
-            return "exit", "MACD bearish + ADX", price
+            exit_conditions.append(True)
+            exit_strategies.append("MACD bearish + ADX")
         else:
             log(f"[STRATEGY][{symbol}] Condizione EXIT MACD bearish + ADX: macd={last['macd']:.4f} < macd_signal={last['macd_signal']:.4f} = {cond_exit3}, adx={last['adx']:.2f} > soglia={adx_threshold} = {cond_exit4}")
 
-        log(f"[STRATEGY][{symbol}] Nessun segnale EXIT generato")
-        return None, None, None
+        # Richiedi almeno 2 condizioni di uscita
+        if len(exit_conditions) >= 2:
+            log(f"[STRATEGY][{symbol}] Segnale EXIT generato: strategie attive: {exit_strategies}")
+            return "exit", ", ".join(exit_strategies), price
+        else:
+            log(f"[STRATEGY][{symbol}] Nessun segnale EXIT: condizioni soddisfatte = {len(exit_conditions)}")
+            return None, None, None
     except Exception as e:
         log(f"Errore analisi {symbol}: {e}")
         return None, None, None
@@ -1230,7 +1241,7 @@ try:
                 sl = price - (atr_val * sl_factor)
 
                 # PATCH 1: SL deve essere almeno 1.5% sotto il prezzo di ingresso
-                min_sl = price * 0.985  # 1.5% sotto
+                min_sl = price * 0.98  # 2% sotto
                 if sl > min_sl:
                     log(f"[SL PATCH] SL troppo vicino al prezzo di ingresso ({sl:.4f} > {min_sl:.4f}), imposto SL a {min_sl:.4f}")
                     sl = min_sl
@@ -1377,44 +1388,44 @@ try:
                         log(f"📉 SL aggiornato per {symbol}: da {entry['sl']:.4f} a {new_sl:.4f}")
                         entry["sl"] = new_sl
             # PATCH TRAILING TP: attiva trailing TP se supera TP
-            if not entry.get("trailing_tp_active", False) and current_price >= entry["tp"]:
-                entry["trailing_tp_active"] = True
-                entry["tp_max"] = current_price
-                log(f"🔛 Trailing TP attivato per {symbol} sopra TP → Prezzo: {current_price:.4f}")
-                notify_telegram(f"🔛🔺Trailing TP attivato su {symbol}\nPrezzo: {current_price:.4f}")
+            # if not entry.get("trailing_tp_active", False) and current_price >= entry["tp"]:
+            #     entry["trailing_tp_active"] = True
+            #     entry["tp_max"] = current_price
+            #     log(f"🔛 Trailing TP attivato per {symbol} sopra TP → Prezzo: {current_price:.4f}")
+            #     notify_telegram(f"🔛🔺Trailing TP attivato su {symbol}\nPrezzo: {current_price:.4f}")
             
-            if entry.get("trailing_tp_active", False):
-                if current_price > entry["tp_max"]:
-                    entry["tp_max"] = current_price
-                    log(f"⬆️ TP massimo aggiornato per {symbol}: {entry['tp_max']:.4f}")
-                tp_trailing_buffer = 0.015  # 1.5% sotto il massimo raggiunto
-                trailing_tp_price = entry["tp_max"] * (1 - tp_trailing_buffer)
-                if current_price <= trailing_tp_price:
-                    log(f"🔺Trailing TP venduto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
-                    notify_telegram(f"🎯🔺Trailing TP venduto per {symbol} a {current_price:.4f}")
-                    qty = get_free_qty(symbol)
-                    if qty > 0:
-                        usdt_before = get_usdt_balance()
-                        resp = market_sell(symbol, qty)
-                        if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
-                            entry_price = entry["entry_price"]
-                            entry_cost = entry.get("entry_cost", ORDER_USDT)
-                            qty = entry.get("qty", qty)
-                            exit_value = current_price * qty
-                            delta = exit_value - entry_cost
-                            pnl = (delta / entry_cost) * 100
-                            log(f"🔺Trailing TP venduto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
-                            notify_telegram(f"🎯🔺Trailing TP venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
-                            log_trade_to_google(symbol, entry_price, current_price, pnl, "Trailing TP", "TP Triggered", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
-                            open_positions.discard(symbol)
-                            last_exit_time[symbol] = time.time()
-                            position_data.pop(symbol, None)
-                            continue
-                        else:
-                            log(f"❌ Vendita fallita con Trailing TP per {symbol}")
-                            notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} durante Trailing TP!")
-                    else:
-                        log(f"❌ Quantità nulla o troppo piccola per vendita Trailing TP su {symbol}")
+            # if entry.get("trailing_tp_active", False):
+            #     if current_price > entry["tp_max"]:
+            #         entry["tp_max"] = current_price
+            #         log(f"⬆️ TP massimo aggiornato per {symbol}: {entry['tp_max']:.4f}")
+            #     tp_trailing_buffer = 0.015  # 1.5% sotto il massimo raggiunto
+            #     trailing_tp_price = entry["tp_max"] * (1 - tp_trailing_buffer)
+            #     if current_price <= trailing_tp_price:
+            #         log(f"🔺Trailing TP venduto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
+            #         notify_telegram(f"🎯🔺Trailing TP venduto per {symbol} a {current_price:.4f}")
+            #         qty = get_free_qty(symbol)
+            #         if qty > 0:
+            #             usdt_before = get_usdt_balance()
+            #             resp = market_sell(symbol, qty)
+            #             if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+            #                 entry_price = entry["entry_price"]
+            #                 entry_cost = entry.get("entry_cost", ORDER_USDT)
+            #                 qty = entry.get("qty", qty)
+            #                 exit_value = current_price * qty
+            #                 delta = exit_value - entry_cost
+            #                 pnl = (delta / entry_cost) * 100
+            #                 log(f"🔺Trailing TP venduto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
+            #                 notify_telegram(f"🎯🔺Trailing TP venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
+            #                 log_trade_to_google(symbol, entry_price, current_price, pnl, "Trailing TP", "TP Triggered", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
+            #                 open_positions.discard(symbol)
+            #                 last_exit_time[symbol] = time.time()
+            #                 position_data.pop(symbol, None)
+            #                 continue
+            #             else:
+            #                 log(f"❌ Vendita fallita con Trailing TP per {symbol}")
+            #                 notify_telegram(f"❌❗️ VENDITA NON RIUSCITA per {symbol} durante Trailing TP!")
+            #         else:
+            #             log(f"❌ Quantità nulla o troppo piccola per vendita Trailing TP su {symbol}")
             # --- CHIUSURA AUTOMATICA: Trailing Stop o Stop Loss statico ---
             sl_triggered = False
             sl_type = None
