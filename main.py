@@ -3,7 +3,7 @@ import time
 import hmac
 import json
 import hashlib
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 import requests
 import pandas as pd
 from ta.volatility import BollingerBands, AverageTrueRange
@@ -22,7 +22,7 @@ BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
 BYBIT_BASE_URL = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
-ORDER_USDT = 50.0
+MIN_BALANCE_USDT = 50.0
 
 ASSETS = [
     "WIFUSDT", "PEPEUSDT", "BONKUSDT", "INJUSDT", "SUIUSDT",
@@ -37,15 +37,15 @@ VOLATILE_ASSETS = [
 
 INTERVAL_MINUTES = 15
 ATR_WINDOW = 14
-TP_FACTOR = 2.0
-SL_FACTOR = 1.5
-# TRAILING_ACTIVATION_THRESHOLD = 0.001 # +0.1% activation threshold
-TRAILING_ACTIVATION_THRESHOLD = 0.02
-TRAILING_SL_BUFFER = 0.007
-TRAILING_DISTANCE = 0.02
-INITIAL_STOP_LOSS_PCT = 0.02
+SL_ATR_MULT = 1.0
+TP_R_MULT   = 2.5
+ATR_MIN_PCT = 0.006
+ATR_MAX_PCT = 0.030
+EXTENSION_ATR_MULT = 1.2
+MAX_OPEN_POSITIONS = 5
 COOLDOWN_MINUTES = 60
-cooldown = {}
+TRAIL_LOCK_FACTOR = 1.2
+RISK_PCT = 0.01
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
@@ -58,51 +58,6 @@ def notify_telegram(message: str):
             requests.post(url, data=data, timeout=10)
         except Exception as e:
             log(f"Errore invio Telegram: {e}")
-
-def is_bullish_breakout_confirmed(df: pd.DataFrame) -> bool:
-    if len(df) < 2:
-        return False
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    body = abs(last["Close"] - last["Open"])
-    full_range = last["High"] - last["Low"]
-    if last["Close"] > last["Open"] and full_range > 0 and body > 0.6 * full_range and last["Close"] > prev["Close"]:
-        return True
-    return False
-
-def send_signed_request(method, endpoint, params=None):
-    import time, hmac, hashlib
-    if params is None:
-        params = {}
-
-    api_key = BYBIT_API_KEY
-    api_secret = BYBIT_API_SECRET
-    timestamp = str(int(time.time() * 1000))
-    recv_window = "5000"
-
-    body = json.dumps(params, separators=(",", ":")) if method == "POST" else ""
-
-    payload = f"{timestamp}{api_key}{recv_window}{body}"
-    signature = hmac.new(
-        api_secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
-    ).hexdigest()
-
-    headers = {
-        "X-BAPI-API-KEY": api_key,
-        "X-BAPI-SIGN": signature,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": recv_window,
-        "Content-Type": "application/json",
-    }
-
-    url = f"https://api.bybit.com{endpoint}"
-
-    if method == "POST":
-        response = requests.post(url, headers=headers, data=body)
-    else:
-        response = requests.get(url, headers=headers, params=params)
-
-    return response.json()
 
 def get_last_price(symbol: str) -> Optional[float]:
     try:
@@ -194,153 +149,6 @@ def get_free_qty(symbol: str) -> float:
         log(f"❌ Errore nel recupero saldo per {symbol}: {e}")
         return 0.0
 
-def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}")
-        return None
-
-    info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.0001)
-    precision = info.get("precision", 4)
-    min_order_amt = info.get("min_order_amt", 5)
-    min_qty = info.get("min_qty", 0.0)
-
-    try:
-        raw_qty = Decimal(str(usdt_amount)) / Decimal(str(price))
-        step = Decimal(str(qty_step))
-        min_qty_dec = Decimal(str(min_qty))
-        # Arrotonda per difetto al multiplo di step
-        floored_qty = (raw_qty // step) * step
-        # Forza massimo 2 decimali (troncando, non arrotondando)
-        floored_qty = floored_qty.quantize(Decimal('0.01'), rounding=ROUND_DOWN)
-        # Se troppo piccola, porta a min_qty
-        if floored_qty < min_qty_dec:
-            floored_qty = min_qty_dec
-        order_value = floored_qty * Decimal(str(price))
-        # Se valore troppo basso, porta a min_qty per min_order_amt
-        if order_value < Decimal(str(min_order_amt)):
-            min_qty_for_amt = (Decimal(str(min_order_amt)) / Decimal(str(price)))
-            min_qty_for_amt = (min_qty_for_amt // step) * step
-            if min_qty_for_amt < min_qty_dec:
-                min_qty_for_amt = min_qty_dec
-            floored_qty = min_qty_for_amt
-            order_value = floored_qty * Decimal(str(price))
-            if order_value < Decimal(str(min_order_amt)):
-                log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
-                return None
-        # Verifica che la quantità sia multiplo esatto di qty_step
-        if (floored_qty % step) != 0:
-            log(f"❌ Quantità {floored_qty} non multiplo di qty_step {qty_step} per {symbol}")
-            return None
-        if floored_qty <= 0:
-            log(f"❌ Quantità calcolata troppo piccola per {symbol}")
-            return None
-        investito_effettivo = float(floored_qty) * float(price)
-        if investito_effettivo < 0.95 * usdt_amount:
-            log(f"⚠️ Attenzione: valore effettivo investito ({investito_effettivo:.2f} USDT) molto inferiore a quello richiesto ({usdt_amount:.2f} USDT)")
-        log(f"[DEBUG] {symbol} - price: {price}, qty_step: {qty_step}, min_qty: {min_qty}, min_order_amt: {min_order_amt}, richiesto: {usdt_amount}, calcolato: {floored_qty}, valore ordine: {order_value:.2f}")
-        if precision == 0:
-            return str(int(floored_qty))
-        return f"{floored_qty:.{precision}f}".rstrip('0').rstrip('.')
-    except Exception as e:
-        log(f"❌ Errore calcolo quantità per {symbol}: {e}")
-        return None
-
-def market_buy(symbol: str, usdt_amount: float):
-    qty_str = calculate_quantity(symbol, usdt_amount)
-    if not qty_str:
-        log(f"❌ Quantità non valida per acquisto di {symbol}")
-        return None
-
-    info = get_instrument_info(symbol)
-    min_qty = info.get("min_qty", 0.0)
-    min_order_amt = info.get("min_order_amt", 5)
-    precision = info.get("precision", 4)
-
-    def _send_order(qty_str):
-        body = {
-            "category": "spot",
-            "symbol": symbol,
-            "side": "Buy",
-            "orderType": "Market",
-            "qty": qty_str
-        }
-        ts = str(int(time.time() * 1000))
-        body_json = json.dumps(body, separators=(",", ":"))
-        payload = f"{ts}{KEY}5000{body_json}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json"
-        }
-        response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"BUY BODY: {body_json}")
-        try:
-            resp_json = response.json()
-        except Exception:
-            resp_json = {}
-        log(f"RESPONSE: {response.status_code} {resp_json}")
-        # Logga dettagli filled/cumExecQty/orderStatus se presenti
-        if 'result' in resp_json:
-            result = resp_json['result']
-            filled = result.get('cumExecQty') or result.get('execQty') or result.get('qty')
-            order_status = result.get('orderStatus')
-            log(f"[BYBIT ORDER RESULT] filled: {filled}, orderStatus: {order_status}, result: {result}")
-        return response
-
-    try:
-        response = _send_order(qty_str)
-        if response.status_code == 200 and response.json().get("retCode") == 0:
-            time.sleep(2)
-            qty_after = get_free_qty(symbol)
-            if not qty_after or qty_after == 0:
-                time.sleep(3)
-                qty_after = get_free_qty(symbol)
-
-            # Calcola la quantità richiesta in float
-            try:
-                qty_requested = float(qty_str)
-            except Exception:
-                qty_requested = None
-
-            # Se la quantità effettiva è molto inferiore a quella richiesta, logga e notifica
-            if qty_requested and qty_after < 0.8 * qty_requested:
-                log(f"⚠️ Quantità acquistata ({qty_after}) molto inferiore a quella richiesta ({qty_requested}) per {symbol}")
-                notify_telegram(f"⚠️ Ordine parzialmente eseguito per {symbol}: richiesto {qty_requested}, ottenuto {qty_after}")
-                # Tenta un solo riacquisto della differenza se supera i minimi
-                diff = qty_requested - qty_after
-                price = get_last_price(symbol)
-                if diff > min_qty and price and (diff * price) > min_order_amt:
-                    diff_str = f"{diff:.{precision}f}".rstrip('0').rstrip('.')
-                    log(f"🔁 TENTO RIACQUISTO della differenza: {diff_str} {symbol}")
-                    response2 = _send_order(diff_str)
-                    if response2.status_code == 200 and response2.json().get("retCode") == 0:
-                        time.sleep(2)
-                        qty_final = get_free_qty(symbol)
-                        log(f"🟢 Acquisto finale per {symbol}: {qty_final}")
-                        return qty_final
-                    else:
-                        log(f"❌ Riacquisto fallito per {symbol}")
-                        return qty_after
-                else:
-                    log(f"❌ Differenza troppo piccola per riacquisto su {symbol}")
-                    return qty_after
-            if qty_after and qty_after > 0:
-                log(f"🟢 Acquisto registrato per {symbol}")
-                return qty_after
-            else:
-                log(f"⚠️ Acquisto riuscito ma saldo non aggiornato per {symbol}")
-        return None
-
-    except Exception as e:
-        log(f"❌ Errore invio ordine market per {symbol}: {e}")
-        return None
-
 def market_sell(symbol: str, qty: float):
     price = get_last_price(symbol)
     if not price:
@@ -352,32 +160,32 @@ def market_sell(symbol: str, qty: float):
         log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
         return
 
-    # Recupera qty_step e precision con fallback robusto
     info = get_instrument_info(symbol)
     qty_step = info.get("qty_step", 0.0001)
-    precision = info.get("precision", 4)
     if not qty_step or qty_step <= 0:
         qty_step = 0.0001
-        precision = 4
 
     try:
-        dec_qty = Decimal(str(qty))
         step = Decimal(str(qty_step))
-        # Arrotonda per difetto al multiplo di step, MAI supera il saldo
+        dec_qty = Decimal(str(qty))
         floored_qty = (dec_qty // step) * step
-        # Forza massimo 2 decimali (troncando, non arrotondando)
-        floored_qty = floored_qty.quantize(Decimal('0.01'), rounding=ROUND_DOWN)
-        # Rimuovi eventuali zeri e punto finale
-        qty_str = f"{floored_qty:.2f}".rstrip('0').rstrip('.')
-        if qty_str == '':
-            qty_str = '0'
 
-        if Decimal(qty_str) <= 0:
+        # Deriva decimali dallo step
+        step_str = f"{qty_step:.10f}".rstrip('0')
+        if '.' in step_str:
+            step_decimals = len(step_str.split('.')[1])
+        else:
+            step_decimals = 0
+
+        if floored_qty <= 0:
             log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
             return
 
-        # Log di debug
-        log(f"[DEBUG] market_sell {symbol}: qty={qty}, step={qty_step}, floored={floored_qty}, qty_str={qty_str}")
+        qty_str = f"{floored_qty:.{step_decimals}f}".rstrip('0').rstrip('.')
+        if qty_str == '':
+            qty_str = '0'
+
+        log(f"[DEBUG-SELL-QTY] {symbol} req={qty} step={qty_step} send={qty_str}")
 
     except Exception as e:
         log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
@@ -390,12 +198,10 @@ def market_sell(symbol: str, qty: float):
         "orderType": "Market",
         "qty": qty_str
     }
-
     ts = str(int(time.time() * 1000))
     body_json = json.dumps(body, separators=(",", ":"))
     payload = f"{ts}{KEY}5000{body_json}"
     sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-
     headers = {
         "X-BAPI-API-KEY": KEY,
         "X-BAPI-SIGN": sign,
@@ -404,7 +210,6 @@ def market_sell(symbol: str, qty: float):
         "X-BAPI-SIGN-TYPE": "2",
         "Content-Type": "application/json"
     }
-
     try:
         resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"SELL BODY: {body_json}")
@@ -413,6 +218,73 @@ def market_sell(symbol: str, qty: float):
     except Exception as e:
         log(f"❌ Errore invio ordine SELL: {e}")
         return None
+
+def _qty_step_decimals(qty_step: float) -> int:
+    step_str = f"{qty_step:.10f}".rstrip('0')
+    if '.' in step_str:
+        return len(step_str.split('.')[1])
+    return 0
+
+def market_buy_qty(symbol: str, qty: Decimal):
+    """
+    Invia un ordine MARKET BUY usando direttamente la qty (Decimal) già calcolata
+    e allineata allo step. Non riconverte da notional.
+    Ritorna True/False.
+    """
+    info = get_instrument_info(symbol)
+    qty_step = info.get("qty_step", 0.0001)
+    min_order_amt = info.get("min_order_amt", 5)
+    price = get_last_price(symbol)
+    if not price:
+        log(f"❌ Prezzo non disponibile per {symbol}, abort buy")
+        return False
+
+    # Allineamento sicurezza
+    step = Decimal(str(qty_step))
+    qty_aligned = (qty // step) * step
+    if qty_aligned <= 0:
+        log(f"❌ Qty non valida per {symbol} ({qty_aligned})")
+        return False
+
+    notional = float(qty_aligned) * price
+    if notional < min_order_amt:
+        log(f"❌ Notional {notional:.2f} < min {min_order_amt} su {symbol}")
+        return False
+
+    decs = _qty_step_decimals(qty_step)
+    qty_str = f"{qty_aligned:.{decs}f}".rstrip('0').rstrip('.')
+    if qty_str == '':
+        qty_str = '0'
+
+    body = {
+        "category": "spot",
+        "symbol": symbol,
+        "side": "Buy",
+        "orderType": "Market",
+        "qty": qty_str
+    }
+    ts = str(int(time.time() * 1000))
+    body_json = json.dumps(body, separators=(",", ":"))
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json"
+    }
+    resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+    try:
+        rj = resp.json()
+    except:
+        rj = {}
+    log(f"BUY_QTY BODY: {body_json}")
+    log(f"BUY_QTY RESP: {resp.status_code} {rj}")
+    if resp.status_code == 200 and rj.get("retCode") == 0:
+        return True
+    return False
 
 def fetch_history(symbol: str):
     endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
@@ -464,6 +336,7 @@ def analyze_asset(symbol: str):
         df["sma50"] = SMAIndicator(close=close, window=50).sma_indicator()
         df["ema20"] = EMAIndicator(close=close, window=20).ema_indicator()
         df["ema50"] = EMAIndicator(close=close, window=50).ema_indicator()
+        df["ema200"] = EMAIndicator(close=close, window=200).ema_indicator()
         macd = MACD(close=close)
         df["macd"] = macd.macd()
         df["macd_signal"] = macd.macd_signal()
@@ -472,9 +345,12 @@ def analyze_asset(symbol: str):
         df["atr"] = atr.average_true_range()
 
         df.dropna(subset=[
-            "bb_upper", "bb_lower", "rsi", "sma20", "sma50", "ema20", "ema50",
-            "macd", "macd_signal", "adx", "atr"
+            "bb_upper","bb_lower","rsi","sma20","sma50","ema20","ema50","ema200",
+            "macd","macd_signal","adx","atr"
         ], inplace=True)
+
+        if len(df) < 2:
+            return None, None, None
 
         is_volatile = symbol in VOLATILE_ASSETS
         adx_threshold = 20 if is_volatile else 15
@@ -482,7 +358,18 @@ def analyze_asset(symbol: str):
         last = df.iloc[-1]
         prev = df.iloc[-2]
         price = float(last["Close"])
+        atr_val = float(last["atr"])
+        atr_pct = atr_val / price if price else 0
+        # log(f"[ANALYZE] {symbol} ATR={atr_val:.5f} ({atr_pct:.2%})")
 
+        # FILTRI
+        if last["ema50"] <= last["ema200"]:
+            return None, None, None
+        if not (ATR_MIN_PCT <= atr_pct <= ATR_MAX_PCT):
+            return None, None, None
+        if price > last["ema20"] + EXTENSION_ATR_MULT * atr_val:
+            return None, None, None
+        
         # Strategie per asset volatili
         if is_volatile:
             if last["Close"] > last["bb_upper"] and last["rsi"] < 70:
@@ -491,7 +378,6 @@ def analyze_asset(symbol: str):
                 return "entry", "Incrocio SMA 20/50", price
             elif last["macd"] > last["macd_signal"] and last["adx"] > adx_threshold:
                 return "entry", "MACD bullish + ADX", price
-
         # Strategie per asset stabili
         else:
             if prev["ema20"] < prev["ema50"] and last["ema20"] > last["ema50"]:
@@ -527,11 +413,7 @@ last_exit_time = {}
 def get_usdt_balance() -> float:
     return get_free_qty("USDT")
 
-def calculate_stop_loss(entry_price, current_price, p_max, trailing_active):
-    if not trailing_active:
-        return entry_price * (1 - INITIAL_STOP_LOSS_PCT)
-    else:
-        return p_max * (1 - TRAILING_DISTANCE)
+# (RIMOSSO calculate_stop_loss: non più usato con nuovo modello R basato su ATR)
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -604,11 +486,16 @@ while True:
                 continue
 
             usdt_balance = get_usdt_balance()
-            if usdt_balance < ORDER_USDT:
-                log(f"💸 Saldo USDT insufficiente per {symbol} ({usdt_balance:.2f})")
+            if usdt_balance < MIN_BALANCE_USDT:
+                log(f"💸 Saldo USDT insufficiente ({usdt_balance:.2f} < {MIN_BALANCE_USDT}) per {symbol}")
                 continue
 
-            # 📊 Valuta la forza del segnale in base alla strategia
+            # Limite posizioni aperte
+            if len(open_positions) >= MAX_OPEN_POSITIONS:
+                log(f"🚫 Limite posizioni raggiunto ({MAX_OPEN_POSITIONS}), salto {symbol}")
+                continue
+
+            # 📊 Forza strategia (usata come CAP massimo, non per il calcolo del rischio)
             strategy_strength = {
                 "Breakout Bollinger": 1.0,
                 "MACD bullish + ADX": 0.9,
@@ -617,75 +504,161 @@ while True:
                 "MACD bullish (stabile)": 0.65,
                 "Trend EMA + RSI": 0.6
             }
-            strength = strategy_strength.get(strategy, 0.5)  # default prudente
+            strength = strategy_strength.get(strategy, 0.5)
 
-            max_invest = usdt_balance * strength
-            order_amount = min(max_invest, usdt_balance, 250)  # tetto massimo se vuoi
-
-            # ⚠️ INIBISCI GLI ACQUISTI DURANTE IL TEST
-            if TEST_MODE:
-                log(f"[TEST_MODE] Acquisti inibiti per {symbol}")
+            # === POSITION SIZING A RISCHIO FISSO ===
+            # 1. Calcola ATR per determinare risk_per_unit (SL distance)
+            df_sizing = fetch_history(symbol)
+            if df_sizing is None or "Close" not in df_sizing.columns:
+                log(f"❌ Dati storici mancanti per sizing {symbol}")
+                continue
+            atr_ind_sz = AverageTrueRange(
+                high=df_sizing["High"], low=df_sizing["Low"],
+                close=df_sizing["Close"], window=ATR_WINDOW
+            ).average_true_range()
+            atr_val = float(atr_ind_sz.iloc[-1])
+            if atr_val <= 0:
+                log(f"❌ ATR nullo per {symbol}")
                 continue
 
-            resp = market_buy(symbol, order_amount)
-            if resp is None:
+            # Prezzo corrente (rileggi per ridurre drift)
+            live_price = get_last_price(symbol)
+            if not live_price:
+                log(f"❌ Prezzo non disponibile per sizing {symbol}")
+                continue
+
+            risk_per_unit = atr_val * SL_ATR_MULT   # distanza SL per unità
+            equity = get_usdt_balance()
+            risk_capital = equity * RISK_PCT
+            if risk_capital < 5:
+                log(f"💸 Rischio calcolato troppo basso ({risk_capital:.2f}) per {symbol}")
+                continue
+
+            # Qty teorica basata sul rischio
+            qty_risk = risk_capital / risk_per_unit
+
+            # Applica limiti di exchange (step / min order)
+            info = get_instrument_info(symbol)
+            qty_step = info.get("qty_step", 0.0001)
+            min_qty = info.get("min_qty", 0.0)
+            min_order_amt = info.get("min_order_amt", 5)
+
+            from decimal import Decimal
+            step_dec = Decimal(str(qty_step))
+            qty_dec = Decimal(str(qty_risk))
+            qty_adj = (qty_dec // step_dec) * step_dec
+            if qty_adj < Decimal(str(min_qty)):
+                qty_adj = Decimal(str(min_qty))
+
+            order_amount = float(qty_adj) * live_price
+
+            # CAP addizionale: non investire oltre strength * equity né oltre 250 USDT
+            cap_strength = equity * strength
+            cap_global = 250.0
+            max_notional = min(cap_strength, cap_global, equity)
+            if order_amount > max_notional:
+                # Ridimensiona qty alla nuova soglia
+                qty_adj = Decimal(str(max_notional / live_price))
+                qty_adj = (qty_adj // step_dec) * step_dec
+                order_amount = float(qty_adj) * live_price
+
+            if order_amount < min_order_amt:
+                log(f"❌ Notional {order_amount:.2f} < min_order_amt {min_order_amt} per {symbol}")
+                continue
+
+            if float(qty_adj) <= 0:
+                log(f"❌ Qty finale nulla per {symbol}")
+                continue
+
+            # Acquisto (usiamo order_amount in USDT)
+            if TEST_MODE:
+                log(f"[TEST_MODE] (NO BUY) {symbol} qty={qty_adj} notional={order_amount:.2f}")
+                continue
+
+            pre_qty = get_free_qty(symbol)  # saldo prima
+            if not market_buy_qty(symbol, qty_adj):
                 log(f"❌ Acquisto fallito per {symbol}")
                 continue
-
-            qty = get_free_qty(symbol)
-            if qty == 0:
-                log(f"❌ Nessuna quantità acquistata per {symbol}")
+            time.sleep(2)
+            post_qty = get_free_qty(symbol)
+            qty_filled = max(0.0, post_qty - pre_qty)
+            if qty_filled <= 0:
+                # fallback: usa differenza minima (possibile residuo precedente)
+                qty_filled = post_qty
+            if qty_filled <= 0:
+                log(f"❌ Nessuna quantità risultante per {symbol} (post esecuzione)")
                 continue
 
-            df = fetch_history(symbol)
-            if df is None or "Close" not in df.columns:
-                log(f"❌ Dati storici mancanti per {symbol}")
-                continue
+            entry_price = live_price  # usiamo il prezzo live usato per sizing
+            sl = entry_price - risk_per_unit
+            tp = entry_price + (risk_per_unit * TP_R_MULT)
+            actual_cost = entry_price * qty_filled
+            used_risk = risk_per_unit * qty_filled  # rischio monetario effettivo
 
-            atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
-            last = df.iloc[-1]
-            atr_val = last["atr"] if "atr" in last else atr.iloc[-1]
-
-            tp = price + (atr_val * TP_FACTOR)
-            sl = price - (atr_val * SL_FACTOR)
-
-            actual_cost = price * qty
-            
             position_data[symbol] = {
-                "entry_price": price,
+                "entry_price": entry_price,
                 "tp": tp,
                 "sl": sl,
+                "initial_sl": sl,
+                "risk_per_unit": risk_per_unit,
                 "entry_cost": actual_cost,
-                "qty": qty,
+                "qty": qty_filled,
                 "entry_time": time.time(),
                 "trailing_active": False,
-                "p_max": price
+                "p_max": entry_price,
+                "mfe": 0.0,    # Max Favorable Excursion (in R)
+                "mae": 0.0,    # Max Adverse Excursion (in R, negativo)
+                "used_risk": used_risk
             }
-
             open_positions.add(symbol)
-            log(f"🟢 Acquisto registrato per {symbol} | Entry: {price:.4f} | TP: {tp:.4f} | SL: {sl:.4f}")
-            notify_telegram(f"🟢📈 Acquisto per {symbol}\nPrezzo: {price:.4f}\nStrategia: {strategy}\nInvestito: {order_amount:.2f} USDT")
-            time.sleep(3)
+            risk_pct_eff = (used_risk / equity) * 100 if equity else 0
+            log(f"🟢 Acquisto {symbol} | Qty {qty_filled:.8f} | Entry {entry_price:.6f} | SL {sl:.6f} | TP {tp:.6f} | R/unit {risk_per_unit:.6f} | RiskCap {risk_capital:.2f} | UsedRisk {used_risk:.2f} ({risk_pct_eff:.2f}%)")
+            notify_telegram(
+                f"🟢📈 Acquisto {symbol}\nQty: {qty_filled:.6f}\nPrezzo: {entry_price:.6f}\nStrategia: {strategy}\nSL: {sl:.6f}\nTP: {tp:.6f}\nR/unit: {risk_per_unit:.6f}"
+            )
+            time.sleep(2)
 
         # 🔴 USCITA (EXIT)
         elif signal == "exit" and symbol in open_positions:
             entry = position_data.get(symbol, {})
-            entry_price = entry.get("entry_price", price)
-            entry_cost = entry.get("entry_cost", ORDER_USDT)
             qty = entry.get("qty", get_free_qty(symbol))
+            entry_price = entry.get("entry_price", price)
+            entry_cost = entry.get("entry_cost", entry_price * qty)
+            risk_per_unit = entry.get("risk_per_unit", None)
+            mfe = entry.get("mfe", 0.0)
+            mae = entry.get("mae", 0.0)
 
-            usdt_before = get_usdt_balance()
+            # Rileggi prezzo prima della vendita (più aggiornato)
+            latest_before = get_last_price(symbol)
+            if latest_before:
+                price = round(latest_before, 6)
+
             resp = market_sell(symbol, qty)
             if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
-                price = round(price, 6)
+                # Rileggi di nuovo dopo l'esecuzione (best effort)
+                latest_after = get_last_price(symbol)
+                if latest_after:
+                    price = round(latest_after, 6)
+
                 exit_value = price * qty
                 delta = exit_value - entry_cost
                 pnl = (delta / entry_cost) * 100
+                r_multiple = (price - entry_price) / risk_per_unit if risk_per_unit else 0
 
-                log(f"🔴 Vendita completata per {symbol}")
-                log(f"📊 PnL stimato: {pnl:.2f}% | Delta: {delta:.2f}")
-                notify_telegram(f"🔴📉 Vendita per {symbol} a {price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}%")
-                log_trade_to_google(symbol, entry_price, price, pnl, strategy, "Exit Signal")
+                log(f"📊 EXIT {symbol} PnL: {pnl:.2f}% | R={r_multiple:.2f} | MFE={mfe:.2f}R | MAE={mae:.2f}R")
+                notify_telegram(
+                    f"🔴📉 Vendita {symbol} @ {price:.6f}\n"
+                    f"PnL: {pnl:.2f}% | R={r_multiple:.2f}\n"
+                    f"MFE={mfe:.2f}R MAE={mae:.2f}R"
+                )
+                log_trade_to_google(
+                    symbol,
+                    entry_price,
+                    price,
+                    pnl,
+                    f"{strategy} | R={r_multiple:.2f} | MFE={mfe:.2f} | MAE={mae:.2f}",
+                    "Exit Signal"
+                )
 
                 open_positions.discard(symbol)
                 last_exit_time[symbol] = time.time()
@@ -705,45 +678,73 @@ while True:
         if not current_price:
             continue
 
-        # 🧪 Attiva Trailing se supera la soglia
-        if not entry["trailing_active"] and current_price >= entry["entry_price"] * (1 + TRAILING_ACTIVATION_THRESHOLD):
-            entry["trailing_active"] = True
-            log(f"🔛 Trailing Stop attivato per {symbol} sopra soglia → Prezzo: {current_price:.4f}")
-            notify_telegram(f"🔛 Trailing Stop attivo su {symbol}\nPrezzo: {current_price:.4f}")
+        risk = entry.get("risk_per_unit")
+        if not risk or risk <= 0:
+            continue
 
-        # ⬆️ Aggiorna massimo e SL se prezzo cresce
+        entry_price = entry["entry_price"]
+
+        # Aggiorna MFE / MAE (in R)
+        r_current = (current_price - entry_price) / risk
+        if r_current > entry["mfe"]:
+            entry["mfe"] = r_current
+        if r_current < entry["mae"]:
+            entry["mae"] = r_current
+
+        # TP hard
+        if current_price >= entry["tp"]:
+            qty = get_free_qty(symbol)
+            if qty > 0:
+                resp = market_sell(symbol, qty)
+                if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+                    fill_price = get_last_price(symbol) or current_price
+                    pnl_val = (fill_price - entry_price) * qty
+                    pnl_pct = (pnl_val / entry["entry_cost"]) * 100
+                    r_mult = (fill_price - entry_price) / risk
+                    log(f"🎯 TP {symbol} @ {fill_price:.6f} | PnL {pnl_pct:.2f}% | R={r_mult:.2f} | MFE={entry['mfe']:.2f}R | MAE={entry['mae']:.2f}R")
+                    notify_telegram(f"🎯 TP {symbol} @ {fill_price:.6f}\nPnL: {pnl_pct:.2f}% | R={r_mult:.2f}\nMFE={entry['mfe']:.2f}R MAE={entry['mae']:.2f}R")
+                    log_trade_to_google(symbol, entry_price, fill_price, pnl_pct, f"TP | R={r_mult:.2f} | MFE={entry['mfe']:.2f} | MAE={entry['mae']:.2f}", "TP Hit")
+                    open_positions.discard(symbol)
+                    last_exit_time[symbol] = time.time()
+                    position_data.pop(symbol, None)
+                    continue
+                else:
+                    log(f"❌ Vendita TP fallita per {symbol}")
+
+        # Attiva trailing a ≥1R
+        if not entry["trailing_active"] and r_current >= 1.0:
+            entry["trailing_active"] = True
+            entry["sl"] = entry_price  # BE
+            log(f"🔛 Trailing attivo {symbol} (≥1R) | SL→BE {entry_price:.6f}")
+            notify_telegram(f"🔛 Trailing attivo {symbol} (≥1R)\nSL→BE {entry_price:.6f}")
+
+        # Gestione trailing
         if entry["trailing_active"]:
             if current_price > entry["p_max"]:
                 entry["p_max"] = current_price
-                new_sl = current_price * (1 - TRAILING_SL_BUFFER)
-                if new_sl > entry["sl"]:
-                    log(f"📉 SL aggiornato per {symbol}: da {entry['sl']:.4f} a {new_sl:.4f}")
-                    entry["sl"] = new_sl
+                desired_sl = max(entry_price, current_price - (risk * TRAIL_LOCK_FACTOR))
+                if desired_sl > entry["sl"]:
+                    log(f"📉 SL trail {symbol}: {entry['sl']:.6f} → {desired_sl:.6f}")
+                    entry["sl"] = desired_sl
 
-            # ❌ Esegui vendita se SL raggiunto
+            # Stop colpito
             if current_price <= entry["sl"]:
                 qty = get_free_qty(symbol)
                 if qty > 0:
-                    usdt_before = get_usdt_balance()
                     resp = market_sell(symbol, qty)
                     if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
-                        entry_price = entry["entry_price"]
-                        entry_cost = entry.get("entry_cost", ORDER_USDT)
-                        qty = entry.get("qty", qty)
-                        exit_value = current_price * qty
-                        delta = exit_value - entry_cost
-                        pnl = (delta / entry_cost) * 100
-
-                        log(f"🔻 Trailing Stop attivato per {symbol} → Prezzo: {current_price:.4f} | SL: {entry['sl']:.4f}")
-                        notify_telegram(f"🔻 Trailing Stop venduto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
-                        log_trade_to_google(symbol, entry_price, current_price, pnl, "Trailing Stop", "SL Triggered")
-
-                        # 🗑️ Pulizia
+                        fill_price = get_last_price(symbol) or current_price
+                        pnl_val = (fill_price - entry_price) * qty
+                        pnl_pct = (pnl_val / entry["entry_cost"]) * 100
+                        r_mult = (fill_price - entry_price) / risk
+                        log(f"🔻 Trailing Stop {symbol} @ {fill_price:.6f} | PnL {pnl_pct:.2f}% | R={r_mult:.2f} | MFE={entry['mfe']:.2f}R | MAE={entry['mae']:.2f}R")
+                        notify_telegram(f"🔻 Trailing Stop {symbol} @ {fill_price:.6f}\nPnL: {pnl_pct:.2f}% | R={r_mult:.2f}\nMFE={entry['mfe']:.2f}R MAE={entry['mae']:.2f}R")
+                        log_trade_to_google(symbol, entry_price, fill_price, pnl_pct, f"Trailing | R={r_mult:.2f} | MFE={entry['mfe']:.2f} | MAE={entry['mae']:.2f}", "SL Triggered")
                         open_positions.discard(symbol)
                         last_exit_time[symbol] = time.time()
                         position_data.pop(symbol, None)
                     else:
-                        log(f"❌ Vendita fallita con Trailing Stop per {symbol}")
+                        log(f"❌ Vendita fallita Trailing {symbol}")
 
     # Sicurezza: attesa tra i cicli principali
     # Aggiungi pausa di sicurezza per evitare ciclo troppo veloce se tutto salta
