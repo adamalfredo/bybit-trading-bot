@@ -369,16 +369,28 @@ def analyze_asset(symbol: str):
         # log(f"[ANALYZE] {symbol} ATR={atr_val:.5f} ({atr_pct:.2%})")
 
         log(f"[STATE][{symbol}] Close={price:.6f} ATR%={atr_pct:.3%} ema50={last['ema50']:.4f} ema200={last['ema200']:.4f}")
-        # FILTRI + DEBUG (SOSTITUISCE il vecchio blocco "# FILTRI")
-        if last["ema50"] <= last["ema200"]:
-            log(f"[FILTER][{symbol}] Trend KO: ema50 {last['ema50']:.4f} <= ema200 {last['ema200']:.4f}")
+        # FILTRI + DEBUG (MODALITÀ TOLLERANTE)
+        ema50v = float(last["ema50"])
+        ema200v = float(last["ema200"])
+        ema20v = float(last["ema20"])
+        ema_ratio = ema50v / ema200v if ema200v else 0.0
+
+        TREND_MIN_RATIO = 0.995    # prima era 1.0
+        SECONDARY_RATIO = 0.980    # accetto “quasi neutrale” se c’è momentum
+        primary_trend = ema_ratio >= TREND_MIN_RATIO
+        transitional_ok = (ema_ratio >= SECONDARY_RATIO) and (ema20v > ema50v)
+
+        if not (primary_trend or transitional_ok):
+            log(f"[FILTER][{symbol}] Trend KO: ratio={ema_ratio:.4f} (<{TREND_MIN_RATIO:.3f}) e no transizione (ema20<=ema50 o ratio<{SECONDARY_RATIO:.3f})")
             return None, None, None
+
         if not (ATR_MIN_PCT <= atr_pct <= ATR_MAX_PCT):
             log(f"[FILTER][{symbol}] ATR% {atr_pct:.4%} fuori range ({ATR_MIN_PCT:.2%}-{ATR_MAX_PCT:.2%})")
             return None, None, None
+
         limit_ext = last["ema20"] + EXTENSION_ATR_MULT * atr_val
         if price > limit_ext:
-            log(f"[FILTER][{symbol}] Estensione: price {price:.4f} > ema20 {last['ema20']:.4f} + {EXTENSION_ATR_MULT}*ATR ({limit_ext:.4f})")
+            log(f"[FILTER][{symbol}] Estensione: price {price:.4f} > ema20 {ema20v:.4f} + {EXTENSION_ATR_MULT}*ATR ({limit_ext:.4f})")
             return None, None, None
         
         # Strategie per asset volatili
