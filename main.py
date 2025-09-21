@@ -20,7 +20,6 @@ KEY = BYBIT_API_KEY
 SECRET = BYBIT_API_SECRET
 BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
 BYBIT_BASE_URL = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
-log(f"[CONFIG] TESTNET={BYBIT_TESTNET} BASE_URL={BYBIT_BASE_URL}")
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
 MIN_BALANCE_USDT = 50.0
@@ -50,7 +49,7 @@ RISK_PCT = 0.01
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
-
+log(f"[CONFIG] TESTNET={BYBIT_TESTNET} BASE_URL={BYBIT_BASE_URL}")
 def notify_telegram(message: str):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
