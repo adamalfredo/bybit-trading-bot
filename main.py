@@ -39,7 +39,7 @@ INTERVAL_MINUTES = 15
 ATR_WINDOW = 14
 SL_ATR_MULT = 1.0
 TP_R_MULT   = 2.5
-ATR_MIN_PCT = 0.006
+ATR_MIN_PCT = 0.003
 ATR_MAX_PCT = 0.030
 EXTENSION_ATR_MULT = 1.2
 MAX_OPEN_POSITIONS = 5
@@ -362,12 +362,16 @@ def analyze_asset(symbol: str):
         atr_pct = atr_val / price if price else 0
         # log(f"[ANALYZE] {symbol} ATR={atr_val:.5f} ({atr_pct:.2%})")
 
-        # FILTRI
+        # FILTRI + DEBUG (SOSTITUISCE il vecchio blocco "# FILTRI")
         if last["ema50"] <= last["ema200"]:
+            log(f"[FILTER][{symbol}] Trend KO: ema50 {last['ema50']:.4f} <= ema200 {last['ema200']:.4f}")
             return None, None, None
         if not (ATR_MIN_PCT <= atr_pct <= ATR_MAX_PCT):
+            log(f"[FILTER][{symbol}] ATR% {atr_pct:.4%} fuori range ({ATR_MIN_PCT:.2%}-{ATR_MAX_PCT:.2%})")
             return None, None, None
-        if price > last["ema20"] + EXTENSION_ATR_MULT * atr_val:
+        limit_ext = last["ema20"] + EXTENSION_ATR_MULT * atr_val
+        if price > limit_ext:
+            log(f"[FILTER][{symbol}] Estensione: price {price:.4f} > ema20 {last['ema20']:.4f} + {EXTENSION_ATR_MULT}*ATR ({limit_ext:.4f})")
             return None, None, None
         
         # Strategie per asset volatili
