@@ -39,7 +39,7 @@ INTERVAL_MINUTES = 15
 ATR_WINDOW = 14
 SL_ATR_MULT = 1.0
 TP_R_MULT   = 2.5
-ATR_MIN_PCT = 0.003
+ATR_MIN_PCT = 0.002
 ATR_MAX_PCT = 0.030
 EXTENSION_ATR_MULT = 1.2
 MAX_OPEN_POSITIONS = 5
@@ -49,7 +49,7 @@ RISK_PCT = 0.01
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
-log(f"[CONFIG] TESTNET={BYBIT_TESTNET} BASE_URL={BYBIT_BASE_URL}")
+
 def notify_telegram(message: str):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -292,7 +292,7 @@ def fetch_history(symbol: str):
         "category": "spot",
         "symbol": symbol,
         "interval": str(INTERVAL_MINUTES),
-        "limit": 100
+        "limit": 400  # WAS 100 → aumentato per calcolare EMA200
     }
     try:
         resp = requests.get(endpoint, params=params, timeout=10)
@@ -345,11 +345,17 @@ def analyze_asset(symbol: str):
         df["atr"] = atr.average_true_range()
 
         df.dropna(subset=[
-            "bb_upper","bb_lower","rsi","sma20","sma50","ema20","ema50","ema200",
+            "bb_upper","bb_lower","rsi","sma20","sma50","ema20","ema50",
             "macd","macd_signal","adx","atr"
         ], inplace=True)
 
-        if len(df) < 2:
+        if len(df) < 50:
+            log(f"[DEBUG][{symbol}] STOP: len(df)={len(df)} dopo dropna (storico pulito insufficiente)")
+            return None, None, None
+
+        # Controllo EMA200: se ancora NaN (per prime ~200 barre) esco senza errore
+        if pd.isna(df.iloc[-1]["ema200"]):
+            log(f"[FILTER][{symbol}] ema200 non pronta (ancora <200 barre utili)")
             return None, None, None
 
         is_volatile = symbol in VOLATILE_ASSETS
@@ -362,6 +368,7 @@ def analyze_asset(symbol: str):
         atr_pct = atr_val / price if price else 0
         # log(f"[ANALYZE] {symbol} ATR={atr_val:.5f} ({atr_pct:.2%})")
 
+        log(f"[STATE][{symbol}] Close={price:.6f} ATR%={atr_pct:.3%} ema50={last['ema50']:.4f} ema200={last['ema200']:.4f}")
         # FILTRI + DEBUG (SOSTITUISCE il vecchio blocco "# FILTRI")
         if last["ema50"] <= last["ema200"]:
             log(f"[FILTER][{symbol}] Trend KO: ema50 {last['ema50']:.4f} <= ema200 {last['ema200']:.4f}")
