@@ -656,6 +656,43 @@ open_positions = set()
 position_data = {}
 last_exit_time = {}
 
+def sync_positions_from_wallet():
+    """
+    Registra come posizioni aperte tutti i saldi spot >0 presenti nel wallet
+    all'avvio (solo una volta). Evita acquisti duplicati su coin già detenute.
+    """
+    synced = []
+    for sym in ASSETS:
+        if sym == "USDT":
+            continue
+        qty = get_free_qty(sym)
+        if qty <= 0:
+            continue
+        price = get_last_price(sym)
+        if not price:
+            continue
+        position_data[sym] = {
+            "entry_price": price,
+            "tp": None,
+            "sl": None,
+            "initial_sl": None,
+            "risk_per_unit": None,
+            "entry_cost": qty * price,
+            "qty": qty,
+            "entry_time": time.time(),
+            "trailing_active": False,
+            "p_max": price,
+            "mfe": 0.0,
+            "mae": 0.0,
+            "used_risk": 0.0
+        }
+        open_positions.add(sym)
+        synced.append(f"{sym}:{qty}")
+    if synced:
+        log(f"[SYNC] Posizioni iniziali registrate: {', '.join(synced)}")
+    else:
+        log("[SYNC] Nessuna posizione iniziale da registrare")
+
 def get_usdt_balance() -> float:
     return get_free_qty("USDT")
 
@@ -709,11 +746,16 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
     except Exception as e:
         log(f"❌ Errore log su Google Sheets: {e}")
 
+sync_positions_from_wallet()
+
 while True:
+    _support_cache = {}
     new_positions_this_cycle = 0  # reset contatore ingressi per ciclo
     for symbol in ASSETS:
         # Skip simboli non supportati (testnet issue)
-        if not is_symbol_supported(symbol):
+        if symbol not in _support_cache:
+            _support_cache[symbol] = is_symbol_supported(symbol)
+        if not _support_cache[symbol]:
             log(f"[SKIP][{symbol}] Non supportato (testnet)")
             continue
 
@@ -728,6 +770,33 @@ while True:
 
         # ✅ ENTRATA
         if signal == "entry":
+            # Se esiste saldo non registrato → registra e salta nuovo acquisto
+            existing_qty = get_free_qty(symbol)
+            if existing_qty > 0 and symbol not in open_positions:
+                log(f"[HAVE_BALANCE][{symbol}] Saldo già presente ({existing_qty}) → registro posizione senza comprare.")
+                position_data[symbol] = {
+                    "entry_price": price,
+                    "tp": None,
+                    "sl": None,
+                    "initial_sl": None,
+                    "risk_per_unit": None,
+                    "entry_cost": existing_qty * price,
+                    "qty": existing_qty,
+                    "entry_time": time.time(),
+                    "trailing_active": False,
+                    "p_max": price,
+                    "mfe": 0.0,
+                    "mae": 0.0,
+                    "used_risk": 0.0
+                }
+                open_positions.add(symbol)
+                continue
+
+            # Blocca piramidazione: se già in open_positions skip
+            if symbol in open_positions:
+                log(f"[PYRAMID BLOCK][{symbol}] Già in posizione → skip nuovo ingresso.")
+                continue
+
             # Cooldown
             if symbol in last_exit_time:
                 elapsed = time.time() - last_exit_time[symbol]
@@ -777,6 +846,12 @@ while True:
 
             # Prezzo corrente (rileggi per ridurre drift)
             live_price = get_last_price(symbol)
+            # Controllo divergenza tra prezzo candela (price) e ticker live
+            if live_price:
+                divergence = abs(live_price - price) / price if price else 0
+                if divergence > 0.02:  # >2% differenza
+                    log(f"[DIVERGENZA][{symbol}] Close={price:.6f} Ticker={live_price:.6f} Δ={divergence:.2%} → salto ingresso")
+                    continue
             if not live_price:
                 log(f"❌ Prezzo non disponibile per sizing {symbol}")
                 continue
@@ -857,9 +932,14 @@ while True:
             time.sleep(2)
             post_qty = get_free_qty(symbol)
             qty_filled = max(0.0, post_qty - pre_qty)
+            theoretical = float(qty_adj)
             if qty_filled <= 0:
-                # fallback: usa differenza minima (possibile residuo precedente)
-                qty_filled = post_qty
+                log(f"[FILL][{symbol}] Delta saldo zero → assumo qty teorica {theoretical}")
+                qty_filled = theoretical
+            fill_ratio = qty_filled / theoretical if theoretical > 0 else 0
+            if fill_ratio < 0.5:
+                log(f"[WARN][{symbol}] Partial fill stimato ({fill_ratio:.0%}) → uso qty teorica {theoretical}")
+                qty_filled = theoretical
             if qty_filled <= 0:
                 log(f"❌ Nessuna quantità risultante per {symbol} (post esecuzione)")
                 continue
