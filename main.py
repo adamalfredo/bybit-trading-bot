@@ -93,6 +93,13 @@ MAX_OPEN_POSITIONS = 5
 COOLDOWN_MINUTES = 60
 TRAIL_LOCK_FACTOR = 1.2
 RISK_PCT = 0.01
+NOTIONAL_FLOOR_USDT = 15.0      # minimo desiderato per un ingresso (se saldo & cap lo permettono)
+ADD_ON_ENABLE = True
+ADD_ON_TRIGGER_R = 1.2        # attiva primo add-on se MFE ≥ 1.2R
+ADD_ON_STEP_R   = 0.8         # ogni ulteriore add-on ogni +0.8R di MFE
+ADD_ON_MAX_COUNT = 2          # massimo numero di add-on
+ADD_ON_NOTIONAL_MULT = 0.50   # ogni add-on = 50% del notional iniziale
+ADD_ON_MIN_GAP_SEC = 300      # almeno 5m tra add-on
 MIN_HOLDING_MINUTES = 5           # tempo minimo prima di accettare exit/trailing
 TRAILING_ENABLED = True           # per disattivare tutta la logica trailing
 MIN_SL_PCT = 0.010                # SL minimo = 1% del prezzo (se ATR troppo piccolo)
@@ -1009,8 +1016,64 @@ def reconcile_positions():
             entry["entry_cost"] = entry["entry_price"] * qty_wallet
             log(f"[RECONCILE][UPDATE] {sym} qty {old_qty}→{qty_wallet} (Δ {delta_pct:.1%})")
 
+def try_add_on(symbol: str):
+    if not ADD_ON_ENABLE or symbol not in open_positions:
+        return
+    entry = position_data.get(symbol)
+    if not entry:
+        return
+    if entry.get("add_on_count", 0) >= ADD_ON_MAX_COUNT:
+        return
+    risk = entry.get("risk_per_unit")
+    if not risk or risk <= 0:
+        return
+    current_price = get_last_price(symbol)
+    if not current_price:
+        return
+    r_now = (current_price - entry["entry_price"]) / risk
+    mfe = entry.get("mfe", r_now)
+    # Requisito MFE iniziale
+    needed = ADD_ON_TRIGGER_R + (entry.get("add_on_count", 0)) * ADD_ON_STEP_R
+    if mfe < needed:
+        return
+    # Timer
+    last_ts = entry.get("last_add_on_ts", entry["entry_time"])
+    if time.time() - last_ts < ADD_ON_MIN_GAP_SEC:
+        return
+    # Calcolo notional add-on
+    base_notional = entry["entry_cost"]
+    add_notional = base_notional * ADD_ON_NOTIONAL_MULT
+    equity = get_usdt_balance()
+    if add_notional > equity * 0.6:  # evita drenare quasi tutto
+        return
+    live_price = current_price
+    info = get_instrument_info(symbol)
+    qty_step = info.get("qty_step", 0.0001)
+    step_dec = Decimal(str(qty_step))
+    add_qty = Decimal(str(add_notional / live_price))
+    add_qty = (add_qty // step_dec) * step_dec
+    if add_qty <= 0:
+        return
+    prefer_limit = (symbol in LARGE_ASSETS) or (live_price >= 100)
+    pre_qty = get_free_qty(symbol, quiet_missing=True)
+    ok = execute_buy_order(symbol, add_qty, prefer_limit=prefer_limit, slippage=LARGE_CAP_LIMIT_SLIPPAGE)
+    if not ok:
+        return
+    time.sleep(2)
+    post_qty = get_free_qty(symbol, quiet_missing=True)
+    filled = max(0.0, post_qty - pre_qty)
+    if filled <= 0:
+        filled = float(add_qty)
+    # Non cambio entry price (mantengo R calcolato sul primo ingresso)
+    entry["qty"] += filled
+    entry["entry_cost"] += filled * live_price
+    entry["used_risk"] = entry["qty"] * risk
+    entry["add_on_count"] = entry.get("add_on_count", 0) + 1
+    entry["last_add_on_ts"] = time.time()
+    log(f"➕ Add-On {symbol} qty={filled:.6f} notional={filled*live_price:.2f} MFE={mfe:.2f}R total_qty={entry['qty']:.6f}")
+
 def get_usdt_balance() -> float:
-    return get_free_qty("USDT")
+    return get_free_qty("USDT", quiet_missing=True)
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -1239,6 +1302,18 @@ while True:
                     qty_adj = safe_qty
                     order_amount = float(qty_adj) * live_price
 
+            # NOTIONAL FLOOR (se superiore al minimo exchange e sotto i cap)
+            if order_amount < NOTIONAL_FLOOR_USDT:
+                floor_notional = min(NOTIONAL_FLOOR_USDT, avail_cap)
+                if floor_notional > order_amount:
+                    floor_qty = Decimal(str(floor_notional / live_price))
+                    floor_qty = (floor_qty // step_dec) * step_dec
+                    if floor_qty > qty_adj:
+                        qty_adj = floor_qty
+                        order_amount = float(qty_adj) * live_price
+                        risk_capital = float(qty_adj) * risk_per_unit
+                        log(f"[FLOOR][{symbol}] Alzo notional a {order_amount:.2f} (risk_cap {risk_capital:.2f})")
+
             # Notional minimo reale (considera min_qty*price)
             min_notional_required = max(min_order_amt, min_qty * live_price)
 
@@ -1287,7 +1362,7 @@ while True:
             # Scelta + esecuzione unificata (robusta)
             prefer_limit = (symbol in LARGE_ASSETS) or (live_price >= 100)
             log(f"[SIZE][{symbol}] qty_adj={qty_adj} order_amount={order_amount:.2f} min_req={min_notional_required:.2f} prefer_limit={prefer_limit}")
-            pre_qty = get_free_qty(symbol)
+            pre_qty = get_free_qty(symbol, quiet_missing=True)
             buy_ok = execute_buy_order(symbol, qty_adj, prefer_limit=prefer_limit, slippage=LARGE_CAP_LIMIT_SLIPPAGE)
 
             if not buy_ok:
@@ -1295,7 +1370,7 @@ while True:
                 continue
 
             time.sleep(2)
-            post_qty = get_free_qty(symbol)
+            post_qty = get_free_qty(symbol, quiet_missing=True)
             qty_filled = max(0.0, post_qty - pre_qty)
             theoretical = float(qty_adj)
             if qty_filled <= 0:
@@ -1342,7 +1417,9 @@ while True:
         # 🔴 USCITA (EXIT)
         elif signal == "exit" and symbol in open_positions:
             entry = position_data.get(symbol, {})
-            qty = entry.get("qty", get_free_qty(symbol))
+            qty = entry.get("qty", 0)
+            if qty <= 0:
+                qty = get_free_qty(symbol, quiet_missing=True)
             entry_price = entry.get("entry_price", price)
             entry_cost = entry.get("entry_cost", entry_price * qty)
             risk_per_unit = entry.get("risk_per_unit", None)
@@ -1412,6 +1489,8 @@ while True:
         r_current = (current_price - entry_price) / risk
         if r_current > entry["mfe"]:
             entry["mfe"] = r_current
+        if ADD_ON_ENABLE:
+            try_add_on(symbol)
         if r_current < entry["mae"]:
             entry["mae"] = r_current
         
@@ -1428,7 +1507,7 @@ while True:
                 cond_rsi_drop = (rsi_val < EARLY_EXIT_RSIFALL) and (entry["mfe"] >= 1.0)
                 cond_ema_fail = (current_price < ema20_val) if EARLY_EXIT_REQUIRE_EMA20 else True
                 if (cond_macd_flip and cond_ema_fail) or (cond_rsi_drop and cond_macd_flip):
-                    qty = get_free_qty(symbol)
+                    qty = get_free_qty(symbol, quiet_missing=True)
                     if qty > 0:
                         resp = market_sell(symbol, qty)
                         if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
@@ -1451,7 +1530,7 @@ while True:
             if entry["mfe"] >= GIVEBACK_MIN_MFE_R:
                 giveback = entry["mfe"] - r_current
                 if giveback >= GIVEBACK_DROP_R and r_current > 0:
-                    qty = get_free_qty(symbol)
+                    qty = get_free_qty(symbol, quiet_missing=True)
                     if qty > 0:
                         resp = market_sell(symbol, qty)
                         if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
@@ -1471,7 +1550,7 @@ while True:
 
         # TP hard
         if current_price >= entry["tp"]:
-            qty = get_free_qty(symbol)
+            qty = get_free_qty(symbol, quiet_missing=True)
             if qty > 0:
                 resp = market_sell(symbol, qty)
                 if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
@@ -1531,7 +1610,7 @@ while True:
 
             # Stop colpito
             if current_price <= entry["sl"]:
-                qty = get_free_qty(symbol)
+                qty = get_free_qty(symbol, quiet_missing=True)
                 if qty > 0:
                     resp = market_sell(symbol, qty)
                     if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
