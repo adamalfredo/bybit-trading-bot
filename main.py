@@ -51,6 +51,11 @@ PULLBACK_MIN_RSI = 45               # conferma momentum base
 ENABLE_GIVEBACK_EXIT = True
 GIVEBACK_MIN_MFE_R = 1.2            # attivo solo se ha toccato almeno 1.2R
 GIVEBACK_DROP_R = 0.6               # restituisce ≥0.6R dal massimo ⇒ exit
+COUNTER_OVERRIDE_RSI = 48           # RSI sopra questa soglia abilita override momentum nel counter-trend
+EARLY_EXIT_ENABLE = True
+EARLY_EXIT_MIN_R = 0.8          # minimo R raggiunto per considerare uscita anticipata
+EARLY_EXIT_RSIFALL = 48         # se RSI scende sotto questa soglia dopo aver superato 55
+EARLY_EXIT_REQUIRE_EMA20 = True # richiedi che il prezzo sia < ema20 (altrimenti solo MACD non basta)
 
 STALE_DATA_MAX_HOURS = 2
 INVERSION_HEURISTIC_MINUTES = 120  # 2 ore (coerente con staleness)
@@ -554,7 +559,14 @@ def analyze_asset(symbol: str):
         ANALYSIS_CACHE[symbol] = {
             "atr_val": atr_val,
             "close": price,
-            "ts": df.index[-1].timestamp()
+            "ts": df.index[-1].timestamp(),
+            "ema20": float(last["ema20"]),
+            "ema50": float(last["ema50"]),
+            "ema200": float(last["ema200"]),
+            "macd": float(last["macd"]),
+            "macd_signal": float(last["macd_signal"]),
+            "rsi": float(last["rsi"]),
+            "adx": float(last["adx"])
         }
         atr_pct = atr_val / price if price else 0
         # log(f"[ANALYZE] {symbol} ATR={atr_val:.5f} ({atr_pct:.2%})")
@@ -566,29 +578,32 @@ def analyze_asset(symbol: str):
         ema20v = float(last["ema20"])
         ema_ratio = ema50v / ema200v if ema200v else 0.0
 
-        # --- Trend logic modulare (REVISIONE con slope) ---
+        # --- Trend logic modulare (REVISIONE con slope + momentum override) ---
         primary_trend = ema_ratio >= TREND_MIN_RATIO
         transitional_ok = (ema_ratio >= SECONDARY_RATIO) and (ema20v > ema50v)
 
-        # Calcolo slope per riconoscere una fase di recupero precoce
+        # Calcolo slope (tolleranza COUNTER_SLOPE_EPS)
         ema20_prev = float(prev["ema20"])
         ema50_prev = float(prev["ema50"])
-        ema20_rising = ema20v > ema20_prev           # ema20 sta salendo
-        ema50_not_dumping = ema50v >= ema50_prev * 0.998  # ema50 non in forte discesa (> -0.2%)
+        ema20_rising = ema20v >= ema20_prev * (1 - COUNTER_SLOPE_EPS)
+        ema50_not_dumping = ema50v >= ema50_prev * 0.998  # evita ema50 in caduta ripida
+
+        # Momentum forte può scavalcare il requisito di ema20_rising
+        strong_momentum = (last["macd"] > last["macd_signal"]) and (last["rsi"] >= COUNTER_OVERRIDE_RSI)
 
         counter_trend_ok = (
             ENABLE_COUNTER_TREND
             and (ema_ratio >= COUNTER_TREND_MIN_RATIO)
-            and ema20_rising
             and ema50_not_dumping
+            and (ema20_rising or strong_momentum)
             and (last["macd"] > last["macd_signal"])
-            and (last["rsi"] > 42)   # più permissivo di prima (prima >45)
+            and (last["rsi"] > 42)   # soglia base (override usa RSI più alta)
         )
 
         if not (primary_trend or transitional_ok or counter_trend_ok):
             log(f"[FILTER][{symbol}] Trend KO: ratio={ema_ratio:.4f} "
                 f"(need ≥{TREND_MIN_RATIO:.3f} | trans ≥{SECONDARY_RATIO:.3f} | counter ≥{COUNTER_TREND_MIN_RATIO:.3f} "
-                f"| slope20={ema20_rising} macd>sig={last['macd'] > last['macd_signal']})")
+                f"| slope20={ema20_rising} strongMom={strong_momentum})")
             return None, None, None
 
         EPS = 0.00005  # tolleranza
@@ -1220,6 +1235,37 @@ while True:
             entry["mfe"] = r_current
         if r_current < entry["mae"]:
             entry["mae"] = r_current
+        
+        # Early Exit (momentum deteriora prima di trailing/giveback)
+        if EARLY_EXIT_ENABLE and entry["mfe"] >= EARLY_EXIT_MIN_R and r_current > 0:
+            cache_ind = ANALYSIS_CACHE.get(symbol)
+            if cache_ind and (time.time() - cache_ind["ts"] < INTERVAL_MINUTES * 60 + 30):
+                macd_val = cache_ind["macd"]
+                macd_sig = cache_ind["macd_signal"]
+                rsi_val = cache_ind["rsi"]
+                ema20_val = cache_ind["ema20"]
+                hist = macd_val - macd_sig
+                cond_macd_flip = hist <= 0
+                cond_rsi_drop = (rsi_val < EARLY_EXIT_RSIFALL) and (entry["mfe"] >= 1.0)
+                cond_ema_fail = (current_price < ema20_val) if EARLY_EXIT_REQUIRE_EMA20 else True
+                if (cond_macd_flip and cond_ema_fail) or (cond_rsi_drop and cond_macd_flip):
+                    qty = get_free_qty(symbol)
+                    if qty > 0:
+                        resp = market_sell(symbol, qty)
+                        if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+                            fill_price = get_last_price(symbol) or current_price
+                            pnl_val = (fill_price - entry_price) * qty
+                            pnl_pct = (pnl_val / entry["entry_cost"]) * 100
+                            r_mult = (fill_price - entry_price) / risk
+                            log(f"⚡ Early Exit {symbol} @ {fill_price:.6f} | R={r_mult:.2f} | MFE={entry['mfe']:.2f}R | MACD flip | RSI={rsi_val:.1f}")
+                            notify_telegram(f"⚡ Early Exit {symbol} @ {fill_price:.6f}\nR={r_mult:.2f} MFE={entry['mfe']:.2f}R\nRSI={rsi_val:.1f} MACD flip")
+                            log_trade_to_google(symbol, entry_price, fill_price, pnl_pct,
+                                                f"EarlyExit | MFE={entry['mfe']:.2f}R | MACDflip",
+                                                "Early Exit")
+                            open_positions.discard(symbol)
+                            last_exit_time[symbol] = time.time()
+                            position_data.pop(symbol, None)
+                            continue
 
         # Giveback exit: se forte ritracciamento dal massimo favorevole
         if ENABLE_GIVEBACK_EXIT:
