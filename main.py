@@ -97,7 +97,7 @@ MIN_HOLDING_MINUTES = 5           # tempo minimo prima di accettare exit/trailin
 TRAILING_ENABLED = True           # per disattivare tutta la logica trailing
 MIN_SL_PCT = 0.010                # SL minimo = 1% del prezzo (se ATR troppo piccolo)
 MAX_NEW_POSITIONS_PER_CYCLE = 2   # massimo ingressi per ciclo di scansione
-USE_DYNAMIC_ASSET_LIST = False      # Fase 2: se True sostituirà ASSETS dinamicamente
+USE_DYNAMIC_ASSET_LIST = True      # Fase 2: se True sostituirà ASSETS dinamicamente
 USE_SAFE_ORDER_BUY   = False        # Fase 3: se True userà safe_market_buy() al posto di market_buy_qty()
 LARGE_CAP_MIN_NOTIONAL_MULT = 1.10  # quanto sopra il notional minimo per tentativo large cap
 LARGE_CAP_LIMIT_SLIPPAGE    = 0.0015  # 0.15% sopra last price per LIMIT IOC (fill immediato)
@@ -107,7 +107,7 @@ EXCLUDE_LOW_PRICE    = True         # Se True (fase 1) solo DRY-RUN (non modific
 PRICE_MIN_ACTIVE     = 0.01         # Soglia prezzo per esclusione preventiva (dry-run ora)
 DYNAMIC_ASSET_MIN_VOLUME = 500000   # Filtro volume quote (USDT)
 MAX_DYNAMIC_ASSETS   = 25           # Limite massimo asset dinamici
-DYNAMIC_REFRESH_MIN  = 60           # Ogni X minuti (fase 2)
+DYNAMIC_REFRESH_MIN  = 30           # Ogni X minuti (fase 2)
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
@@ -745,8 +745,12 @@ apply_low_price_exclusion()
 
 def update_dynamic_assets():
     """
-    FASE 2: (ora non attiva) – costruisce una lista dinamica.
-    Ritorna lista simboli candidate (filtrate).
+    Costruisce lista dinamica:
+      - Filtra solo coppie USDT
+      - Esclude stablecoin note
+      - Filtro volume minimo e prezzo minimo
+      - Ordina per turnover24h desc
+    Ritorna (assets, volatile_assets)
     """
     url = f"{BYBIT_BASE_URL}/v5/market/tickers"
     params = {"category": "spot"}
@@ -755,15 +759,15 @@ def update_dynamic_assets():
         data = resp.json()
         if data.get("retCode") != 0:
             log(f"❌ dynamic assets retCode !=0: {data.get('retMsg')}")
-            return ASSETS
+            return ASSETS, VOLATILE_ASSETS
+
         raw_list = data.get("result", {}).get("list", [])
-        candidates = []
+        filtered = []
         for r in raw_list:
             sym = r.get("symbol")
             if not sym or not sym.endswith("USDT"):
                 continue
-            # Evita stable
-            if sym in ("USDCUSDT", "DAIUSDT", "USDTUSDT"):
+            if sym in ("USDCUSDT","DAIUSDT","BUSDUSDT","USDTUSDT","FDUSDUSDT","TUSDUSDT","USDEUSDT"):
                 continue
             try:
                 lastp = float(r.get("lastPrice", 0) or 0)
@@ -774,15 +778,31 @@ def update_dynamic_assets():
                 continue
             if vol_quote < DYNAMIC_ASSET_MIN_VOLUME:
                 continue
-            candidates.append((sym, vol_quote, lastp))
-        # Ordina per volume desc
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        final = [c[0] for c in candidates[:MAX_DYNAMIC_ASSETS]]
-        log(f"[DYN][CANDIDATE] {len(final)} asset: {final}")
-        return final or ASSETS
+            filtered.append((sym, vol_quote, lastp))
+
+        filtered.sort(key=lambda x: x[1], reverse=True)
+        top = filtered[:MAX_DYNAMIC_ASSETS]
+
+        # Classifica "volatili" in base al prezzo (più basso) o coda di volume
+        assets_new = [t[0] for t in top]
+        # euristica: volatili = ultime 60% per volume + coin sotto prezzo 5 USDT
+        cut = int(len(assets_new) * 0.4)
+        high_volume = set(assets_new[:cut])
+        volatile = []
+        for sym, vol, p in top:
+            if sym not in high_volume and p < 15:
+                volatile.append(sym)
+            elif p < 5:
+                volatile.append(sym)
+        # fallback se troppo poche
+        if len(volatile) < max(2, len(assets_new)//5):
+            volatile = [a for a in assets_new[cut:]]
+
+        log(f"[DYN][REFRESH] assets={len(assets_new)} volatile={len(volatile)}")
+        return assets_new, volatile
     except Exception as e:
         log(f"❌ update_dynamic_assets errore: {e}")
-        return ASSETS
+        return ASSETS, VOLATILE_ASSETS
 
 if USE_DYNAMIC_ASSET_LIST:
     dyn_list = update_dynamic_assets()
@@ -803,6 +823,7 @@ ANALYSIS_CACHE = {}   # <— aggiunto: cache indicatori per sizing / trailing
 
 LAST_BAR_SLOT = None         # id dell’ultima candela analizzata
 SCAN_THIS_CYCLE = True       # flag se eseguiamo analisi completa
+LAST_DYNAMIC_REFRESH = 0
 
 def _compute_atr_and_risk(symbol: str, price: float):
     df_hist = fetch_history(symbol)
@@ -950,6 +971,27 @@ sync_positions_from_wallet()
 
 while True:
     retrofit_missing_risk()
+    # Refresh dinamico lista asset
+    if USE_DYNAMIC_ASSET_LIST:
+        now = time.time()
+        if now - LAST_DYNAMIC_REFRESH >= DYNAMIC_REFRESH_MIN * 60:
+            prev_set = set(ASSETS)
+            dyn_assets, dyn_volatile = update_dynamic_assets()
+            if dyn_assets:
+                preserve = [s for s in open_positions if s not in dyn_assets]
+                if preserve:
+                    log(f"[DYN][PRESERVE] Mantengo asset con posizioni aperte: {preserve}")
+                ASSETS = dyn_assets + preserve
+                added = set(dyn_assets) - prev_set
+                removed = prev_set - set(dyn_assets)
+                if added:
+                    log(f"[DYN][ADDED] {list(added)[:8]}")
+                if removed:
+                    log(f"[DYN][REMOVED] {list(removed)[:8]}")
+                VOLATILE_ASSETS = dyn_volatile
+                LAST_DYNAMIC_REFRESH = now
+                log(f"[DYN][ACTIVE] ASSETS={len(ASSETS)} VOLATILE={len(VOLATILE_ASSETS)}")
+                
     # Determina slot candela corrente (inizio minuto relativo al frame 15m)
     slot = int(time.time() // (INTERVAL_MINUTES * 60))
     if LAST_BAR_SLOT is None or slot > LAST_BAR_SLOT:
