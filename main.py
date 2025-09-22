@@ -108,6 +108,7 @@ PRICE_MIN_ACTIVE     = 0.01         # Soglia prezzo per esclusione preventiva (d
 DYNAMIC_ASSET_MIN_VOLUME = 500000   # Filtro volume quote (USDT)
 MAX_DYNAMIC_ASSETS   = 25           # Limite massimo asset dinamici
 DYNAMIC_REFRESH_MIN  = 30           # Ogni X minuti (fase 2)
+RECONCILE_INTERVAL_SEC = 60         # ogni 60s verifica posizioni fantasma / nuove manuali
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
@@ -805,11 +806,16 @@ def update_dynamic_assets():
         return ASSETS, VOLATILE_ASSETS
 
 if USE_DYNAMIC_ASSET_LIST:
-    dyn_list = update_dynamic_assets()
-    log(f"[DYN] Lista dinamica ATTIVA: {dyn_list}")
-    # NOTA: in FASE 1 non sostituiamo ASSETS. In FASE 2 potrai fare: ASSETS = dyn_list
+    dyn_assets, dyn_volatile = update_dynamic_assets()
+    if dyn_assets:
+        ASSETS = dyn_assets
+        VOLATILE_ASSETS = dyn_volatile
+        LAST_DYNAMIC_REFRESH = time.time()
+        log(f"[DYN][INIT] ASSETS={len(ASSETS)} VOLATILE={len(VOLATILE_ASSETS)}")
+    else:
+        log("[DYN][INIT] Nessun aggiornamento dinamico (uso lista statica fallback)")
 else:
-    log("[DYN] Disattivato (fase 1)")
+    log("[DYN] Disattivato (lista statica)")
 
 TEST_MODE = False  # Acquisti e vendite normali abilitati
 
@@ -823,7 +829,7 @@ ANALYSIS_CACHE = {}   # <— aggiunto: cache indicatori per sizing / trailing
 
 LAST_BAR_SLOT = None         # id dell’ultima candela analizzata
 SCAN_THIS_CYCLE = True       # flag se eseguiamo analisi completa
-LAST_DYNAMIC_REFRESH = 0
+_LAST_RECONCILE_TS = 0       # timestamp ultimo reconcile
 
 def _compute_atr_and_risk(symbol: str, price: float):
     df_hist = fetch_history(symbol)
@@ -916,6 +922,100 @@ def retrofit_missing_risk():
     if updated:
         log(f"[RETROFIT] Aggiornate posizioni senza risk: {updated}")
 
+def _snapshot_wallet_positions():
+    """
+    Ritorna dict {symbol: qty} per tutte le coin candidate (ASSETS ∪ open_positions)
+    escludendo USDT. Usa get_free_qty (wallet o available).
+    """
+    snapshot = {}
+    symbols = set(ASSETS) | set(open_positions)
+    for sym in symbols:
+        if sym == "USDT":
+            continue
+        qty = get_free_qty(sym)
+        if qty and qty > 0:
+            snapshot[sym] = qty
+    return snapshot
+
+def reconcile_positions():
+    """
+    - Rimuove posizioni fantasma (wallet=0 ma presenti internamente)
+    - Aggiunge posizioni manuali nuove (wallet>0 ma non tracciate)
+    - Aggiorna qty se variazione >10%
+    """
+    global _LAST_RECONCILE_TS
+    now = time.time()
+    if now - _LAST_RECONCILE_TS < RECONCILE_INTERVAL_SEC:
+        return
+    _LAST_RECONCILE_TS = now
+
+    wallet = _snapshot_wallet_positions()
+    wallet_syms = set(wallet.keys())
+    internal_syms = set(open_positions)
+
+    # Rimozione posizioni fantasma
+    to_remove = internal_syms - wallet_syms
+    for sym in list(to_remove):
+        entry = position_data.get(sym, {})
+        log(f"[RECONCILE][REMOVE] {sym} assente dal wallet → rimuovo (entry_price={entry.get('entry_price')})")
+        open_positions.discard(sym)
+        position_data.pop(sym, None)
+        last_exit_time[sym] = now  # opzionale per evitare re‑entry immediato
+
+    # Aggiunta nuove manuali
+    new_syms = wallet_syms - internal_syms
+    for sym in new_syms:
+        price = get_last_price(sym)
+        if not price:
+            continue
+        pack = _compute_atr_and_risk(sym, price)
+        if not pack:
+            # fallback minimo
+            fallback_risk = price * MIN_SL_PCT
+            pack = {
+                "risk_per_unit": fallback_risk,
+                "sl": price - fallback_risk,
+                "initial_sl": price - fallback_risk,
+                "tp": price + fallback_risk * TP_R_MULT
+            }
+        qty = wallet[sym]
+        position_data[sym] = {
+            "entry_price": price,
+            "tp": pack["tp"],
+            "sl": pack["sl"],
+            "initial_sl": pack["initial_sl"],
+            "risk_per_unit": pack["risk_per_unit"],
+            "entry_cost": qty * price,
+            "qty": qty,
+            "entry_time": now,
+            "trailing_active": False,
+            "p_max": price,
+            "mfe": 0.0,
+            "mae": 0.0,
+            "used_risk": pack["risk_per_unit"] * qty,
+            "synced": True
+        }
+        open_positions.add(sym)
+        log(f"[RECONCILE][ADD] Posizione manuale rilevata {sym} qty={qty}")
+
+    # Aggiorna qty su variazioni >10%
+    for sym in (wallet_syms & internal_syms):
+        qty_wallet = wallet[sym]
+        entry = position_data.get(sym)
+        if not entry:
+            continue
+        qty_internal = entry.get("qty", 0)
+        if qty_internal <= 0:
+            entry["qty"] = qty_wallet
+            entry["entry_cost"] = entry["entry_price"] * qty_wallet
+            continue
+        delta_pct = abs(qty_wallet - qty_internal) / qty_internal
+        if delta_pct >= 0.10:
+            old_qty = qty_internal
+            entry["qty"] = qty_wallet
+            entry["entry_cost"] = entry["entry_price"] * qty_wallet
+            log(f"[RECONCILE][UPDATE] {sym} qty {old_qty}→{qty_wallet} (Δ {delta_pct:.1%})")
+
 def get_usdt_balance() -> float:
     return get_free_qty("USDT")
 
@@ -970,6 +1070,7 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
 sync_positions_from_wallet()
 
 while True:
+    reconcile_positions()   # <-- aggiorna stato con chiusure / aperture manuali
     retrofit_missing_risk()
     # Refresh dinamico lista asset
     if USE_DYNAMIC_ASSET_LIST:
@@ -982,12 +1083,17 @@ while True:
                 if preserve:
                     log(f"[DYN][PRESERVE] Mantengo asset con posizioni aperte: {preserve}")
                 ASSETS = dyn_assets + preserve
+
                 added = set(dyn_assets) - prev_set
-                removed = prev_set - set(dyn_assets)
+                removed_raw = prev_set - set(dyn_assets)
+                # escludi quelli preservati dal log removed
+                removed = [r for r in removed_raw if r not in preserve]
+
                 if added:
                     log(f"[DYN][ADDED] {list(added)[:8]}")
                 if removed:
-                    log(f"[DYN][REMOVED] {list(removed)[:8]}")
+                    log(f"[DYN][REMOVED] {removed[:8]}")
+
                 VOLATILE_ASSETS = dyn_volatile
                 LAST_DYNAMIC_REFRESH = now
                 log(f"[DYN][ACTIVE] ASSETS={len(ASSETS)} VOLATILE={len(VOLATILE_ASSETS)}")
