@@ -46,6 +46,12 @@ MAX_OPEN_POSITIONS = 5
 COOLDOWN_MINUTES = 60
 TRAIL_LOCK_FACTOR = 1.2
 RISK_PCT = 0.01
+MIN_HOLDING_MINUTES = 5           # tempo minimo prima di accettare exit/trailing
+TRAILING_ENABLED = True           # per disattivare tutta la logica trailing
+TRAILING_ACTIVATION_R = 2.0       # attiva trailing solo dopo 2R
+TRAILING_LOCK_R = 1.0             # quando attiva, blocca almeno +1R
+MIN_SL_PCT = 0.010                # SL minimo = 1% del prezzo (se ATR troppo piccolo)
+MAX_NEW_POSITIONS_PER_CYCLE = 2   # massimo ingressi per ciclo di scansione
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
@@ -506,7 +512,10 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
         log(f"❌ Errore log su Google Sheets: {e}")
 
 while True:
+    new_positions_this_cycle = 0  # reset contatore ingressi per ciclo
     for symbol in ASSETS:
+        if new_positions_this_cycle >= MAX_NEW_POSITIONS_PER_CYCLE:
+            break
         signal, strategy, price = analyze_asset(symbol)
         log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
 
@@ -570,6 +579,11 @@ while True:
                 continue
 
             risk_per_unit = atr_val * SL_ATR_MULT   # distanza SL per unità
+            # PATCH: impone un rischio minimo assoluto (evita micro SL troppo stretti)
+            min_risk_abs = live_price * MIN_SL_PCT
+            if risk_per_unit < min_risk_abs:
+                log(f"[RISK][{symbol}] risk_per_unit {risk_per_unit:.6f} troppo basso → forzato a {min_risk_abs:.6f}")
+                risk_per_unit = min_risk_abs
             equity = get_usdt_balance()
             risk_capital = equity * RISK_PCT  # rischio iniziale target (potrà essere aumentato se sotto min ordine)
 
@@ -663,6 +677,7 @@ while True:
                 "used_risk": used_risk
             }
             open_positions.add(symbol)
+            new_positions_this_cycle += 1  # PATCH: conteggio ingressi ciclo
             risk_pct_eff = (risk_per_unit * qty_filled / equity) * 100 if equity else 0
             log(f"🟢 Acquisto {symbol} | Qty {qty_filled:.8f} | Entry {entry_price:.6f} | SL {sl:.6f} | TP {tp:.6f} | R/unit {risk_per_unit:.6f} | RiskCap {risk_capital:.2f} | UsedRisk {used_risk:.2f} ({risk_pct_eff:.2f}%)")
             notify_telegram(
@@ -680,14 +695,19 @@ while True:
             mfe = entry.get("mfe", 0.0)
             mae = entry.get("mae", 0.0)
 
-            # Rileggi prezzo prima della vendita (più aggiornato)
+            # Tempo minimo in posizione
+            holding_sec = time.time() - entry.get("entry_time", 0)
+            if holding_sec < MIN_HOLDING_MINUTES * 60:
+                remain = (MIN_HOLDING_MINUTES * 60 - holding_sec) / 60
+                log(f"[HOLD][{symbol}] Exit ignorata (holding {holding_sec/60:.1f}m < {MIN_HOLDING_MINUTES}m, restano {remain:.1f}m)")
+                continue
+
             latest_before = get_last_price(symbol)
             if latest_before:
                 price = round(latest_before, 6)
 
             resp = market_sell(symbol, qty)
             if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
-                # Rileggi di nuovo dopo l'esecuzione (best effort)
                 latest_after = get_last_price(symbol)
                 if latest_after:
                     price = round(latest_after, 6)
@@ -699,9 +719,7 @@ while True:
 
                 log(f"📊 EXIT {symbol} PnL: {pnl:.2f}% | R={r_multiple:.2f} | MFE={mfe:.2f}R | MAE={mae:.2f}R")
                 notify_telegram(
-                    f"🔴📉 Vendita {symbol} @ {price:.6f}\n"
-                    f"PnL: {pnl:.2f}% | R={r_multiple:.2f}\n"
-                    f"MFE={mfe:.2f}R MAE={mae:.2f}R"
+                    f"🔴📉 Vendita {symbol} @ {price:.6f}\nPnL: {pnl:.2f}% | R={r_multiple:.2f}\nMFE={mfe:.2f}R MAE={mae:.2f}R"
                 )
                 log_trade_to_google(
                     symbol,
@@ -711,7 +729,6 @@ while True:
                     f"{strategy} | R={r_multiple:.2f} | MFE={mfe:.2f} | MAE={mae:.2f}",
                     "Exit Signal"
                 )
-
                 open_positions.discard(symbol)
                 last_exit_time[symbol] = time.time()
                 position_data.pop(symbol, None)
@@ -763,21 +780,40 @@ while True:
                 else:
                     log(f"❌ Vendita TP fallita per {symbol}")
 
-        # Attiva trailing a ≥1R
-        if not entry["trailing_active"] and r_current >= 1.0:
-            entry["trailing_active"] = True
-            entry["sl"] = entry_price  # BE
-            log(f"🔛 Trailing attivo {symbol} (≥1R) | SL→BE {entry_price:.6f}")
-            notify_telegram(f"🔛 Trailing attivo {symbol} (≥1R)\nSL→BE {entry_price:.6f}")
-
         # Gestione trailing
+        if not TRAILING_ENABLED:
+            continue
+
+        holding_sec = time.time() - entry.get("entry_time", 0)
+
+        # Attiva trailing solo dopo condizioni:
+        # - profit ≥ TRAILING_ACTIVATION_R
+        # - tempo minimo rispettato
+        if (not entry["trailing_active"]
+            and r_current >= TRAILING_ACTIVATION_R
+            and holding_sec >= MIN_HOLDING_MINUTES * 60):
+            entry["trailing_active"] = True
+            locked_sl = entry_price + (risk * TRAILING_LOCK_R)
+            if locked_sl > entry["sl"]:
+                entry["sl"] = locked_sl
+            log(f"🔛 Trailing attivo {symbol} (≥{TRAILING_ACTIVATION_R}R & hold OK) | SL lock {entry['sl']:.6f}")
+            notify_telegram(f"🔛 Trailing attivo {symbol}\nSL lock {entry['sl']:.6f}")
+
         if entry["trailing_active"]:
+            # aggiorna massimo
             if current_price > entry["p_max"]:
                 entry["p_max"] = current_price
-                desired_sl = max(entry_price, current_price - (risk * TRAIL_LOCK_FACTOR))
-                if desired_sl > entry["sl"]:
-                    log(f"📉 SL trail {symbol}: {entry['sl']:.6f} → {desired_sl:.6f}")
-                    entry["sl"] = desired_sl
+
+            # propone nuovo SL seguendo (TRAIL_LOCK_FACTOR * risk) sotto il massimo
+            target_sl = entry["p_max"] - (risk * TRAIL_LOCK_FACTOR)
+            # mai scendere sotto lock iniziale (entry + TRAILING_LOCK_R*R)
+            min_lock = entry_price + (risk * TRAILING_LOCK_R)
+            if target_sl < min_lock:
+                target_sl = min_lock
+
+            if target_sl > entry["sl"]:
+                log(f"📉 SL trail {symbol}: {entry['sl']:.6f} → {target_sl:.6f}")
+                entry["sl"] = target_sl
 
             # Stop colpito
             if current_price <= entry["sl"]:
@@ -800,4 +836,5 @@ while True:
 
     # Sicurezza: attesa tra i cicli principali
     # Aggiungi pausa di sicurezza per evitare ciclo troppo veloce se tutto salta
+    log(f"[CYCLE] Completato ciclo. Posizioni aperte: {len(open_positions)}")
     time.sleep(INTERVAL_MINUTES * 60)
