@@ -28,6 +28,15 @@ SYNC_BACKFILL_HOLDING_EXEMPT = True   # posizioni sincronizzate esentate da hold
 LARGE_ASSETS = {"BTCUSDT", "ETHUSDT", "SOLUSDT"}  # gruppo large cap
 EXTENSION_ATR_MULT_BASE = 1.2
 EXTENSION_ATR_MULT_LARGE = 1.5  # large cap più permissive
+TREND_MIN_RATIO = 0.985        # prima 0.995
+SECONDARY_RATIO = 0.970        # prima 0.980
+COUNTER_TREND_MIN_RATIO = 0.950
+REVERSAL_MIN_RATIO = 0.940
+ENABLE_COUNTER_TREND = True
+ENABLE_REVERSAL_BB = True
+
+STALE_DATA_MAX_HOURS = 2
+INVERSION_HEURISTIC_MINUTES = 120  # 2 ore (coerente con staleness)
 
 ASSETS = [
     "WIFUSDT", "INJUSDT", "SUIUSDT",
@@ -458,9 +467,9 @@ def fetch_history(symbol: str):
         # Controllo staleness (candela finale troppo vecchia)
         latest_ts = df.index[-1]
         age_sec = time.time() - latest_ts.timestamp()
-        if age_sec > INTERVAL_MINUTES * 60 * 8:  # > ~2 ore (15m * 8 = 120m)
-            log(f"[STALE][{symbol}] Ultima candela {latest_ts} vecchia {age_sec/3600:.2f}h → dati inattendibili")
-        
+        if age_sec > STALE_DATA_MAX_HOURS * 3600:
+            log(f"[STALE][{symbol}] Ultima candela {latest_ts} vecchia {age_sec/3600:.2f}h (> {STALE_DATA_MAX_HOURS}h)")
+
         for col in ["Open", "High", "Low", "Close", "Volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         return df
@@ -510,14 +519,18 @@ def analyze_asset(symbol: str):
         is_volatile = symbol in VOLATILE_ASSETS
         adx_threshold = 20 if is_volatile else 15
 
-        if (time.time() - df.index[-1].timestamp()) > INTERVAL_MINUTES * 120 and (time.time() - df.index[0].timestamp()) < INTERVAL_MINUTES * 120:
-            # dataset probabilmente inverso: uso la prima come “last”
+        inverted = False
+        if ((time.time() - df.index[-1].timestamp()) > INVERSION_HEURISTIC_MINUTES * 60
+            and (time.time() - df.index[0].timestamp()) < INVERSION_HEURISTIC_MINUTES * 60):
+            inverted = True
             last = df.iloc[0]
             prev = df.iloc[1]
+            last_ts_used = df.index[0]
         else:
             last = df.iloc[-1]
             prev = df.iloc[-2]
-        log(f"[BAR][{symbol}] last_ts={df.index[-1]} age={(time.time()-df.index[-1].timestamp()):.1f}s")
+            last_ts_used = df.index[-1]
+        log(f"[BAR][{symbol}] last_ts={last_ts_used} inverted={inverted} age={(time.time()-last_ts_used.timestamp()):.1f}s")
         price = float(last["Close"])
         atr_val = float(last["atr"])
         # Salva cache per riuso nel sizing (evita seconda fetch)
@@ -536,13 +549,18 @@ def analyze_asset(symbol: str):
         ema20v = float(last["ema20"])
         ema_ratio = ema50v / ema200v if ema200v else 0.0
 
-        TREND_MIN_RATIO = 0.995    # prima era 1.0
-        SECONDARY_RATIO = 0.980    # accetto “quasi neutrale” se c’è momentum
+        # --- Trend logic modulare ---
         primary_trend = ema_ratio >= TREND_MIN_RATIO
         transitional_ok = (ema_ratio >= SECONDARY_RATIO) and (ema20v > ema50v)
-
-        if not (primary_trend or transitional_ok):
-            log(f"[FILTER][{symbol}] Trend KO: ratio={ema_ratio:.4f} (<{TREND_MIN_RATIO:.3f}) e no transizione (ema20<=ema50 o ratio<{SECONDARY_RATIO:.3f})")
+        counter_trend_ok = (
+            ENABLE_COUNTER_TREND
+            and (ema_ratio >= COUNTER_TREND_MIN_RATIO)
+            and (ema20v > ema50v)            # segno di risalita breve
+            and (last["macd"] > last["macd_signal"])
+            and (last["rsi"] > 45)
+        )
+        if not (primary_trend or transitional_ok or counter_trend_ok):
+            log(f"[FILTER][{symbol}] Trend KO: ratio={ema_ratio:.4f} (need ≥{TREND_MIN_RATIO:.3f} | trans ≥{SECONDARY_RATIO:.3f} | counter ≥{COUNTER_TREND_MIN_RATIO:.3f})")
             return None, None, None
 
         EPS = 0.00005  # tolleranza
@@ -572,6 +590,11 @@ def analyze_asset(symbol: str):
                 return "entry", "MACD bullish (stabile)", price
             elif last["rsi"] > 50 and last["ema20"] > last["ema50"]:
                 return "entry", "Trend EMA + RSI", price
+
+        # Reversal BB (mean reversion controllata)
+        if ENABLE_REVERSAL_BB and ema_ratio >= REVERSAL_MIN_RATIO:
+            if last["Close"] <= last["bb_lower"] * 1.01 and last["rsi"] < 35 and last["adx"] < 22:
+                return "entry", "Reversal BB + RSI", price
 
         # EXIT comune a tutti
         if last["Close"] < last["bb_lower"] and last["rsi"] > 30:
@@ -888,10 +911,6 @@ while True:
                     log(f"⏳ Cooldown attivo per {symbol} ({elapsed:.0f}s), salto ingresso")
                     continue
 
-            if symbol in open_positions:
-                log(f"⏩ Ignoro acquisto: già in posizione su {symbol}")
-                continue
-
             usdt_balance = get_usdt_balance()
             if usdt_balance < MIN_BALANCE_USDT:
                 if not ALLOW_SUB_MIN_BALANCE_ENTRY:
@@ -916,6 +935,7 @@ while True:
                 "Incrocio SMA 20/50": 0.75,
                 "Incrocio EMA 20/50": 0.7,
                 "MACD bullish (stabile)": 0.65,
+                "Reversal BB + RSI": 0.55,
                 "Trend EMA + RSI": 0.6
             }
             strength = strategy_strength.get(strategy, 0.5)
@@ -933,10 +953,7 @@ while True:
             if time.time() - cache["ts"] > 120:
                 log(f"[STALE-CACHE][{symbol}] Dati analisi vecchi >120s, salto")
                 continue
-            if atr_val <= 0:
-                log(f"❌ ATR nullo per {symbol}")
-                continue
-
+            
             # Prezzo corrente (rileggi per ridurre drift)
             live_price = get_last_price(symbol)
             # Controllo divergenza tra prezzo candela (price) e ticker live
@@ -1219,4 +1236,4 @@ while True:
     # Sicurezza: attesa tra i cicli principali
     # Aggiungi pausa di sicurezza per evitare ciclo troppo veloce se tutto salta
     log(f"[CYCLE] Completato ciclo. Posizioni aperte: {len(open_positions)}")
-    time.sleep(INTERVAL_MINUTES * 60)
+    time.sleep(60)  # ciclo ogni 60s; segnali su base 15m restano validi
