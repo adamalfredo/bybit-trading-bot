@@ -905,7 +905,6 @@ sync_positions_from_wallet()
 while True:
     retrofit_missing_risk()
     # Determina slot candela corrente (inizio minuto relativo al frame 15m)
-    global LAST_BAR_SLOT, SCAN_THIS_CYCLE
     slot = int(time.time() // (INTERVAL_MINUTES * 60))
     if LAST_BAR_SLOT is None or slot > LAST_BAR_SLOT:
         SCAN_THIS_CYCLE = True
