@@ -205,38 +205,33 @@ def is_symbol_supported(symbol: str) -> bool:
     info = get_instrument_info(symbol)
     return bool(info)  # se vuoto consideriamo non supportato
 
-def get_free_qty(symbol: str) -> float:
+def get_free_qty(symbol: str, quiet_missing: bool = False) -> float:
     if symbol.endswith("USDT") and len(symbol) > 4:
         coin = symbol.replace("USDT", "")
     elif symbol == "USDT":
         coin = "USDT"
     else:
         coin = symbol
-
     url = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
     params = {"accountType": BYBIT_ACCOUNT_TYPE}
-
     from urllib.parse import urlencode
     query_string = urlencode(params)
     timestamp = str(int(time.time() * 1000))
     sign_payload = f"{timestamp}{KEY}5000{query_string}"
     sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
-
     headers = {
         "X-BAPI-API-KEY": KEY,
         "X-BAPI-SIGN": sign,
         "X-BAPI-TIMESTAMP": timestamp,
         "X-BAPI-RECV-WINDOW": "5000"
     }
-
     try:
         resp = requests.get(url, headers=headers, params=params, timeout=10)
         data = resp.json()
-
         if "result" not in data or "list" not in data["result"]:
-            log(f"❗ Struttura inattesa da Bybit per {symbol}: {resp.text}")
+            if not quiet_missing:
+                log(f"❗ Struttura inattesa wallet: {resp.text}")
             return 0.0
-
         coin_list = data["result"]["list"][0].get("coin", [])
         for c in coin_list:
             if c.get("coin") == coin:
@@ -246,9 +241,9 @@ def get_free_qty(symbol: str) -> float:
                     wallet = float(raw_wallet) if raw_wallet else 0.0
                     avail = float(raw_avail) if raw_avail else wallet
                 except Exception as e:
-                    log(f"⚠️ Errore conversione saldo {coin}: {e}")
+                    if not quiet_missing:
+                        log(f"⚠️ Errore conversione saldo {coin}: {e}")
                     return 0.0
-
                 if coin == "USDT":
                     if avail < wallet:
                         log(f"📦 USDT wallet={wallet:.4f} available={avail:.4f}")
@@ -256,17 +251,15 @@ def get_free_qty(symbol: str) -> float:
                         log(f"📦 USDT available={avail:.4f}")
                     return avail
                 else:
-                    if wallet > 0:
-                        log(f"📦 Saldo trovato per {coin}: {wallet}")
-                    else:
-                        log(f"🟡 Nessun saldo disponibile per {coin}")
+                    if wallet > 0 and not quiet_missing:
+                        log(f"📦 Saldo {coin}: {wallet}")
                     return wallet
-
-        log(f"🔍 Coin {coin} non trovata nel saldo.")
+        if not quiet_missing:
+            log(f"🔍 Coin {coin} non trovata nel saldo.")
         return 0.0
-
     except Exception as e:
-        log(f"❌ Errore nel recupero saldo per {symbol}: {e}")
+        if not quiet_missing:
+            log(f"❌ Errore wallet {symbol}: {e}")
         return 0.0
 
 def market_sell(symbol: str, qty: float):
@@ -932,7 +925,7 @@ def _snapshot_wallet_positions():
     for sym in symbols:
         if sym == "USDT":
             continue
-        qty = get_free_qty(sym)
+        qty = get_free_qty(sym, quiet_missing=True)
         if qty and qty > 0:
             snapshot[sym] = qty
     return snapshot
@@ -1134,7 +1127,7 @@ while True:
         # ✅ ENTRATA
         if signal == "entry":
             # Se esiste saldo non registrato → registra e salta nuovo acquisto
-            existing_qty = get_free_qty(symbol)
+            existing_qty = get_free_qty(symbol, quiet_missing=True)
             if existing_qty > 0 and symbol not in open_positions:
                 log(f"[HAVE_BALANCE][{symbol}] Saldo già presente ({existing_qty}) → registro posizione senza comprare.")
                 position_data[symbol] = {
@@ -1193,9 +1186,15 @@ while True:
             if atr_val <= 0:
                 log(f"❌ ATR cache ≤0 per {symbol}")
                 continue
-            if time.time() - cache["ts"] > 120:
-                log(f"[STALE-CACHE][{symbol}] Dati analisi vecchi >120s, salto")
-                continue
+            age_cache = time.time() - cache["ts"]
+            stale_limit = INTERVAL_MINUTES * 60 - 30  # ricalcolo se oltre (frame 15m → 870s)
+            if age_cache > stale_limit:
+                log(f"[STALE-CACHE][{symbol}] Cache {age_cache:.0f}s > {stale_limit}s → ricalcolo")
+                sig_r, strat_r, price_r = analyze_asset(symbol)
+                if sig_r and strat_r and price_r:
+                    signal, strategy, price = sig_r, strat_r, price_r
+                else:
+                    continue
             
             live_price = get_last_price(symbol)
             if live_price and ENFORCE_DIVERGENCE_CHECK:
