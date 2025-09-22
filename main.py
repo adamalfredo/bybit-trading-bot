@@ -22,7 +22,11 @@ BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
 BYBIT_BASE_URL = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
-MIN_BALANCE_USDT = 50.0
+MIN_BALANCE_USDT = 20.0  # prima 50.0
+
+LARGE_ASSETS = {"BTCUSDT", "ETHUSDT", "SOLUSDT"}  # gruppo large cap
+EXTENSION_ATR_MULT_BASE = 1.2
+EXTENSION_ATR_MULT_LARGE = 1.5  # large cap più permissive
 
 ASSETS = [
     "WIFUSDT", "PEPEUSDT", "BONKUSDT", "INJUSDT", "SUIUSDT",
@@ -130,6 +134,10 @@ def get_instrument_info(symbol: str) -> dict:
     except Exception as e:
         log(f"❌ Errore get_instrument_info {symbol}: {e}")
         return {}
+    
+def is_symbol_supported(symbol: str) -> bool:
+    info = get_instrument_info(symbol)
+    return bool(info)  # se vuoto consideriamo non supportato
 
 def get_free_qty(symbol: str) -> float:
     if symbol.endswith("USDT") and len(symbol) > 4:
@@ -513,9 +521,10 @@ def analyze_asset(symbol: str):
             log(f"[FILTER][{symbol}] ATR% {atr_pct:.4%} fuori range ({ATR_MIN_PCT:.2%}-{ATR_MAX_PCT:.2%})")
             return None, None, None
 
-        limit_ext = last["ema20"] + EXTENSION_ATR_MULT * atr_val
+        ext_mult = EXTENSION_ATR_MULT_LARGE if symbol in LARGE_ASSETS else EXTENSION_ATR_MULT_BASE
+        limit_ext = last["ema20"] + ext_mult * atr_val
         if price > limit_ext:
-            log(f"[FILTER][{symbol}] Estensione: price {price:.4f} > ema20 {ema20v:.4f} + {EXTENSION_ATR_MULT}*ATR ({limit_ext:.4f})")
+            log(f"[FILTER][{symbol}] Estensione: price {price:.4f} > ema20 {ema20v:.4f} + {ext_mult}*ATR ({limit_ext:.4f})")
             return None, None, None
         
         # Strategie per asset volatili
@@ -550,6 +559,7 @@ log("🔄 Avvio sistema di monitoraggio segnali reali")
 notify_telegram("🤖 BOT AVVIATO - In ascolto per segnali di ingresso/uscita")
 
 log(f"[CONFIG] FEATURES: dyn_assets={USE_DYNAMIC_ASSET_LIST} safe_buy={USE_SAFE_ORDER_BUY} exclude_low_price={EXCLUDE_LOW_PRICE}")
+log(f"[GROUPS] Large={list(LARGE_ASSETS)} BaseExt={EXTENSION_ATR_MULT_BASE} LargeExt={EXTENSION_ATR_MULT_LARGE}")
 
 def _dry_run_low_price_exclusions():
     if not EXCLUDE_LOW_PRICE:
@@ -565,6 +575,30 @@ def _dry_run_low_price_exclusions():
         log(f"[DRY-RUN][LOW-PRICE] Nessun asset sotto {PRICE_MIN_ACTIVE}")
 
 _dry_run_low_price_exclusions()
+
+def apply_low_price_exclusion():
+    global ASSETS
+    if not EXCLUDE_LOW_PRICE:
+        return
+    kept = []
+    removed = []
+    for sym in ASSETS:
+        p = get_last_price(sym)
+        if p is None:
+            kept.append(sym)  # se non recupero prezzo non lo scarto subito
+            continue
+        if p < PRICE_MIN_ACTIVE:
+            removed.append(f"{sym}({p})")
+        else:
+            kept.append(sym)
+    if removed:
+        log(f"[LOW-PRICE][APPLIED] Rimossi: {removed}")
+    else:
+        log("[LOW-PRICE][APPLIED] Nessuna rimozione")
+    ASSETS = kept
+
+# Applica rimozione reale (dopo il DRY-RUN per confrontare)
+apply_low_price_exclusion()
 
 def update_dynamic_assets():
     """
@@ -678,6 +712,11 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
 while True:
     new_positions_this_cycle = 0  # reset contatore ingressi per ciclo
     for symbol in ASSETS:
+        # Skip simboli non supportati (testnet issue)
+        if not is_symbol_supported(symbol):
+            log(f"[SKIP][{symbol}] Non supportato (testnet)")
+            continue
+
         if new_positions_this_cycle >= MAX_NEW_POSITIONS_PER_CYCLE:
             break
         signal, strategy, price = analyze_asset(symbol)
