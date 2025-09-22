@@ -22,6 +22,8 @@ BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
 BYBIT_BASE_URL = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 MIN_BALANCE_USDT = 20.0  # prima 50.0
+SAFETY_AVAILABLE_PCT = 0.97       # Usa max 97% del saldo disponibile
+MARKET_COST_BUFFER_PCT = 0.0025   # 0.25% buffer (fee + micro slippage) per pre-check MARKET
 ALLOW_SUB_MIN_BALANCE_ENTRY = True    # consente ingresso se saldo < MIN_BALANCE_USDT ma >= min_order_amt
 SYNC_BACKFILL_HOLDING_EXEMPT = True   # posizioni sincronizzate esentate da holding minimo per exit/trailing
 LARGE_ASSETS = {"BTCUSDT", "ETHUSDT", "SOLUSDT"}  # gruppo large cap
@@ -227,7 +229,7 @@ def get_free_qty(symbol: str) -> float:
     }
 
     try:
-        resp = requests.get(url, headers=headers, params=params)
+        resp = requests.get(url, headers=headers, params=params, timeout=10)
         data = resp.json()
 
         if "result" not in data or "list" not in data["result"]:
@@ -236,18 +238,28 @@ def get_free_qty(symbol: str) -> float:
 
         coin_list = data["result"]["list"][0].get("coin", [])
         for c in coin_list:
-            if c["coin"] == coin:
-                raw = c.get("walletBalance", "0")
+            if c.get("coin") == coin:
+                raw_wallet = c.get("walletBalance", "0")
+                raw_avail = c.get("availableBalance", raw_wallet)
                 try:
-                    qty = float(raw) if raw else 0.0
-                    if qty > 0:
-                        log(f"📦 Saldo trovato per {coin}: {qty}")
+                    wallet = float(raw_wallet) if raw_wallet else 0.0
+                    avail = float(raw_avail) if raw_avail else wallet
+                except Exception as e:
+                    log(f"⚠️ Errore conversione saldo {coin}: {e}")
+                    return 0.0
+
+                if coin == "USDT":
+                    if avail < wallet:
+                        log(f"📦 USDT wallet={wallet:.4f} available={avail:.4f}")
+                    else:
+                        log(f"📦 USDT available={avail:.4f}")
+                    return avail
+                else:
+                    if wallet > 0:
+                        log(f"📦 Saldo trovato per {coin}: {wallet}")
                     else:
                         log(f"🟡 Nessun saldo disponibile per {coin}")
-                    return qty
-                except Exception as e:
-                    log(f"⚠️ Errore conversione quantità {coin}: {e}")
-                    return 0.0
+                    return wallet
 
         log(f"🔍 Coin {coin} non trovata nel saldo.")
         return 0.0
@@ -350,12 +362,18 @@ def _format_price(price: float, tick: float) -> str:
     return f"{price:.{decs}f}"
 
 LAST_ORDER_RETCODE = None
-def execute_buy_order(symbol: str, qty_dec: Decimal, prefer_limit: bool, slippage: float = 0.0015, max_retries: int = 3) -> bool:
+
+def execute_buy_order(symbol: str, qty_dec: Decimal, prefer_limit: bool,
+                      slippage: float = 0.0015, max_retries: int = 3) -> bool:
     """
-    Esegue ordine con:
-      - allineamento qty a qty_step
-      - se prefer_limit: LIMIT IOC con prezzo = last_price*(1+slippage) allineato al tick
-      - retry su retCode 170140 (notional basso) e 170134 (decimali) aumentando qty o riallineando prezzo
+    Esegue ordine BUY robusto:
+      - Allinea qty a qty_step
+      - LIMIT IOC per large cap / prezzo ≥100
+      - Pre-check saldo per MARKET (include buffer)
+      - Retry su:
+          170140 (notional basso) → aumenta qty
+          170134 (decimali prezzo) → riduce qty (LIMIT)
+          170131 (insufficient balance) → riduce qty (−10%)
     """
     global LAST_ORDER_RETCODE
     info = get_instrument_info(symbol)
@@ -365,7 +383,6 @@ def execute_buy_order(symbol: str, qty_dec: Decimal, prefer_limit: bool, slippag
     max_order_qty = info.get("max_order_qty")
     step_dec = Decimal(str(qty_step))
 
-    # Allinea qty iniziale
     qty_aligned = (qty_dec // step_dec) * step_dec
     if qty_aligned <= 0:
         log(f"❌ execute_buy_order qty iniziale non valida {symbol}")
@@ -386,18 +403,31 @@ def execute_buy_order(symbol: str, qty_dec: Decimal, prefer_limit: bool, slippag
             limit_price = last_price
             price_str = None  # MARKET
 
-        # Cap qty se oltre max
         if max_order_qty and float(qty_aligned) > max_order_qty:
             qty_aligned = (Decimal(str(max_order_qty)) // step_dec) * step_dec
 
         notional = float(qty_aligned) * limit_price
         if notional < min_order_amt:
-            # Aumenta a minimo
             needed = Decimal(str(min_order_amt / limit_price))
             needed = (needed // step_dec) * step_dec
             if needed > qty_aligned:
                 qty_aligned = needed
                 notional = float(qty_aligned) * limit_price
+
+        # Pre-check saldo solo per MARKET (usa available reale + buffer costo)
+        if not prefer_limit:
+            avail_usdt = get_usdt_balance()
+            est_cost = float(qty_aligned) * limit_price * (1 + MARKET_COST_BUFFER_PCT)
+            # Limita a SAFETY_AVAILABLE_PCT
+            hard_cap = avail_usdt * SAFETY_AVAILABLE_PCT
+            if est_cost > hard_cap:
+                reduce_factor = hard_cap / est_cost if est_cost > 0 else 0
+                new_qty = (qty_aligned * Decimal(str(reduce_factor))) // step_dec * step_dec
+                if new_qty <= 0:
+                    log(f"❌ Pre-check saldo: impossibile ridurre qty {symbol}")
+                    return False
+                log(f"[PRE-CHECK][{symbol}] Riduzione qty {qty_aligned}→{new_qty} (est_cost {est_cost:.4f} > cap {hard_cap:.4f})")
+                qty_aligned = new_qty
 
         # Format final
         _, qty_str = _format_qty(qty_aligned, qty_step)
@@ -436,25 +466,32 @@ def execute_buy_order(symbol: str, qty_dec: Decimal, prefer_limit: bool, slippag
         if resp.status_code == 200 and rj.get("retCode") == 0:
             return True
 
-        # Gestione retry
         rc = rj.get("retCode")
         if attempt == max_retries:
             break
-        if rc == 170140:  # lower limit / notional
-            # aumenta qty (35% sopra) mantenendo step
+
+        if rc == 170140:  # notional basso → aumenta
             bump = qty_aligned * Decimal("1.35")
             qty_aligned = (bump // step_dec) * step_dec
             log(f"[RETRY][{symbol}] bump qty per notional basso → {qty_aligned}")
             continue
-        if rc == 170134:  # decimals
-            if prefer_limit:
-                # riallinea prezzo di nuovo (già fatto) e riduci qty di uno step
-                qty_aligned = ((qty_aligned - step_dec) // step_dec) * step_dec
-                if qty_aligned <= 0:
-                    break
-                log(f"[RETRY][{symbol}] decimali: riduco qty → {qty_aligned}")
-                continue
-        # altri retCode: stop
+
+        if rc == 170134 and prefer_limit:  # decimali prezzo → riduci qty
+            qty_aligned = ((qty_aligned - step_dec) // step_dec) * step_dec
+            if qty_aligned <= 0:
+                break
+            log(f"[RETRY][{symbol}] decimali prezzo: qty→{qty_aligned}")
+            continue
+
+        if rc == 170131:  # Insufficient balance → riduci qty (−10%)
+            reduced = (qty_aligned * Decimal("0.90")) // step_dec * step_dec
+            if reduced <= 0 or reduced == qty_aligned:
+                log(f"[RETRY][{symbol}] balance insufficiente: impossibile ridurre oltre ({qty_aligned})")
+                break
+            qty_aligned = reduced
+            log(f"[RETRY][{symbol}] insufficiente balance: qty→{qty_aligned}")
+            continue
+
         break
     return False
 
@@ -1044,6 +1081,16 @@ while True:
                 qty_adj = Decimal(str(min_qty))
 
             order_amount = float(qty_adj) * live_price
+
+            # Limite sicurezza: non usare oltre SAFETY_AVAILABLE_PCT del balance disponibile
+            avail_cap = get_usdt_balance() * SAFETY_AVAILABLE_PCT
+            if order_amount > avail_cap:
+                safe_qty = Decimal(str(avail_cap / live_price))
+                safe_qty = (safe_qty // step_dec) * step_dec
+                if safe_qty > 0 and safe_qty < qty_adj:
+                    log(f"[SAFETY-SIZE][{symbol}] Ridimensiono notional {order_amount:.2f}→{float(safe_qty)*live_price:.2f}")
+                    qty_adj = safe_qty
+                    order_amount = float(qty_adj) * live_price
 
             # Notional minimo reale (considera min_qty*price)
             min_notional_required = max(min_order_amt, min_qty * live_price)
