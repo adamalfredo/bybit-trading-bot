@@ -35,6 +35,23 @@ REVERSAL_MIN_RATIO = 0.940
 ENABLE_COUNTER_TREND = True
 ENABLE_REVERSAL_BB = True
 
+COUNTER_SLOPE_EPS = 0.0005          # tolleranza slope ema20 (già usata prima se la vorrai integrare)
+TRAILING_ACTIVATION_R = 1.5         # (modificato: prima 2.0)
+TRAILING_LOCK_R = 0.8               # (modificato: prima 1.0)
+
+# Pullback + Giveback nuova logica
+ENABLE_PULLBACK_EMA20 = True
+PULLBACK_MAX_RATIO = 0.985          # entro area “sana” (sotto il primary)
+PULLBACK_MIN_RATIO = COUNTER_TREND_MIN_RATIO
+PULLBACK_ATR_PENETRATION = 0.20     # quanto sotto ema20 (Close precedente) consideriamo valido (in ATR)
+PULLBACK_LOW_PENETRATION = 0.30     # alternativa via Low precedente
+PULLBACK_MIN_RSI = 45               # conferma momentum base
+
+# Giveback exit
+ENABLE_GIVEBACK_EXIT = True
+GIVEBACK_MIN_MFE_R = 1.2            # attivo solo se ha toccato almeno 1.2R
+GIVEBACK_DROP_R = 0.6               # restituisce ≥0.6R dal massimo ⇒ exit
+
 STALE_DATA_MAX_HOURS = 2
 INVERSION_HEURISTIC_MINUTES = 120  # 2 ore (coerente con staleness)
 
@@ -61,8 +78,8 @@ TRAIL_LOCK_FACTOR = 1.2
 RISK_PCT = 0.01
 MIN_HOLDING_MINUTES = 5           # tempo minimo prima di accettare exit/trailing
 TRAILING_ENABLED = True           # per disattivare tutta la logica trailing
-TRAILING_ACTIVATION_R = 2.0       # attiva trailing solo dopo 2R
-TRAILING_LOCK_R = 1.0             # quando attiva, blocca almeno +1R
+TRAILING_ACTIVATION_R = 1.5       # (mod) attiva trailing prima (prima 2.0)
+TRAILING_LOCK_R = 0.8             # (mod) lock profit minore per flessibilità (prima 1.0)
 MIN_SL_PCT = 0.010                # SL minimo = 1% del prezzo (se ATR troppo piccolo)
 MAX_NEW_POSITIONS_PER_CYCLE = 2   # massimo ingressi per ciclo di scansione
 USE_DYNAMIC_ASSET_LIST = False      # Fase 2: se True sostituirà ASSETS dinamicamente
@@ -602,6 +619,24 @@ def analyze_asset(symbol: str):
             elif last["rsi"] > 50 and last["ema20"] > last["ema50"]:
                 return "entry", "Trend EMA + RSI", price
 
+        # Pullback EMA20 (rientro controllato)
+        if ENABLE_PULLBACK_EMA20:
+            # Condizioni di contesto: ratio dentro range, non già primary forte
+            if (PULLBACK_MIN_RATIO <= ema_ratio <= PULLBACK_MAX_RATIO
+                and ema20v > ema50v
+                and last["ema50"] >= last["ema200"] * 0.94  # evita crolli profondi
+            ):
+                atr_prev = float(prev["atr"])
+                ema20_prev = float(prev["ema20"])
+                prev_close = float(prev["Close"])
+                prev_low = float(prev["Low"])
+                penetrated_close = prev_close <= ema20_prev - PULLBACK_ATR_PENETRATION * atr_prev
+                penetrated_low = prev_low <= ema20_prev - PULLBACK_LOW_PENETRATION * atr_prev
+                regained = price > ema20v
+                momentum_ok = (last["macd"] > last["macd_signal"]) or (last["rsi"] >= PULLBACK_MIN_RSI)
+                if (regained and momentum_ok and (penetrated_close or penetrated_low)):
+                    return "entry", "Pullback EMA20", price
+
         # Reversal BB (mean reversion controllata)
         if ENABLE_REVERSAL_BB and ema_ratio >= REVERSAL_MIN_RATIO:
             if last["Close"] <= last["bb_lower"] * 1.01 and last["rsi"] < 35 and last["adx"] < 22:
@@ -720,6 +755,8 @@ position_data = {}
 last_exit_time = {}
 
 ANALYSIS_CACHE = {}  # cache per riuso ATR e close calcolati in analyze_asset
+LAST_BAR_SLOT = None         # id dell’ultima candela analizzata
+SCAN_THIS_CYCLE = True       # flag se eseguiamo analisi completa
 
 def _compute_atr_and_risk(symbol: str, price: float):
     df_hist = fetch_history(symbol)
@@ -867,8 +904,19 @@ sync_positions_from_wallet()
 
 while True:
     retrofit_missing_risk()
+    # Determina slot candela corrente (inizio minuto relativo al frame 15m)
+    global LAST_BAR_SLOT, SCAN_THIS_CYCLE
+    slot = int(time.time() // (INTERVAL_MINUTES * 60))
+    if LAST_BAR_SLOT is None or slot > LAST_BAR_SLOT:
+        SCAN_THIS_CYCLE = True
+        LAST_BAR_SLOT = slot
+        log(f"[BAR-NEW] Nuova candela 15m slot={slot}")
+    else:
+        SCAN_THIS_CYCLE = False
+
     _support_cache = {}
-    new_positions_this_cycle = 0  # reset contatore ingressi per ciclo
+    new_positions_this_cycle = 0
+
     for symbol in ASSETS:
         # Skip simboli non supportati (testnet issue)
         if symbol not in _support_cache:
@@ -879,7 +927,10 @@ while True:
 
         if new_positions_this_cycle >= MAX_NEW_POSITIONS_PER_CYCLE:
             break
-        signal, strategy, price = analyze_asset(symbol)
+        if SCAN_THIS_CYCLE:
+            signal, strategy, price = analyze_asset(symbol)
+        else:
+            signal, strategy, price = (None, None, None)
         log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
 
         # ❌ Filtra segnali nulli
@@ -947,6 +998,7 @@ while True:
                 "Incrocio EMA 20/50": 0.7,
                 "MACD bullish (stabile)": 0.65,
                 "Reversal BB + RSI": 0.55,
+                "Pullback EMA20": 0.7,
                 "Trend EMA + RSI": 0.6
             }
             strength = strategy_strength.get(strategy, 0.5)
@@ -1169,6 +1221,29 @@ while True:
             entry["mfe"] = r_current
         if r_current < entry["mae"]:
             entry["mae"] = r_current
+
+        # Giveback exit: se forte ritracciamento dal massimo favorevole
+        if ENABLE_GIVEBACK_EXIT:
+            if entry["mfe"] >= GIVEBACK_MIN_MFE_R:
+                giveback = entry["mfe"] - r_current
+                if giveback >= GIVEBACK_DROP_R and r_current > 0:
+                    qty = get_free_qty(symbol)
+                    if qty > 0:
+                        resp = market_sell(symbol, qty)
+                        if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+                            fill_price = get_last_price(symbol) or current_price
+                            pnl_val = (fill_price - entry_price) * qty
+                            pnl_pct = (pnl_val / entry["entry_cost"]) * 100
+                            r_mult = (fill_price - entry_price) / risk
+                            log(f"↩️ Giveback Exit {symbol} @ {fill_price:.6f} | Drop {giveback:.2f}R | R={r_mult:.2f} | MFE={entry['mfe']:.2f}R")
+                            notify_telegram(f"↩️ Giveback Exit {symbol} @ {fill_price:.6f}\nDrop {giveback:.2f}R | R={r_mult:.2f}\nMFE={entry['mfe']:.2f}R")
+                            log_trade_to_google(symbol, entry_price, fill_price, pnl_pct,
+                                                f"Giveback | MFE={entry['mfe']:.2f}R Drop={giveback:.2f}R",
+                                                "Giveback Exit")
+                            open_positions.discard(symbol)
+                            last_exit_time[symbol] = time.time()
+                            position_data.pop(symbol, None)
+                            continue
 
         # TP hard
         if current_price >= entry["tp"]:
