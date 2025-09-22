@@ -30,14 +30,14 @@ EXTENSION_ATR_MULT_BASE = 1.2
 EXTENSION_ATR_MULT_LARGE = 1.5  # large cap più permissive
 
 ASSETS = [
-    "WIFUSDT", "PEPEUSDT", "BONKUSDT", "INJUSDT", "SUIUSDT",
-    "SEIUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "TONUSDT", "DOGEUSDT", "MATICUSDT",
+    "WIFUSDT", "INJUSDT", "SUIUSDT",
+    "SEIUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "TONUSDT", "DOGEUSDT",
     "BTCUSDT", "ETHUSDT", "LTCUSDT", "XRPUSDT", "LINKUSDT", "AVAXUSDT", "SOLUSDT"
 ]
 
 VOLATILE_ASSETS = [
-    "BONKUSDT", "PEPEUSDT", "WIFUSDT", "INJUSDT", "SUIUSDT",
-    "SEIUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "TONUSDT", "DOGEUSDT", "MATICUSDT"
+    "WIFUSDT", "INJUSDT", "SUIUSDT",
+    "SEIUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "TONUSDT", "DOGEUSDT"
 ]
 
 INTERVAL_MINUTES = 15
@@ -46,7 +46,6 @@ SL_ATR_MULT = 1.0
 TP_R_MULT   = 2.5
 ATR_MIN_PCT = 0.002
 ATR_MAX_PCT = 0.030
-EXTENSION_ATR_MULT = 1.2
 MAX_OPEN_POSITIONS = 5
 COOLDOWN_MINUTES = 60
 TRAIL_LOCK_FACTOR = 1.2
@@ -59,6 +58,8 @@ MIN_SL_PCT = 0.010                # SL minimo = 1% del prezzo (se ATR troppo pic
 MAX_NEW_POSITIONS_PER_CYCLE = 2   # massimo ingressi per ciclo di scansione
 USE_DYNAMIC_ASSET_LIST = False      # Fase 2: se True sostituirà ASSETS dinamicamente
 USE_SAFE_ORDER_BUY   = False        # Fase 3: se True userà safe_market_buy() al posto di market_buy_qty()
+ENFORCE_DIVERGENCE_CHECK = False
+DIVERGENCE_MAX_PCT = 0.05   # 5% sul testnet
 EXCLUDE_LOW_PRICE    = True         # Se True (fase 1) solo DRY-RUN (non modifica ASSETS)
 PRICE_MIN_ACTIVE     = 0.01         # Soglia prezzo per esclusione preventiva (dry-run ora)
 DYNAMIC_ASSET_MIN_VOLUME = 500000   # Filtro volume quote (USDT)
@@ -110,7 +111,18 @@ def get_last_price(symbol: str) -> Optional[float]:
         log(f"❌ Errore in get_last_price({symbol}): {e}")
         return None
     
+# --- CACHE INFO STRUMENTI (nuovo) ---
+_instrument_cache = {}
+
 def get_instrument_info(symbol: str) -> dict:
+    """
+    Restituisce info strumento con cache 5 minuti per ridurre chiamate ripetute.
+    """
+    now = time.time()
+    cached = _instrument_cache.get(symbol)
+    if cached and (now - cached["ts"] < 300):  # 300s = 5 minuti
+        return cached["data"]
+
     url = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
     params = {"category": "spot", "symbol": symbol}
     try:
@@ -124,7 +136,7 @@ def get_instrument_info(symbol: str) -> dict:
             return {}
         info = lst[0]
         lot = info.get("lotSizeFilter", {})
-        return {
+        parsed = {
             "min_qty": float(lot.get("minOrderQty", 0) or 0),
             "qty_step": float(lot.get("qtyStep", 0.0001) or 0.0001),
             "precision": int(info.get("priceScale", 4) or 4),
@@ -132,6 +144,8 @@ def get_instrument_info(symbol: str) -> dict:
             "max_order_qty": float(lot.get("maxOrderQty")) if lot.get("maxOrderQty") else None,
             "max_order_amt": float(lot.get("maxOrderAmt")) if lot.get("maxOrderAmt") else None
         }
+        _instrument_cache[symbol] = {"data": parsed, "ts": now}
+        return parsed
     except Exception as e:
         log(f"❌ Errore get_instrument_info {symbol}: {e}")
         return {}
@@ -440,6 +454,13 @@ def fetch_history(symbol: str):
         ])
         df["timestamp"] = pd.to_datetime(df["timestamp"].astype(int), unit="ms")
         df.set_index("timestamp", inplace=True)
+        df.sort_index(inplace=True)  # assicura ordine cronologico crescente
+        # Controllo staleness (candela finale troppo vecchia)
+        latest_ts = df.index[-1]
+        age_sec = time.time() - latest_ts.timestamp()
+        if age_sec > INTERVAL_MINUTES * 60 * 8:  # > ~2 ore (15m * 8 = 120m)
+            log(f"[STALE][{symbol}] Ultima candela {latest_ts} vecchia {age_sec/3600:.2f}h → dati inattendibili")
+        
         for col in ["Open", "High", "Low", "Close", "Volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         return df
@@ -447,18 +468,12 @@ def fetch_history(symbol: str):
         log(f"[!] Errore richiesta Kline per {symbol}: {e}")
         return None
 
-def find_close_column(df: pd.DataFrame):
-    for name in df.columns:
-        if "close" in name.lower():
-            return df[name]
-    return None
-
 def analyze_asset(symbol: str):
     try:
         df = fetch_history(symbol)
         if df is None:
             return None, None, None
-        close = find_close_column(df)
+        close = df["Close"]
         if close is None:
             return None, None, None
 
@@ -495,10 +510,22 @@ def analyze_asset(symbol: str):
         is_volatile = symbol in VOLATILE_ASSETS
         adx_threshold = 20 if is_volatile else 15
 
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
+        if (time.time() - df.index[-1].timestamp()) > INTERVAL_MINUTES * 120 and (time.time() - df.index[0].timestamp()) < INTERVAL_MINUTES * 120:
+            # dataset probabilmente inverso: uso la prima come “last”
+            last = df.iloc[0]
+            prev = df.iloc[1]
+        else:
+            last = df.iloc[-1]
+            prev = df.iloc[-2]
+        log(f"[BAR][{symbol}] last_ts={df.index[-1]} age={(time.time()-df.index[-1].timestamp()):.1f}s")
         price = float(last["Close"])
         atr_val = float(last["atr"])
+        # Salva cache per riuso nel sizing (evita seconda fetch)
+        ANALYSIS_CACHE[symbol] = {
+            "atr_val": atr_val,
+            "close": price,
+            "ts": df.index[-1].timestamp()
+        }
         atr_pct = atr_val / price if price else 0
         # log(f"[ANALYZE] {symbol} ATR={atr_val:.5f} ({atr_pct:.2%})")
 
@@ -518,8 +545,9 @@ def analyze_asset(symbol: str):
             log(f"[FILTER][{symbol}] Trend KO: ratio={ema_ratio:.4f} (<{TREND_MIN_RATIO:.3f}) e no transizione (ema20<=ema50 o ratio<{SECONDARY_RATIO:.3f})")
             return None, None, None
 
-        if not (ATR_MIN_PCT <= atr_pct <= ATR_MAX_PCT):
-            log(f"[FILTER][{symbol}] ATR% {atr_pct:.4%} fuori range ({ATR_MIN_PCT:.2%}-{ATR_MAX_PCT:.2%})")
+        EPS = 0.00005  # tolleranza
+        if not (ATR_MIN_PCT - EPS <= atr_pct <= ATR_MAX_PCT + EPS):
+            log(f"[FILTER][{symbol}] ATR% {atr_pct:.4%} fuori range tol ({ATR_MIN_PCT:.2%}-{ATR_MAX_PCT:.2%})")
             return None, None, None
 
         ext_mult = EXTENSION_ATR_MULT_LARGE if symbol in LARGE_ASSETS else EXTENSION_ATR_MULT_BASE
@@ -657,6 +685,8 @@ open_positions = set()
 position_data = {}
 last_exit_time = {}
 
+ANALYSIS_CACHE = {}  # cache per riuso ATR e close calcolati in analyze_asset
+
 def _compute_atr_and_risk(symbol: str, price: float):
     df_hist = fetch_history(symbol)
     if df_hist is None or "Close" not in df_hist.columns:
@@ -750,8 +780,6 @@ def retrofit_missing_risk():
 
 def get_usdt_balance() -> float:
     return get_free_qty("USDT")
-
-# (RIMOSSO calculate_stop_loss: non più usato con nuovo modello R basato su ATR)
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -894,15 +922,17 @@ while True:
 
             # === POSITION SIZING A RISCHIO FISSO ===
             # 1. Calcola ATR per determinare risk_per_unit (SL distance)
-            df_sizing = fetch_history(symbol)
-            if df_sizing is None or "Close" not in df_sizing.columns:
-                log(f"❌ Dati storici mancanti per sizing {symbol}")
+            cache = ANALYSIS_CACHE.get(symbol)
+            if not cache:
+                log(f"❌ Cache analisi mancante per {symbol} (no ATR), salto")
                 continue
-            atr_ind_sz = AverageTrueRange(
-                high=df_sizing["High"], low=df_sizing["Low"],
-                close=df_sizing["Close"], window=ATR_WINDOW
-            ).average_true_range()
-            atr_val = float(atr_ind_sz.iloc[-1])
+            atr_val = cache["atr_val"]
+            if atr_val <= 0:
+                log(f"❌ ATR cache ≤0 per {symbol}")
+                continue
+            if time.time() - cache["ts"] > 120:
+                log(f"[STALE-CACHE][{symbol}] Dati analisi vecchi >120s, salto")
+                continue
             if atr_val <= 0:
                 log(f"❌ ATR nullo per {symbol}")
                 continue
@@ -910,9 +940,9 @@ while True:
             # Prezzo corrente (rileggi per ridurre drift)
             live_price = get_last_price(symbol)
             # Controllo divergenza tra prezzo candela (price) e ticker live
-            if live_price:
+            if live_price and ENFORCE_DIVERGENCE_CHECK:
                 divergence = abs(live_price - price) / price if price else 0
-                if divergence > 0.02:  # >2% differenza
+                if divergence > DIVERGENCE_MAX_PCT:
                     log(f"[DIVERGENZA][{symbol}] Close={price:.6f} Ticker={live_price:.6f} Δ={divergence:.2%} → salto ingresso")
                     continue
             if not live_price:
@@ -937,7 +967,6 @@ while True:
             min_qty = info.get("min_qty", 0.0)
             min_order_amt = info.get("min_order_amt", 5)
 
-            from decimal import Decimal
             step_dec = Decimal(str(qty_step))
             qty_dec = Decimal(str(qty_risk))
             qty_adj = (qty_dec // step_dec) * step_dec
