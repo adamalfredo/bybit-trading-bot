@@ -60,6 +60,17 @@ EARLY_EXIT_REQUIRE_EMA20 = True # richiedi che il prezzo sia < ema20 (altrimenti
 STALE_DATA_MAX_HOURS = 2
 INVERSION_HEURISTIC_MINUTES = 120  # 2 ore (coerente con staleness)
 
+STRATEGY_STRENGTH = {
+    "Breakout Bollinger": 1.0,
+    "MACD bullish + ADX": 0.9,
+    "Incrocio SMA 20/50": 0.75,
+    "Incrocio EMA 20/50": 0.7,
+    "MACD bullish (stabile)": 0.65,
+    "Reversal BB + RSI": 0.55,
+    "Pullback EMA20": 0.7,
+    "Trend EMA + RSI": 0.6
+}
+
 ASSETS = [
     "WIFUSDT", "INJUSDT", "SUIUSDT",
     "SEIUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "TONUSDT", "DOGEUSDT",
@@ -83,12 +94,9 @@ TRAIL_LOCK_FACTOR = 1.2
 RISK_PCT = 0.01
 MIN_HOLDING_MINUTES = 5           # tempo minimo prima di accettare exit/trailing
 TRAILING_ENABLED = True           # per disattivare tutta la logica trailing
-TRAILING_ACTIVATION_R = 1.5       # (mod) attiva trailing prima (prima 2.0)
-TRAILING_LOCK_R = 0.8             # (mod) lock profit minore per flessibilità (prima 1.0)
 MIN_SL_PCT = 0.010                # SL minimo = 1% del prezzo (se ATR troppo piccolo)
 MAX_NEW_POSITIONS_PER_CYCLE = 2   # massimo ingressi per ciclo di scansione
 USE_DYNAMIC_ASSET_LIST = False      # Fase 2: se True sostituirà ASSETS dinamicamente
-USE_SAFE_ORDER_BUY   = False        # Fase 3: se True userà safe_market_buy() al posto di market_buy_qty()
 USE_SAFE_ORDER_BUY   = False        # Fase 3: se True userà safe_market_buy() al posto di market_buy_qty()
 LARGE_CAP_MIN_NOTIONAL_MULT = 1.10  # quanto sopra il notional minimo per tentativo large cap
 LARGE_CAP_LIMIT_SLIPPAGE    = 0.0015  # 0.15% sopra last price per LIMIT IOC (fill immediato)
@@ -170,10 +178,17 @@ def get_instrument_info(symbol: str) -> dict:
             return {}
         info = lst[0]
         lot = info.get("lotSizeFilter", {})
+        price_filter = info.get("priceFilter", {})
+        tick_size_raw = price_filter.get("tickSize", "0.01") or "0.01"
+        try:
+            tick_size = float(tick_size_raw)
+        except:
+            tick_size = 0.01
         parsed = {
             "min_qty": float(lot.get("minOrderQty", 0) or 0),
             "qty_step": float(lot.get("qtyStep", 0.0001) or 0.0001),
             "precision": int(info.get("priceScale", 4) or 4),
+            "tick_size": tick_size,
             "min_order_amt": float(info.get("minOrderAmt", 5) or 5),
             "max_order_qty": float(lot.get("maxOrderQty")) if lot.get("maxOrderQty") else None,
             "max_order_amt": float(lot.get("maxOrderAmt")) if lot.get("maxOrderAmt") else None
@@ -312,193 +327,92 @@ def market_sell(symbol: str, qty: float):
         log(f"❌ Errore invio ordine SELL: {e}")
         return None
 
-def _qty_step_decimals(qty_step: float) -> int:
-    step_str = f"{qty_step:.10f}".rstrip('0')
-    if '.' in step_str:
-        return len(step_str.split('.')[1])
-    return 0
+def _align_price_tick(price: float, tick: float, up: bool = False) -> float:
+    if tick <= 0:
+        return price
+    import math
+    if up:
+        return math.ceil(price / tick) * tick
+    return math.floor(price / tick) * tick
 
-def market_buy_qty(symbol: str, qty: Decimal):
+def _format_qty(qty: Decimal, step: float) -> (Decimal, str):
+    step_dec = Decimal(str(step))
+    floored = (qty // step_dec) * step_dec
+    step_str = f"{step:.10f}".rstrip('0')
+    decs = len(step_str.split('.')[1]) if '.' in step_str else 0
+    s = f"{floored:.{decs}f}".rstrip('0').rstrip('.')
+    if s == '':
+        s = '0'
+    return floored, s
+
+def _format_price(price: float, tick: float) -> str:
+    tick_str = f"{tick:.10f}".rstrip('0')
+    decs = len(tick_str.split('.')[1]) if '.' in tick_str else 0
+    return f"{price:.{decs}f}"
+
+LAST_ORDER_RETCODE = None
+def execute_buy_order(symbol: str, qty_dec: Decimal, prefer_limit: bool, slippage: float = 0.0015, max_retries: int = 3) -> bool:
     """
-    Invia un ordine MARKET BUY usando direttamente la qty (Decimal) già calcolata
-    e allineata allo step. Non riconverte da notional.
-    Ritorna True/False.
+    Esegue ordine con:
+      - allineamento qty a qty_step
+      - se prefer_limit: LIMIT IOC con prezzo = last_price*(1+slippage) allineato al tick
+      - retry su retCode 170140 (notional basso) e 170134 (decimali) aumentando qty o riallineando prezzo
     """
+    global LAST_ORDER_RETCODE
     info = get_instrument_info(symbol)
     qty_step = info.get("qty_step", 0.0001)
     min_order_amt = info.get("min_order_amt", 5)
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}, abort buy")
-        return False
-
-    # Allineamento sicurezza
-    step = Decimal(str(qty_step))
-    qty_aligned = (qty // step) * step
-    if qty_aligned <= 0:
-        log(f"❌ Qty non valida per {symbol} ({qty_aligned})")
-        return False
-
-    notional = float(qty_aligned) * price
-    if notional < min_order_amt:
-        log(f"❌ Notional {notional:.2f} < min {min_order_amt} su {symbol}")
-        return False
-
-    decs = _qty_step_decimals(qty_step)
-    qty_str = f"{qty_aligned:.{decs}f}".rstrip('0').rstrip('.')
-    if qty_str == '':
-        qty_str = '0'
-
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Buy",
-        "orderType": "Market",
-        "qty": qty_str
-    }
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
-    resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-    try:
-        rj = resp.json()
-    except:
-        rj = {}
-    log(f"BUY_QTY BODY: {body_json}")
-    log(f"BUY_QTY RESP: {resp.status_code} {rj}")
-    if resp.status_code == 200 and rj.get("retCode") == 0:
-        return True
-    return False
-
-def limit_buy_qty(symbol: str, qty: Decimal, price: float) -> bool:
-    """
-    LIMIT BUY (IOC) per large cap: prezzo = last_price * (1 + SMALL SLIPPAGE) per garantire fill taker.
-    """
-    info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.0001)
-    min_order_amt = info.get("min_order_amt", 5)
-    precision = info.get("precision", 4)
-
-    last_price = get_last_price(symbol)
-    if not last_price:
-        log(f"❌ limit_buy_qty: prezzo mancante {symbol}")
-        return False
-
-    # Usa il prezzo passato (già maggiorato) ma verifica non troppo distante
-    limit_price = price
-    # Arrotonda prezzo
-    price_str = f"{limit_price:.{precision}f}"
-
-    # Allinea qty
-    step = Decimal(str(qty_step))
-    qty_aligned = (qty // step) * step
-    if qty_aligned <= 0:
-        log(f"❌ limit_buy_qty qty non valida {symbol}")
-        return False
-
-    notional = float(qty_aligned) * limit_price
-    if notional < min_order_amt:
-        log(f"❌ limit_buy_qty notional {notional:.2f} < min {min_order_amt} {symbol}")
-        return False
-
-    decs = _qty_step_decimals(qty_step)
-    qty_str = f"{qty_aligned:.{decs}f}".rstrip('0').rstrip('.')
-    if qty_str == '':
-        qty_str = '0'
-
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Buy",
-        "orderType": "Limit",
-        "timeInForce": "IOC",
-        "price": price_str,
-        "qty": qty_str
-    }
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
-    resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-    try:
-        rj = resp.json()
-    except:
-        rj = {}
-    log(f"BUY_LIMIT BODY: {body_json}")
-    log(f"BUY_LIMIT RESP: {resp.status_code} {rj}")
-    return resp.status_code == 200 and rj.get("retCode") == 0
-
-def _round_qty_down(qty_dec: Decimal, step_dec: Decimal) -> Decimal:
-    return (qty_dec // step_dec) * step_dec
-
-def safe_market_buy(symbol: str, qty: Decimal, max_retries: int = 2) -> bool:
-    """
-    Wrapper robusto (non ancora attivo finché USE_SAFE_ORDER_BUY=False).
-    Gestisce:
-      - allineamento step
-      - limiti min/max qty / notional
-      - riduzione progressiva in caso di retCode limite
-    """
-    info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.0001)
-    min_order_amt = info.get("min_order_amt", 5)
+    tick = info.get("tick_size", 0.01)
     max_order_qty = info.get("max_order_qty")
-    max_order_amt = info.get("max_order_amt")
-
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ safe_market_buy: prezzo mancante {symbol}")
-        return False
-
     step_dec = Decimal(str(qty_step))
-    attempt_qty = _round_qty_down(qty, step_dec)
-    if attempt_qty <= 0:
-        log(f"❌ safe_market_buy: qty iniziale non valida {symbol}")
+
+    # Allinea qty iniziale
+    qty_aligned = (qty_dec // step_dec) * step_dec
+    if qty_aligned <= 0:
+        log(f"❌ execute_buy_order qty iniziale non valida {symbol}")
         return False
 
     for attempt in range(1, max_retries + 1):
-        notional = float(attempt_qty) * price
-
-        if max_order_qty and float(attempt_qty) > max_order_qty:
-            attempt_qty = _round_qty_down(Decimal(str(max_order_qty)), step_dec)
-        if max_order_amt and notional > max_order_amt:
-            capped = Decimal(str((max_order_amt * 0.995) / price))
-            attempt_qty = _round_qty_down(capped, step_dec)
-            notional = float(attempt_qty) * price
-
-        if notional < min_order_amt:
-            log(f"❌ safe_market_buy: notional {notional:.2f} < min {min_order_amt} ({symbol})")
+        LAST_ORDER_RETCODE = None
+        last_price = get_last_price(symbol)
+        if not last_price:
+            log(f"❌ Nessun prezzo per {symbol}")
             return False
 
-        decs = _qty_step_decimals(qty_step)
-        qty_str = f"{attempt_qty:.{decs}f}".rstrip('0').rstrip('.')
-        if qty_str == '':
-            qty_str = '0'
+        if prefer_limit:
+            raw_limit = last_price * (1 + slippage)
+            limit_price = _align_price_tick(raw_limit, tick, up=True)
+            price_str = _format_price(limit_price, tick)
+        else:
+            limit_price = last_price
+            price_str = None  # MARKET
 
+        # Cap qty se oltre max
+        if max_order_qty and float(qty_aligned) > max_order_qty:
+            qty_aligned = (Decimal(str(max_order_qty)) // step_dec) * step_dec
+
+        notional = float(qty_aligned) * limit_price
+        if notional < min_order_amt:
+            # Aumenta a minimo
+            needed = Decimal(str(min_order_amt / limit_price))
+            needed = (needed // step_dec) * step_dec
+            if needed > qty_aligned:
+                qty_aligned = needed
+                notional = float(qty_aligned) * limit_price
+
+        # Format final
+        _, qty_str = _format_qty(qty_aligned, qty_step)
         body = {
             "category": "spot",
             "symbol": symbol,
             "side": "Buy",
-            "orderType": "Market",
+            "orderType": "Limit" if prefer_limit else "Market",
             "qty": qty_str
         }
+        if prefer_limit:
+            body["timeInForce"] = "IOC"
+            body["price"] = price_str
+
         ts = str(int(time.time() * 1000))
         body_json = json.dumps(body, separators=(",", ":"))
         payload = f"{ts}{KEY}5000{body_json}"
@@ -516,22 +430,33 @@ def safe_market_buy(symbol: str, qty: Decimal, max_retries: int = 2) -> bool:
             rj = resp.json()
         except:
             rj = {}
-        log(f"[SAFE BUY][{symbol}] attempt {attempt}/{max_retries} BODY={body_json}")
-        log(f"[SAFE BUY][{symbol}] RESP {resp.status_code} {rj}")
+        LAST_ORDER_RETCODE = rj.get("retCode")
+        log(f"[EXEC BUY][{symbol}] attempt {attempt}/{max_retries} BODY={body_json}")
+        log(f"[EXEC BUY][{symbol}] RESP {resp.status_code} {rj}")
 
         if resp.status_code == 200 and rj.get("retCode") == 0:
             return True
 
-        ret_code = rj.get("retCode")
-        # RetCode tipici limite/minimo: 170140 (lower limit), 170124 (too large)
-        if attempt < max_retries and ret_code in (170140, 170124):
-            # Riduci qty del 20%
-            attempt_qty = _round_qty_down(attempt_qty * Decimal("0.8"), step_dec)
-            if attempt_qty <= 0:
-                break
-            continue
-        else:
+        # Gestione retry
+        rc = rj.get("retCode")
+        if attempt == max_retries:
             break
+        if rc == 170140:  # lower limit / notional
+            # aumenta qty (35% sopra) mantenendo step
+            bump = qty_aligned * Decimal("1.35")
+            qty_aligned = (bump // step_dec) * step_dec
+            log(f"[RETRY][{symbol}] bump qty per notional basso → {qty_aligned}")
+            continue
+        if rc == 170134:  # decimals
+            if prefer_limit:
+                # riallinea prezzo di nuovo (già fatto) e riduci qty di uno step
+                qty_aligned = ((qty_aligned - step_dec) // step_dec) * step_dec
+                if qty_aligned <= 0:
+                    break
+                log(f"[RETRY][{symbol}] decimali: riduco qty → {qty_aligned}")
+                continue
+        # altri retCode: stop
+        break
     return False
 
 def fetch_history(symbol: str):
@@ -838,7 +763,8 @@ open_positions = set()
 position_data = {}
 last_exit_time = {}
 
-ANALYSIS_CACHE = {}  # cache per riuso ATR e close calcolati in analyze_asset
+ANALYSIS_CACHE = {}   # <— aggiunto: cache indicatori per sizing / trailing
+
 LAST_BAR_SLOT = None         # id dell’ultima candela analizzata
 SCAN_THIS_CYCLE = True       # flag se eseguiamo analisi completa
 
@@ -1014,7 +940,8 @@ while True:
             signal, strategy, price = analyze_asset(symbol)
         else:
             signal, strategy, price = (None, None, None)
-        log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
+        if SCAN_THIS_CYCLE:
+            log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
 
         # ❌ Filtra segnali nulli
         if signal is None or strategy is None or price is None:
@@ -1073,19 +1000,6 @@ while True:
                 log(f"🚫 Limite posizioni raggiunto ({MAX_OPEN_POSITIONS}), salto {symbol}")
                 continue
 
-            # 📊 Forza strategia (usata come CAP massimo, non per il calcolo del rischio)
-            strategy_strength = {
-                "Breakout Bollinger": 1.0,
-                "MACD bullish + ADX": 0.9,
-                "Incrocio SMA 20/50": 0.75,
-                "Incrocio EMA 20/50": 0.7,
-                "MACD bullish (stabile)": 0.65,
-                "Reversal BB + RSI": 0.55,
-                "Pullback EMA20": 0.7,
-                "Trend EMA + RSI": 0.6
-            }
-            strength = strategy_strength.get(strategy, 0.5)
-
             # === POSITION SIZING A RISCHIO FISSO (con gestione large cap) ===
             cache = ANALYSIS_CACHE.get(symbol)
             if not cache:
@@ -1136,17 +1050,7 @@ while True:
             min_notional_required = max(min_order_amt, min_qty * live_price)
 
             # CAP notional (strength & globale)
-            strategy_strength = {
-                "Breakout Bollinger": 1.0,
-                "MACD bullish + ADX": 0.9,
-                "Incrocio SMA 20/50": 0.75,
-                "Incrocio EMA 20/50": 0.7,
-                "MACD bullish (stabile)": 0.65,
-                "Reversal BB + RSI": 0.55,
-                "Pullback EMA20": 0.7,
-                "Trend EMA + RSI": 0.6
-            }
-            strength = strategy_strength.get(strategy, 0.5)
+            strength = STRATEGY_STRENGTH.get(strategy, 0.5)
             cap_strength = equity * strength
             cap_global = 250.0
             max_notional = min(cap_strength, cap_global, equity)
@@ -1187,45 +1091,14 @@ while True:
                 log(f"[TEST_MODE] (NO BUY) {symbol} qty={qty_adj} notional={order_amount:.2f}")
                 continue
 
+            # Scelta + esecuzione unificata (robusta)
+            prefer_limit = (symbol in LARGE_ASSETS) or (live_price >= 100)
+            log(f"[SIZE][{symbol}] qty_adj={qty_adj} order_amount={order_amount:.2f} min_req={min_notional_required:.2f} prefer_limit={prefer_limit}")
             pre_qty = get_free_qty(symbol)
-
-            # Scelta tipo ordine
-            buy_ok = False
-            if symbol in LARGE_ASSETS:
-                # LIMIT IOC (taker) a small slippage
-                limit_price = live_price * (1 + LARGE_CAP_LIMIT_SLIPPAGE)
-                buy_ok = limit_buy_qty(symbol, qty_adj, limit_price)
-                if not buy_ok and USE_SAFE_ORDER_BUY:
-                    # fallback market safe
-                    buy_ok = safe_market_buy(symbol, qty_adj)
-            else:
-                if USE_SAFE_ORDER_BUY:
-                    buy_ok = safe_market_buy(symbol, qty_adj)
-                else:
-                    buy_ok = market_buy_qty(symbol, qty_adj)
-
-            # Retry se retCode limite notional (solo large cap)
-            if not buy_ok:
-                info_retry = get_instrument_info(symbol)
-                min_order_amt_r = info_retry.get("min_order_amt", min_order_amt)
-                min_qty_r = info_retry.get("min_qty", min_qty)
-                req_retry = max(min_order_amt_r, min_qty_r * live_price) * 1.12
-                bump_qty = Decimal(str(req_retry / live_price))
-                bump_qty = (bump_qty // step_dec) * step_dec
-                if bump_qty > qty_adj and symbol in LARGE_ASSETS:
-                    log(f"[RETRY-LARGE][{symbol}] aumento qty per retry (req≈{req_retry:.2f})")
-                    if symbol in LARGE_ASSETS:
-                        limit_price = live_price * (1 + LARGE_CAP_LIMIT_SLIPPAGE)
-                        buy_ok = limit_buy_qty(symbol, bump_qty, limit_price)
-                    else:
-                        buy_ok = market_buy_qty(symbol, bump_qty)
-                    if buy_ok:
-                        qty_adj = bump_qty
-                        order_amount = float(qty_adj) * live_price
-                        risk_capital = float(qty_adj) * risk_per_unit
+            buy_ok = execute_buy_order(symbol, qty_adj, prefer_limit=prefer_limit, slippage=LARGE_CAP_LIMIT_SLIPPAGE)
 
             if not buy_ok:
-                log(f"❌ Acquisto fallito per {symbol}")
+                log(f"❌ Acquisto fallito per {symbol} (dopo retry interno)")
                 continue
 
             time.sleep(2)
@@ -1249,6 +1122,8 @@ while True:
             tp = entry_price + (risk_per_unit * TP_R_MULT)
             actual_cost = entry_price * qty_filled
             used_risk = risk_per_unit * qty_filled
+            if equity and (used_risk / equity) > (RISK_PCT * 1.25):
+                log(f"[RISK-WARN][{symbol}] UsedRisk {used_risk:.2f} supera {RISK_PCT*100:.2f}% equity (adeguamento min_notional)")
 
             position_data[symbol] = {
                 "entry_price": entry_price,
