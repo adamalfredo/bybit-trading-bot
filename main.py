@@ -1146,8 +1146,6 @@ while True:
             log(f"🟢 Acquisto {symbol} | Qty {qty_filled:.8f} | Entry {entry_price:.6f} | SL {sl:.6f} | TP {tp:.6f} | R/unit {risk_per_unit:.6f} | Notional {actual_cost:.2f} | UsedRisk {used_risk:.2f} ({risk_pct_eff:.2f}%)")
             notify_telegram(f"🟢📈 Acquisto {symbol}\nQty: {qty_filled:.6f}\nPrezzo: {entry_price:.6f}\nStrategia: {strategy}\nSL: {sl:.6f}\nTP: {tp:.6f}")
 
-            time.sleep(2)
-
         # 🔴 USCITA (EXIT)
         elif signal == "exit" and symbol in open_positions:
             entry = position_data.get(symbol, {})
@@ -1307,9 +1305,14 @@ while True:
         # Attiva trailing solo dopo condizioni:
         # - profit ≥ TRAILING_ACTIVATION_R
         # - tempo minimo rispettato
-        if (not entry["trailing_active"]
+        if (
+            not entry["trailing_active"]
             and r_current >= TRAILING_ACTIVATION_R
-            and (entry.get("synced") and SYNC_BACKFILL_HOLDING_EXEMPT or (time.time() - entry.get("entry_time", 0)) >= MIN_HOLDING_MINUTES * 60)):
+            and (
+                (entry.get("synced") and SYNC_BACKFILL_HOLDING_EXEMPT)
+                or (time.time() - entry.get("entry_time", 0)) >= MIN_HOLDING_MINUTES * 60
+            )
+        ):
             entry["trailing_active"] = True
             locked_sl = entry_price + (risk * TRAILING_LOCK_R)
             if locked_sl > entry["sl"]:
