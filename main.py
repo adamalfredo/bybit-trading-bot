@@ -549,18 +549,29 @@ def analyze_asset(symbol: str):
         ema20v = float(last["ema20"])
         ema_ratio = ema50v / ema200v if ema200v else 0.0
 
-        # --- Trend logic modulare ---
+        # --- Trend logic modulare (REVISIONE con slope) ---
         primary_trend = ema_ratio >= TREND_MIN_RATIO
         transitional_ok = (ema_ratio >= SECONDARY_RATIO) and (ema20v > ema50v)
+
+        # Calcolo slope per riconoscere una fase di recupero precoce
+        ema20_prev = float(prev["ema20"])
+        ema50_prev = float(prev["ema50"])
+        ema20_rising = ema20v > ema20_prev           # ema20 sta salendo
+        ema50_not_dumping = ema50v >= ema50_prev * 0.998  # ema50 non in forte discesa (> -0.2%)
+
         counter_trend_ok = (
             ENABLE_COUNTER_TREND
             and (ema_ratio >= COUNTER_TREND_MIN_RATIO)
-            and (ema20v > ema50v)            # segno di risalita breve
+            and ema20_rising
+            and ema50_not_dumping
             and (last["macd"] > last["macd_signal"])
-            and (last["rsi"] > 45)
+            and (last["rsi"] > 42)   # più permissivo di prima (prima >45)
         )
+
         if not (primary_trend or transitional_ok or counter_trend_ok):
-            log(f"[FILTER][{symbol}] Trend KO: ratio={ema_ratio:.4f} (need ≥{TREND_MIN_RATIO:.3f} | trans ≥{SECONDARY_RATIO:.3f} | counter ≥{COUNTER_TREND_MIN_RATIO:.3f})")
+            log(f"[FILTER][{symbol}] Trend KO: ratio={ema_ratio:.4f} "
+                f"(need ≥{TREND_MIN_RATIO:.3f} | trans ≥{SECONDARY_RATIO:.3f} | counter ≥{COUNTER_TREND_MIN_RATIO:.3f} "
+                f"| slope20={ema20_rising} macd>sig={last['macd'] > last['macd_signal']})")
             return None, None, None
 
         EPS = 0.00005  # tolleranza
