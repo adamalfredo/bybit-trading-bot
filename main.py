@@ -23,7 +23,8 @@ BYBIT_BASE_URL = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
 MIN_BALANCE_USDT = 20.0  # prima 50.0
-
+ALLOW_SUB_MIN_BALANCE_ENTRY = True    # consente ingresso se saldo < MIN_BALANCE_USDT ma >= min_order_amt
+SYNC_BACKFILL_HOLDING_EXEMPT = True   # posizioni sincronizzate esentate da holding minimo per exit/trailing
 LARGE_ASSETS = {"BTCUSDT", "ETHUSDT", "SOLUSDT"}  # gruppo large cap
 EXTENSION_ATR_MULT_BASE = 1.2
 EXTENSION_ATR_MULT_LARGE = 1.5  # large cap più permissive
@@ -656,10 +657,32 @@ open_positions = set()
 position_data = {}
 last_exit_time = {}
 
+def _compute_atr_and_risk(symbol: str, price: float):
+    df_hist = fetch_history(symbol)
+    if df_hist is None or "Close" not in df_hist.columns:
+        return None
+    try:
+        atr_series = AverageTrueRange(
+            high=df_hist["High"], low=df_hist["Low"], close=df_hist["Close"], window=ATR_WINDOW
+        ).average_true_range()
+        atr_val = float(atr_series.iloc[-1])
+        if atr_val <= 0:
+            return None
+    except Exception:
+        return None
+    risk_per_unit = max(atr_val * SL_ATR_MULT, price * MIN_SL_PCT)
+    sl = price - risk_per_unit
+    tp = price + risk_per_unit * TP_R_MULT
+    return {
+        "risk_per_unit": risk_per_unit,
+        "sl": sl,
+        "initial_sl": sl,
+        "tp": tp
+    }
+
 def sync_positions_from_wallet():
     """
-    Registra come posizioni aperte tutti i saldi spot >0 presenti nel wallet
-    all'avvio (solo una volta). Evita acquisti duplicati su coin già detenute.
+    Sincronizza saldi già presenti e assegna subito risk/SL/TP.
     """
     synced = []
     for sym in ASSETS:
@@ -671,12 +694,22 @@ def sync_positions_from_wallet():
         price = get_last_price(sym)
         if not price:
             continue
+        pack = _compute_atr_and_risk(sym, price)
+        if not pack:
+            # fallback 1% se ATR non disponibile
+            fallback_risk = price * MIN_SL_PCT
+            pack = {
+                "risk_per_unit": fallback_risk,
+                "sl": price - fallback_risk,
+                "initial_sl": price - fallback_risk,
+                "tp": price + fallback_risk * TP_R_MULT
+            }
         position_data[sym] = {
             "entry_price": price,
-            "tp": None,
-            "sl": None,
-            "initial_sl": None,
-            "risk_per_unit": None,
+            "tp": pack["tp"],
+            "sl": pack["sl"],
+            "initial_sl": pack["initial_sl"],
+            "risk_per_unit": pack["risk_per_unit"],
             "entry_cost": qty * price,
             "qty": qty,
             "entry_time": time.time(),
@@ -684,14 +717,36 @@ def sync_positions_from_wallet():
             "p_max": price,
             "mfe": 0.0,
             "mae": 0.0,
-            "used_risk": 0.0
+            "used_risk": pack["risk_per_unit"] * qty,
+            "synced": True
         }
         open_positions.add(sym)
         synced.append(f"{sym}:{qty}")
     if synced:
-        log(f"[SYNC] Posizioni iniziali registrate: {', '.join(synced)}")
+        log(f"[SYNC] Posizioni iniziali registrate (con SL/TP): {', '.join(synced)}")
     else:
         log("[SYNC] Nessuna posizione iniziale da registrare")
+
+def retrofit_missing_risk():
+    updated = []
+    for sym, data in list(position_data.items()):
+        if not data.get("risk_per_unit"):
+            price = get_last_price(sym) or data.get("entry_price")
+            if not price:
+                continue
+            pack = _compute_atr_and_risk(sym, price)
+            if not pack:
+                continue
+            data["risk_per_unit"] = pack["risk_per_unit"]
+            data["sl"] = pack["sl"]
+            data["initial_sl"] = pack["initial_sl"]
+            data["tp"] = pack["tp"]
+            data["p_max"] = price
+            data["used_risk"] = pack["risk_per_unit"] * data.get("qty", 0)
+            data["synced"] = True
+            updated.append(sym)
+    if updated:
+        log(f"[RETROFIT] Aggiornate posizioni senza risk: {updated}")
 
 def get_usdt_balance() -> float:
     return get_free_qty("USDT")
@@ -749,6 +804,7 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
 sync_positions_from_wallet()
 
 while True:
+    retrofit_missing_risk()
     _support_cache = {}
     new_positions_this_cycle = 0  # reset contatore ingressi per ciclo
     for symbol in ASSETS:
@@ -810,8 +866,15 @@ while True:
 
             usdt_balance = get_usdt_balance()
             if usdt_balance < MIN_BALANCE_USDT:
-                log(f"💸 Saldo USDT insufficiente ({usdt_balance:.2f} < {MIN_BALANCE_USDT}) per {symbol}")
-                continue
+                if not ALLOW_SUB_MIN_BALANCE_ENTRY:
+                    log(f"💸 Saldo USDT insufficiente ({usdt_balance:.2f} < {MIN_BALANCE_USDT}) per {symbol}")
+                    continue
+                info_tmp = get_instrument_info(symbol)
+                min_amt = info_tmp.get("min_order_amt", 5)
+                if usdt_balance < min_amt:
+                    log(f"💸 Saldo insufficiente (< min_order_amt {min_amt}) per {symbol}")
+                    continue
+                log(f"[SUB-MIN BAL] Ingresso ridotto consentito {symbol} saldo={usdt_balance:.2f} min_amt={min_amt}")
 
             # Limite posizioni aperte
             if len(open_positions) >= MAX_OPEN_POSITIONS:
@@ -984,12 +1047,13 @@ while True:
             mfe = entry.get("mfe", 0.0)
             mae = entry.get("mae", 0.0)
 
-            # Tempo minimo in posizione
+            # Tempo minimo in posizione (esenta posizioni sincronizzate se flag attivo)
             holding_sec = time.time() - entry.get("entry_time", 0)
-            if holding_sec < MIN_HOLDING_MINUTES * 60:
-                remain = (MIN_HOLDING_MINUTES * 60 - holding_sec) / 60
-                log(f"[HOLD][{symbol}] Exit ignorata (holding {holding_sec/60:.1f}m < {MIN_HOLDING_MINUTES}m, restano {remain:.1f}m)")
-                continue
+            if not (entry.get("synced") and SYNC_BACKFILL_HOLDING_EXEMPT):
+                if holding_sec < MIN_HOLDING_MINUTES * 60:
+                    remain = (MIN_HOLDING_MINUTES * 60 - holding_sec) / 60
+                    log(f"[HOLD][{symbol}] Exit ignorata (holding {holding_sec/60:.1f}m < {MIN_HOLDING_MINUTES}m, restano {remain:.1f}m)")
+                    continue
 
             latest_before = get_last_price(symbol)
             if latest_before:
@@ -1080,7 +1144,7 @@ while True:
         # - tempo minimo rispettato
         if (not entry["trailing_active"]
             and r_current >= TRAILING_ACTIVATION_R
-            and holding_sec >= MIN_HOLDING_MINUTES * 60):
+            and (entry.get("synced") and SYNC_BACKFILL_HOLDING_EXEMPT or (time.time() - entry.get("entry_time", 0)) >= MIN_HOLDING_MINUTES * 60)):
             entry["trailing_active"] = True
             locked_sl = entry_price + (risk * TRAILING_LOCK_R)
             if locked_sl > entry["sl"]:
