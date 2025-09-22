@@ -89,6 +89,9 @@ MIN_SL_PCT = 0.010                # SL minimo = 1% del prezzo (se ATR troppo pic
 MAX_NEW_POSITIONS_PER_CYCLE = 2   # massimo ingressi per ciclo di scansione
 USE_DYNAMIC_ASSET_LIST = False      # Fase 2: se True sostituirà ASSETS dinamicamente
 USE_SAFE_ORDER_BUY   = False        # Fase 3: se True userà safe_market_buy() al posto di market_buy_qty()
+USE_SAFE_ORDER_BUY   = False        # Fase 3: se True userà safe_market_buy() al posto di market_buy_qty()
+LARGE_CAP_MIN_NOTIONAL_MULT = 1.10  # quanto sopra il notional minimo per tentativo large cap
+LARGE_CAP_LIMIT_SLIPPAGE    = 0.0015  # 0.15% sopra last price per LIMIT IOC (fill immediato)
 ENFORCE_DIVERGENCE_CHECK = False
 DIVERGENCE_MAX_PCT = 0.05   # 5% sul testnet
 EXCLUDE_LOW_PRICE    = True         # Se True (fase 1) solo DRY-RUN (non modifica ASSETS)
@@ -375,6 +378,72 @@ def market_buy_qty(symbol: str, qty: Decimal):
     if resp.status_code == 200 and rj.get("retCode") == 0:
         return True
     return False
+
+def limit_buy_qty(symbol: str, qty: Decimal, price: float) -> bool:
+    """
+    LIMIT BUY (IOC) per large cap: prezzo = last_price * (1 + SMALL SLIPPAGE) per garantire fill taker.
+    """
+    info = get_instrument_info(symbol)
+    qty_step = info.get("qty_step", 0.0001)
+    min_order_amt = info.get("min_order_amt", 5)
+    precision = info.get("precision", 4)
+
+    last_price = get_last_price(symbol)
+    if not last_price:
+        log(f"❌ limit_buy_qty: prezzo mancante {symbol}")
+        return False
+
+    # Usa il prezzo passato (già maggiorato) ma verifica non troppo distante
+    limit_price = price
+    # Arrotonda prezzo
+    price_str = f"{limit_price:.{precision}f}"
+
+    # Allinea qty
+    step = Decimal(str(qty_step))
+    qty_aligned = (qty // step) * step
+    if qty_aligned <= 0:
+        log(f"❌ limit_buy_qty qty non valida {symbol}")
+        return False
+
+    notional = float(qty_aligned) * limit_price
+    if notional < min_order_amt:
+        log(f"❌ limit_buy_qty notional {notional:.2f} < min {min_order_amt} {symbol}")
+        return False
+
+    decs = _qty_step_decimals(qty_step)
+    qty_str = f"{qty_aligned:.{decs}f}".rstrip('0').rstrip('.')
+    if qty_str == '':
+        qty_str = '0'
+
+    body = {
+        "category": "spot",
+        "symbol": symbol,
+        "side": "Buy",
+        "orderType": "Limit",
+        "timeInForce": "IOC",
+        "price": price_str,
+        "qty": qty_str
+    }
+    ts = str(int(time.time() * 1000))
+    body_json = json.dumps(body, separators=(",", ":"))
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json"
+    }
+    resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+    try:
+        rj = resp.json()
+    except:
+        rj = {}
+    log(f"BUY_LIMIT BODY: {body_json}")
+    log(f"BUY_LIMIT RESP: {resp.status_code} {rj}")
+    return resp.status_code == 200 and rj.get("retCode") == 0
 
 def _round_qty_down(qty_dec: Decimal, step_dec: Decimal) -> Decimal:
     return (qty_dec // step_dec) * step_dec
@@ -1017,8 +1086,7 @@ while True:
             }
             strength = strategy_strength.get(strategy, 0.5)
 
-            # === POSITION SIZING A RISCHIO FISSO ===
-            # 1. Calcola ATR per determinare risk_per_unit (SL distance)
+            # === POSITION SIZING A RISCHIO FISSO (con gestione large cap) ===
             cache = ANALYSIS_CACHE.get(symbol)
             if not cache:
                 log(f"❌ Cache analisi mancante per {symbol} (no ATR), salto")
@@ -1031,9 +1099,7 @@ while True:
                 log(f"[STALE-CACHE][{symbol}] Dati analisi vecchi >120s, salto")
                 continue
             
-            # Prezzo corrente (rileggi per ridurre drift)
             live_price = get_last_price(symbol)
-            # Controllo divergenza tra prezzo candela (price) e ticker live
             if live_price and ENFORCE_DIVERGENCE_CHECK:
                 divergence = abs(live_price - price) / price if price else 0
                 if divergence > DIVERGENCE_MAX_PCT:
@@ -1043,19 +1109,16 @@ while True:
                 log(f"❌ Prezzo non disponibile per sizing {symbol}")
                 continue
 
-            risk_per_unit = atr_val * SL_ATR_MULT   # distanza SL per unità
-            # PATCH: impone un rischio minimo assoluto (evita micro SL troppo stretti)
+            risk_per_unit = atr_val * SL_ATR_MULT
             min_risk_abs = live_price * MIN_SL_PCT
             if risk_per_unit < min_risk_abs:
                 log(f"[RISK][{symbol}] risk_per_unit {risk_per_unit:.6f} troppo basso → forzato a {min_risk_abs:.6f}")
                 risk_per_unit = min_risk_abs
-            equity = get_usdt_balance()
-            risk_capital = equity * RISK_PCT  # rischio iniziale target (potrà essere aumentato se sotto min ordine)
 
-            # Qty teorica basata sul rischio
+            equity = get_usdt_balance()
+            risk_capital = equity * RISK_PCT
             qty_risk = risk_capital / risk_per_unit
 
-            # Applica limiti di exchange (step / min order)
             info = get_instrument_info(symbol)
             qty_step = info.get("qty_step", 0.0001)
             min_qty = info.get("min_qty", 0.0)
@@ -1069,72 +1132,123 @@ while True:
 
             order_amount = float(qty_adj) * live_price
 
-            # CAP addizionale: non investire oltre strength * equity né oltre 250 USDT
+            # Notional minimo reale (considera min_qty*price)
+            min_notional_required = max(min_order_amt, min_qty * live_price)
+
+            # CAP notional (strength & globale)
+            strategy_strength = {
+                "Breakout Bollinger": 1.0,
+                "MACD bullish + ADX": 0.9,
+                "Incrocio SMA 20/50": 0.75,
+                "Incrocio EMA 20/50": 0.7,
+                "MACD bullish (stabile)": 0.65,
+                "Reversal BB + RSI": 0.55,
+                "Pullback EMA20": 0.7,
+                "Trend EMA + RSI": 0.6
+            }
+            strength = strategy_strength.get(strategy, 0.5)
             cap_strength = equity * strength
             cap_global = 250.0
             max_notional = min(cap_strength, cap_global, equity)
             if order_amount > max_notional:
-                # Ridimensiona qty alla nuova soglia
                 qty_adj = Decimal(str(max_notional / live_price))
                 qty_adj = (qty_adj // step_dec) * step_dec
                 order_amount = float(qty_adj) * live_price
 
-            if order_amount < min_order_amt:
-                # Auto-adegua qty al minimo notional richiesto
-                min_qty_for_notional = Decimal(str(min_order_amt / live_price))
-                min_qty_for_notional = (min_qty_for_notional // step_dec) * step_dec
-                if min_qty_for_notional <= 0:
-                    log(f"❌ Impossibile adeguare qty minima per {symbol}")
-                    continue
-                qty_adj = min_qty_for_notional
-                order_amount = float(qty_adj) * live_price
-                # Ricalcola risk_capital effettivo (aumentato)
-                risk_capital = float(qty_adj) * risk_per_unit
-                log(f"⚠️ Adeguo a min order: notional={order_amount:.2f} risk_capital={risk_capital:.2f}")
+            # Adeguamento al notional minimo (prima pass)
+            if order_amount < min_notional_required:
+                needed_qty = Decimal(str(min_notional_required / live_price))
+                needed_qty = (needed_qty // step_dec) * step_dec
+                if needed_qty > qty_adj:
+                    qty_adj = needed_qty
+                    order_amount = float(qty_adj) * live_price
+                    risk_capital = float(qty_adj) * risk_per_unit
+                    log(f"⚠️ Adeguo {symbol} a min_notional {order_amount:.2f} (risk_cap {risk_capital:.2f})")
 
-            if order_amount < min_order_amt:
-                log(f"❌ Notional ancora < min ({order_amount:.2f} < {min_order_amt}) per {symbol}")
+            # Large cap: se ancora vicino al limite spingo a un 10% sopra
+            if symbol in LARGE_ASSETS and order_amount < min_notional_required * LARGE_CAP_MIN_NOTIONAL_MULT:
+                bump_notional = min_notional_required * LARGE_CAP_MIN_NOTIONAL_MULT
+                bump_qty = Decimal(str(bump_notional / live_price))
+                bump_qty = (bump_qty // step_dec) * step_dec
+                if bump_qty > qty_adj:
+                    qty_adj = bump_qty
+                    order_amount = float(qty_adj) * live_price
+                    risk_capital = float(qty_adj) * risk_per_unit
+                    log(f"[LARGE][{symbol}] Bump notional → {order_amount:.2f} (min_req {min_notional_required:.2f})")
+
+            if order_amount < min_notional_required:
+                log(f"❌ Notional < required ({order_amount:.2f} < {min_notional_required:.2f}) {symbol}")
                 continue
-
             if float(qty_adj) <= 0:
                 log(f"❌ Qty finale nulla per {symbol}")
                 continue
 
-            # Acquisto (usiamo order_amount in USDT)
             if TEST_MODE:
                 log(f"[TEST_MODE] (NO BUY) {symbol} qty={qty_adj} notional={order_amount:.2f}")
                 continue
 
-            pre_qty = get_free_qty(symbol)  # saldo prima
-            # Se in futuro abiliti USE_SAFE_ORDER_BUY userà la versione robusta
+            pre_qty = get_free_qty(symbol)
+
+            # Scelta tipo ordine
             buy_ok = False
-            if USE_SAFE_ORDER_BUY:
-                buy_ok = safe_market_buy(symbol, qty_adj)
+            if symbol in LARGE_ASSETS:
+                # LIMIT IOC (taker) a small slippage
+                limit_price = live_price * (1 + LARGE_CAP_LIMIT_SLIPPAGE)
+                buy_ok = limit_buy_qty(symbol, qty_adj, limit_price)
+                if not buy_ok and USE_SAFE_ORDER_BUY:
+                    # fallback market safe
+                    buy_ok = safe_market_buy(symbol, qty_adj)
             else:
-                buy_ok = market_buy_qty(symbol, qty_adj)
+                if USE_SAFE_ORDER_BUY:
+                    buy_ok = safe_market_buy(symbol, qty_adj)
+                else:
+                    buy_ok = market_buy_qty(symbol, qty_adj)
+
+            # Retry se retCode limite notional (solo large cap)
+            if not buy_ok:
+                info_retry = get_instrument_info(symbol)
+                min_order_amt_r = info_retry.get("min_order_amt", min_order_amt)
+                min_qty_r = info_retry.get("min_qty", min_qty)
+                req_retry = max(min_order_amt_r, min_qty_r * live_price) * 1.12
+                bump_qty = Decimal(str(req_retry / live_price))
+                bump_qty = (bump_qty // step_dec) * step_dec
+                if bump_qty > qty_adj and symbol in LARGE_ASSETS:
+                    log(f"[RETRY-LARGE][{symbol}] aumento qty per retry (req≈{req_retry:.2f})")
+                    if symbol in LARGE_ASSETS:
+                        limit_price = live_price * (1 + LARGE_CAP_LIMIT_SLIPPAGE)
+                        buy_ok = limit_buy_qty(symbol, bump_qty, limit_price)
+                    else:
+                        buy_ok = market_buy_qty(symbol, bump_qty)
+                    if buy_ok:
+                        qty_adj = bump_qty
+                        order_amount = float(qty_adj) * live_price
+                        risk_capital = float(qty_adj) * risk_per_unit
+
             if not buy_ok:
                 log(f"❌ Acquisto fallito per {symbol}")
                 continue
+
             time.sleep(2)
             post_qty = get_free_qty(symbol)
             qty_filled = max(0.0, post_qty - pre_qty)
             theoretical = float(qty_adj)
             if qty_filled <= 0:
-                log(f"[FILL][{symbol}] Delta saldo zero → assumo qty teorica {theoretical}")
                 qty_filled = theoretical
+                log(f"[FILL][{symbol}] Delta saldo zero → uso qty teorica {theoretical}")
             fill_ratio = qty_filled / theoretical if theoretical > 0 else 0
             if fill_ratio < 0.5:
-                log(f"[WARN][{symbol}] Partial fill stimato ({fill_ratio:.0%}) → uso qty teorica {theoretical}")
+                log(f"[WARN][{symbol}] Partial fill stimato {fill_ratio:.0%} → forza qty teorica")
                 qty_filled = theoretical
+
             if qty_filled <= 0:
-                log(f"❌ Nessuna quantità risultante per {symbol} (post esecuzione)")
+                log(f"❌ Nessuna quantità risultante per {symbol}")
                 continue
 
-            entry_price = live_price  # usiamo il prezzo live usato per sizing
+            entry_price = live_price
             sl = entry_price - risk_per_unit
             tp = entry_price + (risk_per_unit * TP_R_MULT)
             actual_cost = entry_price * qty_filled
-            used_risk = risk_per_unit * qty_filled  # rischio monetario effettivo
+            used_risk = risk_per_unit * qty_filled
 
             position_data[symbol] = {
                 "entry_price": entry_price,
@@ -1147,17 +1261,16 @@ while True:
                 "entry_time": time.time(),
                 "trailing_active": False,
                 "p_max": entry_price,
-                "mfe": 0.0,    # Max Favorable Excursion (in R)
-                "mae": 0.0,    # Max Adverse Excursion (in R, negativo)
+                "mfe": 0.0,
+                "mae": 0.0,
                 "used_risk": used_risk
             }
             open_positions.add(symbol)
-            new_positions_this_cycle += 1  # PATCH: conteggio ingressi ciclo
-            risk_pct_eff = (risk_per_unit * qty_filled / equity) * 100 if equity else 0
-            log(f"🟢 Acquisto {symbol} | Qty {qty_filled:.8f} | Entry {entry_price:.6f} | SL {sl:.6f} | TP {tp:.6f} | R/unit {risk_per_unit:.6f} | RiskCap {risk_capital:.2f} | UsedRisk {used_risk:.2f} ({risk_pct_eff:.2f}%)")
-            notify_telegram(
-                f"🟢📈 Acquisto {symbol}\nQty: {qty_filled:.6f}\nPrezzo: {entry_price:.6f}\nStrategia: {strategy}\nSL: {sl:.6f}\nTP: {tp:.6f}\nR/unit: {risk_per_unit:.6f}"
-            )
+            new_positions_this_cycle += 1
+            risk_pct_eff = (used_risk / equity) * 100 if equity else 0
+            log(f"🟢 Acquisto {symbol} | Qty {qty_filled:.8f} | Entry {entry_price:.6f} | SL {sl:.6f} | TP {tp:.6f} | R/unit {risk_per_unit:.6f} | Notional {actual_cost:.2f} | UsedRisk {used_risk:.2f} ({risk_pct_eff:.2f}%)")
+            notify_telegram(f"🟢📈 Acquisto {symbol}\nQty: {qty_filled:.6f}\nPrezzo: {entry_price:.6f}\nStrategia: {strategy}\nSL: {sl:.6f}\nTP: {tp:.6f}")
+
             time.sleep(2)
 
         # 🔴 USCITA (EXIT)
