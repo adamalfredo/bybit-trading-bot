@@ -52,6 +52,13 @@ TRAILING_ACTIVATION_R = 2.0       # attiva trailing solo dopo 2R
 TRAILING_LOCK_R = 1.0             # quando attiva, blocca almeno +1R
 MIN_SL_PCT = 0.010                # SL minimo = 1% del prezzo (se ATR troppo piccolo)
 MAX_NEW_POSITIONS_PER_CYCLE = 2   # massimo ingressi per ciclo di scansione
+USE_DYNAMIC_ASSET_LIST = False      # Fase 2: se True sostituirà ASSETS dinamicamente
+USE_SAFE_ORDER_BUY   = False        # Fase 3: se True userà safe_market_buy() al posto di market_buy_qty()
+EXCLUDE_LOW_PRICE    = True         # Se True (fase 1) solo DRY-RUN (non modifica ASSETS)
+PRICE_MIN_ACTIVE     = 0.01         # Soglia prezzo per esclusione preventiva (dry-run ora)
+DYNAMIC_ASSET_MIN_VOLUME = 500000   # Filtro volume quote (USDT)
+MAX_DYNAMIC_ASSETS   = 25           # Limite massimo asset dinamici
+DYNAMIC_REFRESH_MIN  = 60           # Ogni X minuti (fase 2)
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
@@ -99,25 +106,29 @@ def get_last_price(symbol: str) -> Optional[float]:
         return None
     
 def get_instrument_info(symbol: str) -> dict:
-    url = f"{BYBIT_BASE_URL}/v5/market/instruments-info?category=spot&symbol={symbol}"
+    url = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
+    params = {"category": "spot", "symbol": symbol}
     try:
-        resp = requests.get(url)
+        resp = requests.get(url, params=params, timeout=10)
         data = resp.json()
-        if data["retCode"] != 0:
-            log(f"❌ Errore fetch info strumento: {data['retMsg']}")
+        if data.get("retCode") != 0:
+            log(f"❌ Errore fetch info strumento {symbol}: {data.get('retMsg')}")
             return {}
-
-        info = data["result"]["list"][0]
-        lot = info["lotSizeFilter"]
+        lst = data.get("result", {}).get("list", [])
+        if not lst:
+            return {}
+        info = lst[0]
+        lot = info.get("lotSizeFilter", {})
         return {
-            "min_qty": float(lot.get("minOrderQty", 0)),
-            "qty_step": float(lot.get("qtyStep", 0.0001)),
-            "precision": int(info.get("priceScale", 4)),
-            "min_order_amt": float(info.get("minOrderAmt", 5))
+            "min_qty": float(lot.get("minOrderQty", 0) or 0),
+            "qty_step": float(lot.get("qtyStep", 0.0001) or 0.0001),
+            "precision": int(info.get("priceScale", 4) or 4),
+            "min_order_amt": float(info.get("minOrderAmt", 5) or 5),
+            "max_order_qty": float(lot.get("maxOrderQty")) if lot.get("maxOrderQty") else None,
+            "max_order_amt": float(lot.get("maxOrderAmt")) if lot.get("maxOrderAmt") else None
         }
-
     except Exception as e:
-        log(f"❌ Errore get_instrument_info: {e}")
+        log(f"❌ Errore get_instrument_info {symbol}: {e}")
         return {}
 
 def get_free_qty(symbol: str) -> float:
@@ -311,6 +322,95 @@ def market_buy_qty(symbol: str, qty: Decimal):
         return True
     return False
 
+def _round_qty_down(qty_dec: Decimal, step_dec: Decimal) -> Decimal:
+    return (qty_dec // step_dec) * step_dec
+
+def safe_market_buy(symbol: str, qty: Decimal, max_retries: int = 2) -> bool:
+    """
+    Wrapper robusto (non ancora attivo finché USE_SAFE_ORDER_BUY=False).
+    Gestisce:
+      - allineamento step
+      - limiti min/max qty / notional
+      - riduzione progressiva in caso di retCode limite
+    """
+    info = get_instrument_info(symbol)
+    qty_step = info.get("qty_step", 0.0001)
+    min_order_amt = info.get("min_order_amt", 5)
+    max_order_qty = info.get("max_order_qty")
+    max_order_amt = info.get("max_order_amt")
+
+    price = get_last_price(symbol)
+    if not price:
+        log(f"❌ safe_market_buy: prezzo mancante {symbol}")
+        return False
+
+    step_dec = Decimal(str(qty_step))
+    attempt_qty = _round_qty_down(qty, step_dec)
+    if attempt_qty <= 0:
+        log(f"❌ safe_market_buy: qty iniziale non valida {symbol}")
+        return False
+
+    for attempt in range(1, max_retries + 1):
+        notional = float(attempt_qty) * price
+
+        if max_order_qty and float(attempt_qty) > max_order_qty:
+            attempt_qty = _round_qty_down(Decimal(str(max_order_qty)), step_dec)
+        if max_order_amt and notional > max_order_amt:
+            capped = Decimal(str((max_order_amt * 0.995) / price))
+            attempt_qty = _round_qty_down(capped, step_dec)
+            notional = float(attempt_qty) * price
+
+        if notional < min_order_amt:
+            log(f"❌ safe_market_buy: notional {notional:.2f} < min {min_order_amt} ({symbol})")
+            return False
+
+        decs = _qty_step_decimals(qty_step)
+        qty_str = f"{attempt_qty:.{decs}f}".rstrip('0').rstrip('.')
+        if qty_str == '':
+            qty_str = '0'
+
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": "Buy",
+            "orderType": "Market",
+            "qty": qty_str
+        }
+        ts = str(int(time.time() * 1000))
+        body_json = json.dumps(body, separators=(",", ":"))
+        payload = f"{ts}{KEY}5000{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-SIGN-TYPE": "2",
+            "Content-Type": "application/json"
+        }
+        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+        try:
+            rj = resp.json()
+        except:
+            rj = {}
+        log(f"[SAFE BUY][{symbol}] attempt {attempt}/{max_retries} BODY={body_json}")
+        log(f"[SAFE BUY][{symbol}] RESP {resp.status_code} {rj}")
+
+        if resp.status_code == 200 and rj.get("retCode") == 0:
+            return True
+
+        ret_code = rj.get("retCode")
+        # RetCode tipici limite/minimo: 170140 (lower limit), 170124 (too large)
+        if attempt < max_retries and ret_code in (170140, 170124):
+            # Riduci qty del 20%
+            attempt_qty = _round_qty_down(attempt_qty * Decimal("0.8"), step_dec)
+            if attempt_qty <= 0:
+                break
+            continue
+        else:
+            break
+    return False
+
 def fetch_history(symbol: str):
     endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
     params = {
@@ -449,6 +549,70 @@ def analyze_asset(symbol: str):
 log("🔄 Avvio sistema di monitoraggio segnali reali")
 notify_telegram("🤖 BOT AVVIATO - In ascolto per segnali di ingresso/uscita")
 
+log(f"[CONFIG] FEATURES: dyn_assets={USE_DYNAMIC_ASSET_LIST} safe_buy={USE_SAFE_ORDER_BUY} exclude_low_price={EXCLUDE_LOW_PRICE}")
+
+def _dry_run_low_price_exclusions():
+    if not EXCLUDE_LOW_PRICE:
+        return
+    to_exclude = []
+    for sym in ASSETS:
+        price = get_last_price(sym)
+        if price and price < PRICE_MIN_ACTIVE:
+            to_exclude.append(f"{sym}({price})")
+    if to_exclude:
+        log(f"[DRY-RUN][LOW-PRICE] Escluderei (prezzo<{PRICE_MIN_ACTIVE}): {', '.join(to_exclude)}")
+    else:
+        log(f"[DRY-RUN][LOW-PRICE] Nessun asset sotto {PRICE_MIN_ACTIVE}")
+
+_dry_run_low_price_exclusions()
+
+def update_dynamic_assets():
+    """
+    FASE 2: (ora non attiva) – costruisce una lista dinamica.
+    Ritorna lista simboli candidate (filtrate).
+    """
+    url = f"{BYBIT_BASE_URL}/v5/market/tickers"
+    params = {"category": "spot"}
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        data = resp.json()
+        if data.get("retCode") != 0:
+            log(f"❌ dynamic assets retCode !=0: {data.get('retMsg')}")
+            return ASSETS
+        raw_list = data.get("result", {}).get("list", [])
+        candidates = []
+        for r in raw_list:
+            sym = r.get("symbol")
+            if not sym or not sym.endswith("USDT"):
+                continue
+            # Evita stable
+            if sym in ("USDCUSDT", "DAIUSDT", "USDTUSDT"):
+                continue
+            try:
+                lastp = float(r.get("lastPrice", 0) or 0)
+                vol_quote = float(r.get("turnover24h", 0) or 0)
+            except:
+                continue
+            if EXCLUDE_LOW_PRICE and lastp < PRICE_MIN_ACTIVE:
+                continue
+            if vol_quote < DYNAMIC_ASSET_MIN_VOLUME:
+                continue
+            candidates.append((sym, vol_quote, lastp))
+        # Ordina per volume desc
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        final = [c[0] for c in candidates[:MAX_DYNAMIC_ASSETS]]
+        log(f"[DYN][CANDIDATE] {len(final)} asset: {final}")
+        return final or ASSETS
+    except Exception as e:
+        log(f"❌ update_dynamic_assets errore: {e}")
+        return ASSETS
+
+if USE_DYNAMIC_ASSET_LIST:
+    dyn_list = update_dynamic_assets()
+    log(f"[DYN] Lista dinamica ATTIVA: {dyn_list}")
+    # NOTA: in FASE 1 non sostituiamo ASSETS. In FASE 2 potrai fare: ASSETS = dyn_list
+else:
+    log("[DYN] Disattivato (fase 1)")
 
 TEST_MODE = False  # Acquisti e vendite normali abilitati
 
@@ -642,7 +806,13 @@ while True:
                 continue
 
             pre_qty = get_free_qty(symbol)  # saldo prima
-            if not market_buy_qty(symbol, qty_adj):
+            # Se in futuro abiliti USE_SAFE_ORDER_BUY userà la versione robusta
+            buy_ok = False
+            if USE_SAFE_ORDER_BUY:
+                buy_ok = safe_market_buy(symbol, qty_adj)
+            else:
+                buy_ok = market_buy_qty(symbol, qty_adj)
+            if not buy_ok:
                 log(f"❌ Acquisto fallito per {symbol}")
                 continue
             time.sleep(2)
