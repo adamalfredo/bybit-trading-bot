@@ -61,16 +61,35 @@ def notify_telegram(message: str):
 
 def get_last_price(symbol: str) -> Optional[float]:
     try:
-        response = requests.get(
+        resp = requests.get(
             f"{BYBIT_BASE_URL}/v5/market/tickers",
             params={"category": "spot", "symbol": symbol},
             timeout=10
         )
-        data = response.json()
-        last_price = data["result"]["list"][0]["lastPrice"]
-        return float(last_price)
+        data = resp.json()
+
+        if data.get("retCode") != 0:
+            log(f"❌ get_last_price retCode !=0 per {symbol}: {data.get('retMsg')}")
+            return None
+
+        result = data.get("result")
+        if not isinstance(result, dict):
+            log(f"❌ get_last_price struttura inattesa result (non dict) per {symbol}: {data}")
+            return None
+
+        lst = result.get("list")
+        if not lst or not isinstance(lst, list):
+            log(f"❌ get_last_price lista vuota per {symbol}: {data}")
+            return None
+
+        price_raw = lst[0].get("lastPrice")
+        if price_raw is None:
+            log(f"❌ get_last_price lastPrice mancante per {symbol}: {lst[0]}")
+            return None
+
+        return float(price_raw)
     except Exception as e:
-        log(f"❌ Errore in get_last_price: {e}")
+        log(f"❌ Errore in get_last_price({symbol}): {e}")
         return None
     
 def get_instrument_info(symbol: str) -> dict:
@@ -552,10 +571,7 @@ while True:
 
             risk_per_unit = atr_val * SL_ATR_MULT   # distanza SL per unità
             equity = get_usdt_balance()
-            risk_capital = equity * RISK_PCT
-            if risk_capital < 5:
-                log(f"💸 Rischio calcolato troppo basso ({risk_capital:.2f}) per {symbol}")
-                continue
+            risk_capital = equity * RISK_PCT  # rischio iniziale target (potrà essere aumentato se sotto min ordine)
 
             # Qty teorica basata sul rischio
             qty_risk = risk_capital / risk_per_unit
@@ -586,7 +602,20 @@ while True:
                 order_amount = float(qty_adj) * live_price
 
             if order_amount < min_order_amt:
-                log(f"❌ Notional {order_amount:.2f} < min_order_amt {min_order_amt} per {symbol}")
+                # Auto-adegua qty al minimo notional richiesto
+                min_qty_for_notional = Decimal(str(min_order_amt / live_price))
+                min_qty_for_notional = (min_qty_for_notional // step_dec) * step_dec
+                if min_qty_for_notional <= 0:
+                    log(f"❌ Impossibile adeguare qty minima per {symbol}")
+                    continue
+                qty_adj = min_qty_for_notional
+                order_amount = float(qty_adj) * live_price
+                # Ricalcola risk_capital effettivo (aumentato)
+                risk_capital = float(qty_adj) * risk_per_unit
+                log(f"⚠️ Adeguo a min order: notional={order_amount:.2f} risk_capital={risk_capital:.2f}")
+
+            if order_amount < min_order_amt:
+                log(f"❌ Notional ancora < min ({order_amount:.2f} < {min_order_amt}) per {symbol}")
                 continue
 
             if float(qty_adj) <= 0:
@@ -634,7 +663,7 @@ while True:
                 "used_risk": used_risk
             }
             open_positions.add(symbol)
-            risk_pct_eff = (used_risk / equity) * 100 if equity else 0
+            risk_pct_eff = (risk_per_unit * qty_filled / equity) * 100 if equity else 0
             log(f"🟢 Acquisto {symbol} | Qty {qty_filled:.8f} | Entry {entry_price:.6f} | SL {sl:.6f} | TP {tp:.6f} | R/unit {risk_per_unit:.6f} | RiskCap {risk_capital:.2f} | UsedRisk {used_risk:.2f} ({risk_pct_eff:.2f}%)")
             notify_telegram(
                 f"🟢📈 Acquisto {symbol}\nQty: {qty_filled:.6f}\nPrezzo: {entry_price:.6f}\nStrategia: {strategy}\nSL: {sl:.6f}\nTP: {tp:.6f}\nR/unit: {risk_per_unit:.6f}"
