@@ -403,11 +403,31 @@ def market_sell(symbol: str, qty: float):
                 log(f"[SELL-RETRY][{symbol}] 170137 → escalation passo")
                 _instrument_cache.pop(symbol, None)
                 info = get_instrument_info(symbol)
-                new_step = info.get("qty_step", 0.01)
-                if new_step < 0.01:
-                    new_step = 0.01
-                step_dec = Decimal(str(new_step))
-                qty_work = float((Decimal(str(qty_work)) // step_dec) * step_dec)
+                base_step = info.get("qty_step", qty_step)
+                if base_step < 0.01:
+                    base_step = 0.01
+                # deduci passo usato ora dai decimali inviati
+                last_decimals = len(qty_str.split(".")[1]) if "." in qty_str else 0
+                used_step_now = 10 ** (-last_decimals) if last_decimals > 0 else 1.0
+                # lista escalation
+                escalation = [base_step]
+                for s in (0.01, 0.1, 1.0, 10.0):
+                    if s not in escalation:
+                        escalation.append(s)
+                # scegli prossimo maggiore
+                next_step = None
+                for s in escalation:
+                    if s > used_step_now:
+                        next_step = s
+                        break
+                if not next_step:
+                    next_step = escalation[-1]
+                new_qty_str = _format_qty_with_step(qty_work, next_step)
+                try:
+                    qty_work = float(new_qty_str)
+                except:
+                    log(f"[SELL-RETRY][{symbol}] parsing qty fallito ({new_qty_str})")
+                log(f"[SELL-RETRY][{symbol}] passo {used_step_now} → {next_step} qty→{new_qty_str}")
                 attempt += 1
                 continue
 
@@ -485,6 +505,17 @@ def _format_qty_by_step(symbol: str, qty: float) -> str:
     if s == '':
         s = '0'
     return s
+
+def _format_qty_with_step(qty: float, step: float) -> str:
+    step_dec = Decimal(str(step))
+    q = Decimal(str(qty))
+    floored = (q // step_dec) * step_dec
+    step_decimals = -step_dec.as_tuple().exponent if step_dec.as_tuple().exponent < 0 else 0
+    pattern = Decimal('1.' + '0'*step_decimals) if step_decimals > 0 else Decimal('1')
+    floored = floored.quantize(pattern, rounding=ROUND_DOWN)
+    if step_decimals > 0:
+        return f"{floored:.{step_decimals}f}".rstrip('0').rstrip('.') or "0"
+    return f"{int(floored)}"
 
 LAST_ORDER_RETCODE = None
 
@@ -637,14 +668,28 @@ def execute_buy_order(symbol: str, qty_dec: Decimal, prefer_limit: bool,
             continue
 
         if rc == 170137:
-            log(f"[RETRY][{symbol}] 170137 (decimali qty) → forzo passo ≥0.01 e rifloor")
+            log(f"[RETRY][{symbol}] 170137 (decimali qty) → escalation passo")
             _instrument_cache.pop(symbol, None)
             info = get_instrument_info(symbol)
-            step_fix = info.get("qty_step", qty_step)
-            if step_fix < 0.01:
-                step_fix = 0.01
-            step_dec = Decimal(str(step_fix))
+            base_step = info.get("qty_step", qty_step)
+            if base_step < 0.01:
+                base_step = 0.01
+            last_decimals = len(qty_str.split(".")[1]) if "." in qty_str else 0
+            used_step_now = 10 ** (-last_decimals) if last_decimals > 0 else 1.0
+            escalation = [base_step]
+            for s in (0.01, 0.1, 1.0, 10.0):
+                if s not in escalation:
+                    escalation.append(s)
+            next_step = None
+            for s in escalation:
+                if s > used_step_now:
+                    next_step = s
+                    break
+            if not next_step:
+                next_step = escalation[-1]
+            step_dec = Decimal(str(next_step))
             qty_aligned = (qty_aligned // step_dec) * step_dec
+            log(f"[RETRY][{symbol}] passo {used_step_now} → {next_step} qty→{qty_aligned}")
             continue
 
         break
