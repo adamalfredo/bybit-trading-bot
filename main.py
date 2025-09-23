@@ -10,6 +10,7 @@ from ta.volatility import BollingerBands, AverageTrueRange
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD, ADXIndicator, SMAIndicator
 from typing import Optional
+from decimal import ROUND_DOWN
 
 # Env vars (Railway)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -270,74 +271,120 @@ def get_free_qty(symbol: str, quiet_missing: bool = False) -> float:
         return 0.0
 
 def market_sell(symbol: str, qty: float):
+    """
+    Invio ordine MARKET SELL robusto:
+      - Ricalcola qty reale dal wallet (safe_qty)
+      - Conforma ai decimali consentiti (qty_step)
+      - Retry su retCode 170137 (troppi decimali) con:
+          * refresh instrument info (invalida cache)
+          * riduzione precisione
+      - Retry su insufficient balance riducendo leggermente la qty
+    """
     price = get_last_price(symbol)
     if not price:
         log(f"❌ Prezzo non disponibile per {symbol}, impossibile vendere")
         return
 
-    order_value = qty * price
-    if order_value < 5:
-        log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT")
+    # Usa sempre il saldo effettivo per evitare divergenze
+    safe_qty = get_free_qty(symbol, quiet_missing=True)
+    if safe_qty <= 0:
+        log(f"❌ Nessun saldo per vendere {symbol}")
         return
 
     info = get_instrument_info(symbol)
     qty_step = info.get("qty_step", 0.0001)
-    if not qty_step or qty_step <= 0:
-        qty_step = 0.0001
+    min_order_amt = info.get("min_order_amt", 5)
+    min_qty = info.get("min_qty", qty_step)
 
-    try:
-        step = Decimal(str(qty_step))
-        dec_qty = Decimal(str(qty))
-        floored_qty = (dec_qty // step) * step
-
-        # Deriva decimali dallo step
-        step_str = f"{qty_step:.10f}".rstrip('0')
-        if '.' in step_str:
-            step_decimals = len(step_str.split('.')[1])
-        else:
-            step_decimals = 0
-
-        if floored_qty <= 0:
-            log(f"❌ Quantità troppo piccola per {symbol} (dopo arrotondamento)")
-            return
-
-        qty_str = f"{floored_qty:.{step_decimals}f}".rstrip('0').rstrip('.')
-        if qty_str == '':
-            qty_str = '0'
-
-        log(f"[DEBUG-SELL-QTY] {symbol} req={qty} step={qty_step} send={qty_str}")
-
-    except Exception as e:
-        log(f"❌ Errore arrotondamento quantità {symbol}: {e}")
+    order_value = safe_qty * price
+    if order_value < min_order_amt:
+        log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} < {min_order_amt}")
+        return
+    if safe_qty < min_qty:
+        log(f"❌ Quantità troppo piccola per {symbol}: {safe_qty} < min_qty {min_qty}")
         return
 
-    body = {
-        "category": "spot",
-        "symbol": symbol,
-        "side": "Sell",
-        "orderType": "Market",
-        "qty": qty_str
-    }
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
-    try:
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"SELL BODY: {body_json}")
-        log(f"RESPONSE: {resp.status_code} {resp.json()}")
-        return resp
-    except Exception as e:
-        log(f"❌ Errore invio ordine SELL: {e}")
-        return None
+    max_attempts = 4
+    attempt = 1
+    qty_work = safe_qty
+
+    while attempt <= max_attempts:
+        qty_str = _format_qty_by_step(symbol, qty_work)
+        # Ricontrolla valore dopo formattazione
+        try:
+            qty_num = float(qty_str)
+        except:
+            log(f"❌ Parsing qty_str fallito {symbol}: {qty_str}")
+            return
+        value_now = qty_num * price
+        if value_now < min_order_amt or qty_num <= 0:
+            log(f"❌ Qty/value troppo piccoli dopo format {symbol}: qty={qty_num} value={value_now:.2f}")
+            return
+
+        body = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": "Sell",
+            "orderType": "Market",
+            "qty": qty_str
+        }
+        ts = str(int(time.time() * 1000))
+        body_json = json.dumps(body, separators=(",", ":"))
+        payload = f"{ts}{KEY}5000{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-SIGN-TYPE": "2",
+            "Content-Type": "application/json"
+        }
+        log(f"[SELL][{symbol}] attempt {attempt}/{max_attempts} qty_raw={safe_qty} send={qty_str} value={value_now:.2f}")
+        try:
+            resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+            try:
+                rj = resp.json()
+            except:
+                rj = {}
+            log(f"[SELL][{symbol}] RESP {resp.status_code} {rj}")
+            if resp.status_code == 200 and rj.get("retCode") == 0:
+                return resp
+
+            ret = rj.get("retCode")
+            msg = (rj.get("retMsg") or "").lower()
+
+            # Troppi decimali
+            if ret == 170137 or "too many decimals" in msg:
+                log(f"[SELL-RETRY][{symbol}] Troppi decimali / quantizzazione errata → refresh info & riduco qty marginalmente")
+                # Invalida cache strumento e ricarica
+                _instrument_cache.pop(symbol, None)
+                info = get_instrument_info(symbol)
+                qty_step = info.get("qty_step", qty_step)
+                # Riduci lievemente la qty (0.5 * passo) per sicurezza
+                step_dec = Decimal(str(qty_step))
+                qty_work = float((Decimal(str(qty_work)) // step_dec) * step_dec)
+                attempt += 1
+                continue
+
+            # Insufficient balance (edge: stato saldo non aggiornato)
+            if "insufficient" in msg:
+                qty_work = qty_work * 0.98
+                attempt += 1
+                log(f"[SELL-RETRY][{symbol}] Balance insufficiente → qty_work={qty_work}")
+                continue
+
+            # Altri errori: non retry
+            log(f"❌ Vendita fallita definitiva {symbol}: {rj.get('retMsg')}")
+            return resp
+
+        except Exception as e:
+            log(f"❌ Errore invio SELL {symbol}: {e}")
+            attempt += 1
+            time.sleep(0.8)
+
+    log(f"❌ Tutti i tentativi SELL falliti per {symbol}")
+    return None
 
 def _align_price_tick(price: float, tick: float, up: bool = False) -> float:
     if tick <= 0:
@@ -361,6 +408,39 @@ def _format_price(price: float, tick: float) -> str:
     tick_str = f"{tick:.10f}".rstrip('0')
     decs = len(tick_str.split('.')[1]) if '.' in tick_str else 0
     return f"{price:.{decs}f}"
+
+def _format_qty_by_step(symbol: str, qty: float) -> str:
+    """
+    Rende la qty conforme a qty_step Bybit:
+      - Prende qty_step dall’instrument info (cached)
+      - Usa Decimal + floor al multiplo
+      - Restituisce stringa con esatto numero di decimali consentiti
+    """
+    info = get_instrument_info(symbol)
+    qty_step = info.get("qty_step", 0.0001)
+    # Deriva numero decimali da qty_step via Decimal (più affidabile del float formatting)
+    step_dec = Decimal(str(qty_step))
+    step_decimals = -step_dec.as_tuple().exponent if step_dec.as_tuple().exponent < 0 else 0
+
+    q = Decimal(str(qty))
+    # Floor al multiplo del passo
+    floored = (q // step_dec) * step_dec
+    # Forza quantize allo stesso numero di decimali del passo
+    quant_pattern = Decimal('1.' + '0'*step_decimals) if step_decimals > 0 else Decimal('1')
+    floored = floored.quantize(quant_pattern, rounding=ROUND_DOWN)
+
+    # Se (per anomalie) non è multiplo, rifloor ancora
+    if (floored / step_dec) % 1 != 0:
+        floored = (floored // step_dec) * step_dec
+        floored = floored.quantize(quant_pattern, rounding=ROUND_DOWN)
+
+    s = f"{floored:.{step_decimals}f}" if step_decimals > 0 else f"{int(floored)}"
+    # Rimuovi trailing inutili tipo '0.2500' → '0.25' (Bybit accetta comunque)
+    if step_decimals > 0:
+        s = s.rstrip('0').rstrip('.') if '.' in s else s
+    if s == '':
+        s = '0'
+    return s
 
 LAST_ORDER_RETCODE = None
 
