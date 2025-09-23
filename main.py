@@ -98,23 +98,26 @@ MAX_OPEN_POSITIONS = 5
 COOLDOWN_MINUTES = 60
 TRAIL_LOCK_FACTOR = 1.2
 RISK_PCT = 0.01
-NOTIONAL_FLOOR_USDT = 15.0      # minimo desiderato per un ingresso (se saldo & cap lo permettono)
+
+NOTIONAL_FLOOR_USDT = 15.0                  # minimo desiderato per un ingresso (se saldo & cap lo permettono)
+CAP_GLOBAL_USD = 250.0                      # tetto massimo notional per singolo ingresso (prima hardcoded 250.0)
+
 ADD_ON_ENABLE = True
-ADD_ON_TRIGGER_R = 1.2        # attiva primo add-on se MFE ≥ 1.2R
-ADD_ON_STEP_R   = 0.8         # ogni ulteriore add-on ogni +0.8R di MFE
-ADD_ON_MAX_COUNT = 2          # massimo numero di add-on
-ADD_ON_NOTIONAL_MULT = 0.50   # ogni add-on = 50% del notional iniziale
-ADD_ON_MIN_GAP_SEC = 300      # almeno 5m tra add-on
-MIN_HOLDING_MINUTES = 5           # tempo minimo prima di accettare exit/trailing
-TRAILING_ENABLED = True           # per disattivare tutta la logica trailing
-MIN_SL_PCT = 0.010                # SL minimo = 1% del prezzo (se ATR troppo piccolo)
-MAX_NEW_POSITIONS_PER_CYCLE = 2   # massimo ingressi per ciclo di scansione
-USE_DYNAMIC_ASSET_LIST = True      # Fase 2: se True sostituirà ASSETS dinamicamente
-USE_SAFE_ORDER_BUY   = False        # Fase 3: se True userà safe_market_buy() al posto di market_buy_qty()
-LARGE_CAP_MIN_NOTIONAL_MULT = 1.10  # quanto sopra il notional minimo per tentativo large cap
-LARGE_CAP_LIMIT_SLIPPAGE    = 0.0015  # 0.15% sopra last price per LIMIT IOC (fill immediato)
+ADD_ON_TRIGGER_R = 1.2                      # attiva primo add-on se MFE ≥ 1.2R
+ADD_ON_STEP_R   = 0.8                       # ogni ulteriore add-on ogni +0.8R di MFE
+ADD_ON_MAX_COUNT = 2                        # massimo numero di add-on
+ADD_ON_NOTIONAL_MULT = 0.50                 # ogni add-on = 50% del notional iniziale
+ADD_ON_MIN_GAP_SEC = 300                    # almeno 5m tra add-on
+MIN_HOLDING_MINUTES = 5                     # tempo minimo prima di accettare exit/trailing
+TRAILING_ENABLED = True                     # per disattivare tutta la logica trailing
+MIN_SL_PCT = 0.010                          # SL minimo = 1% del prezzo (se ATR troppo piccolo)
+MAX_NEW_POSITIONS_PER_CYCLE = 2             # massimo ingressi per ciclo di scansione
+USE_DYNAMIC_ASSET_LIST = True               # Fase 2: se True sostituirà ASSETS dinamicamente
+USE_SAFE_ORDER_BUY   = False                # Fase 3: se True userà safe_market_buy() al posto di market_buy_qty()
+LARGE_CAP_MIN_NOTIONAL_MULT = 1.10          # quanto sopra il notional minimo per tentativo large cap
+LARGE_CAP_LIMIT_SLIPPAGE    = 0.0015        # 0.15% sopra last price per LIMIT IOC (fill immediato)
 ENFORCE_DIVERGENCE_CHECK = False
-DIVERGENCE_MAX_PCT = 0.05   # 5% sul testnet
+DIVERGENCE_MAX_PCT = 0.05           # 5% sul testnet
 EXCLUDE_LOW_PRICE    = True         # Se True (fase 1) solo DRY-RUN (non modifica ASSETS)
 PRICE_MIN_ACTIVE     = 0.01         # Soglia prezzo per esclusione preventiva (dry-run ora)
 DYNAMIC_ASSET_MIN_VOLUME = 500000   # Filtro volume quote (USDT)
@@ -1526,11 +1529,19 @@ while True:
 
             info = get_instrument_info(symbol)
             qty_step = info.get("qty_step", 0.01)
+            # Usa min_qty reale; se mancante, deriva da min_order_amt
             min_qty = info.get("min_qty", 0.0)
-            if live_price > 20 and min_qty <= 0.01:
-                min_qty = max(min_qty, 1.0)
             min_order_amt = info.get("min_order_amt", 5)
-
+            if not min_qty or min_qty <= 0:
+                min_qty = min_order_amt / live_price
+            # Se (min_qty * prezzo) < min_order_amt, riallinea al notional minimo
+            if (min_qty * live_price) < min_order_amt:
+                step_dec = Decimal(str(qty_step))
+                needed_qty = Decimal(str(min_order_amt / live_price))
+                needed_qty = (needed_qty // step_dec) * step_dec
+                if needed_qty > Decimal(str(min_qty)):
+                    min_qty = float(needed_qty)
+            
             step_dec = Decimal(str(qty_step))
             qty_dec = Decimal(str(qty_risk))
             qty_adj = (qty_dec // step_dec) * step_dec
@@ -1567,8 +1578,7 @@ while True:
             # CAP notional (strength & globale)
             strength = STRATEGY_STRENGTH.get(strategy, 0.5)
             cap_strength = equity * strength
-            cap_global = 250.0
-            max_notional = min(cap_strength, cap_global, equity)
+            max_notional = min(cap_strength, CAP_GLOBAL_USD, equity)
             if order_amount > max_notional:
                 qty_adj = Decimal(str(max_notional / live_price))
                 qty_adj = (qty_adj // step_dec) * step_dec
