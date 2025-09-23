@@ -22,49 +22,49 @@ SECRET = BYBIT_API_SECRET
 BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
 BYBIT_BASE_URL = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
-MIN_BALANCE_USDT = 20.0  # prima 50.0
-SAFETY_AVAILABLE_PCT = 0.97       # Usa max 97% del saldo disponibile
-MARKET_COST_BUFFER_PCT = 0.0025   # 0.25% buffer (fee + micro slippage) per pre-check MARKET
-ALLOW_SUB_MIN_BALANCE_ENTRY = True    # consente ingresso se saldo < MIN_BALANCE_USDT ma >= min_order_amt
-SYNC_BACKFILL_HOLDING_EXEMPT = True   # posizioni sincronizzate esentate da holding minimo per exit/trailing
-LARGE_ASSETS = {"BTCUSDT", "ETHUSDT", "SOLUSDT"}  # gruppo large cap
+MIN_BALANCE_USDT = 20.0                             # prima 50.0
+SAFETY_AVAILABLE_PCT = 0.97                         # Usa max 97% del saldo disponibile
+MARKET_COST_BUFFER_PCT = 0.0025                     # 0.25% buffer (fee + micro slippage) per pre-check MARKET
+ALLOW_SUB_MIN_BALANCE_ENTRY = True                  # consente ingresso se saldo < MIN_BALANCE_USDT ma >= min_order_amt
+SYNC_BACKFILL_HOLDING_EXEMPT = True                 # posizioni sincronizzate esentate da holding minimo per exit/trailing
+LARGE_ASSETS = {"BTCUSDT", "ETHUSDT", "SOLUSDT"}    # gruppo large cap
 EXTENSION_ATR_MULT_BASE = 1.2
-EXTENSION_ATR_MULT_LARGE = 1.5  # large cap più permissive
-TREND_MIN_RATIO = 0.985        # prima 0.995
-SECONDARY_RATIO = 0.970        # prima 0.980
+EXTENSION_ATR_MULT_LARGE = 1.5                      # large cap più permissive
+TREND_MIN_RATIO = 0.985                             # prima 0.995
+SECONDARY_RATIO = 0.970                             # prima 0.980
 COUNTER_TREND_MIN_RATIO = 0.950
 REVERSAL_MIN_RATIO = 0.940
 ENABLE_COUNTER_TREND = True
 ENABLE_REVERSAL_BB = True
 
-COUNTER_SLOPE_EPS = 0.0005          # tolleranza slope ema20 (già usata prima se la vorrai integrare)
-TRAILING_ACTIVATION_R = 1.5         # (modificato: prima 2.0)
-TRAILING_LOCK_R = 0.8               # (modificato: prima 1.0)
+COUNTER_SLOPE_EPS = 0.0005                          # tolleranza slope ema20 (già usata prima se la vorrai integrare)
+TRAILING_ACTIVATION_R = 1.5                         # (modificato: prima 2.0)
+TRAILING_LOCK_R = 0.8                               # (modificato: prima 1.0)
 TRAILING_TP_ENABLE = True
-TRAILING_TP_TRIGGER_R = 1.8      # attiva TP dinamico dopo aver toccato almeno questo R
-TRAILING_TP_GAP_R   = 0.9        # TP = p_max - GAP_R * risk
-TRAILING_TP_MIN_LOCK_R = 1.4     # finché non supera questo R non alzare il TP sopra il TP originale
+TRAILING_TP_TRIGGER_R = 1.8                         # attiva TP dinamico dopo aver toccato almeno questo R
+TRAILING_TP_GAP_R   = 0.9                           # TP = p_max - GAP_R * risk
+TRAILING_TP_MIN_LOCK_R = 1.4                        # finché non supera questo R non alzare il TP sopra il TP originale
 
 # Pullback + Giveback nuova logica
 ENABLE_PULLBACK_EMA20 = True
-PULLBACK_MAX_RATIO = 0.985          # entro area “sana” (sotto il primary)
+PULLBACK_MAX_RATIO = 0.985                          # entro area “sana” (sotto il primary)
 PULLBACK_MIN_RATIO = COUNTER_TREND_MIN_RATIO
-PULLBACK_ATR_PENETRATION = 0.20     # quanto sotto ema20 (Close precedente) consideriamo valido (in ATR)
-PULLBACK_LOW_PENETRATION = 0.30     # alternativa via Low precedente
-PULLBACK_MIN_RSI = 45               # conferma momentum base
+PULLBACK_ATR_PENETRATION = 0.20                     # quanto sotto ema20 (Close precedente) consideriamo valido (in ATR)
+PULLBACK_LOW_PENETRATION = 0.30                     # alternativa via Low precedente
+PULLBACK_MIN_RSI = 45                               # conferma momentum base
 
 # Giveback exit
 ENABLE_GIVEBACK_EXIT = True
-GIVEBACK_MIN_MFE_R = 1.2            # attivo solo se ha toccato almeno 1.2R
-GIVEBACK_DROP_R = 0.6               # restituisce ≥0.6R dal massimo ⇒ exit
-COUNTER_OVERRIDE_RSI = 48           # RSI sopra questa soglia abilita override momentum nel counter-trend
+GIVEBACK_MIN_MFE_R = 1.2                            # attivo solo se ha toccato almeno 1.2R
+GIVEBACK_DROP_R = 0.6                               # restituisce ≥0.6R dal massimo ⇒ exit
+COUNTER_OVERRIDE_RSI = 48                           # RSI sopra questa soglia abilita override momentum nel counter-trend
 EARLY_EXIT_ENABLE = True
-EARLY_EXIT_MIN_R = 0.8          # minimo R raggiunto per considerare uscita anticipata
-EARLY_EXIT_RSIFALL = 48         # se RSI scende sotto questa soglia dopo aver superato 55
-EARLY_EXIT_REQUIRE_EMA20 = True # richiedi che il prezzo sia < ema20 (altrimenti solo MACD non basta)
+EARLY_EXIT_MIN_R = 0.8                              # minimo R raggiunto per considerare uscita anticipata
+EARLY_EXIT_RSIFALL = 48                             # se RSI scende sotto questa soglia dopo aver superato 55
+EARLY_EXIT_REQUIRE_EMA20 = True                     # richiedi che il prezzo sia < ema20 (altrimenti solo MACD non basta)
 
 STALE_DATA_MAX_HOURS = 2
-INVERSION_HEURISTIC_MINUTES = 120  # 2 ore (coerente con staleness)
+INVERSION_HEURISTIC_MINUTES = 120                   # 2 ore (coerente con staleness)
 
 STRATEGY_STRENGTH = {
     "Breakout Bollinger": 1.0,
@@ -425,6 +425,7 @@ def market_sell(symbol: str, qty: float):
                 new_qty_str = _format_qty_with_step(qty_work, next_step)
                 try:
                     qty_work = float(new_qty_str)
+                    qty_step = float(next_step)
                 except:
                     log(f"[SELL-RETRY][{symbol}] parsing qty fallito ({new_qty_str})")
                 log(f"[SELL-RETRY][{symbol}] passo {used_step_now} → {next_step} qty→{new_qty_str}")
@@ -629,11 +630,23 @@ def execute_buy_order(symbol: str, qty_dec: Decimal, prefer_limit: bool,
             break
 
         if rc == 170140:  # Notional basso
+            raw = requests.get(
+                f"{BYBIT_BASE_URL}/v5/market/instruments-info",
+                params={"category": "spot", "symbol": symbol},
+                timeout=10
+            ).json()
+            log(f"[DEBUG-170140][{symbol}] RAW_INSTR={raw}")
+
             log(f"[RETRY][{symbol}] 170140 (notional basso) → refresh & escalation")
             # Invalida cache e ricarica info reali
             _instrument_cache.pop(symbol, None)
             info = get_instrument_info(symbol)
             real_min = info.get("min_order_amt", min_order_amt)
+            real_min_qty = info.get("min_qty", 0.0)
+            # Considera anche vincolo quantità * prezzo
+            limit_needed = real_min_qty * limit_price
+            if limit_needed > real_min:
+                real_min = limit_needed
             # Se dopo il primo tentativo ancora fallisce e sembriamo già ≥ real_min, escaliamo
             if attempt >= 2 and (float(qty_aligned) * limit_price) >= real_min * 0.95:
                 real_min = max(real_min * 2, 10)
@@ -688,6 +701,7 @@ def execute_buy_order(symbol: str, qty_dec: Decimal, prefer_limit: bool,
             if not next_step:
                 next_step = escalation[-1]
             step_dec = Decimal(str(next_step))
+            qty_step = float(next_step)
             qty_aligned = (qty_aligned // step_dec) * step_dec
             log(f"[RETRY][{symbol}] passo {used_step_now} → {next_step} qty→{qty_aligned}")
             continue
@@ -1513,6 +1527,8 @@ while True:
             info = get_instrument_info(symbol)
             qty_step = info.get("qty_step", 0.01)
             min_qty = info.get("min_qty", 0.0)
+            if live_price > 20 and min_qty <= 0.01:
+                min_qty = max(min_qty, 1.0)
             min_order_amt = info.get("min_order_amt", 5)
 
             step_dec = Decimal(str(qty_step))
