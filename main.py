@@ -40,6 +40,10 @@ ENABLE_REVERSAL_BB = True
 COUNTER_SLOPE_EPS = 0.0005          # tolleranza slope ema20 (già usata prima se la vorrai integrare)
 TRAILING_ACTIVATION_R = 1.5         # (modificato: prima 2.0)
 TRAILING_LOCK_R = 0.8               # (modificato: prima 1.0)
+TRAILING_TP_ENABLE = True
+TRAILING_TP_TRIGGER_R = 1.8      # attiva TP dinamico dopo aver toccato almeno questo R
+TRAILING_TP_GAP_R   = 0.9        # TP = p_max - GAP_R * risk
+TRAILING_TP_MIN_LOCK_R = 1.4     # finché non supera questo R non alzare il TP sopra il TP originale
 
 # Pullback + Giveback nuova logica
 ENABLE_PULLBACK_EMA20 = True
@@ -117,6 +121,7 @@ DYNAMIC_ASSET_MIN_VOLUME = 500000   # Filtro volume quote (USDT)
 MAX_DYNAMIC_ASSETS   = 25           # Limite massimo asset dinamici
 DYNAMIC_REFRESH_MIN  = 30           # Ogni X minuti (fase 2)
 RECONCILE_INTERVAL_SEC = 60         # ogni 60s verifica posizioni fantasma / nuove manuali
+LAST_DYNAMIC_REFRESH = 0            # evita NameError se init dinamico non setta il valore
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
@@ -968,6 +973,7 @@ def sync_positions_from_wallet():
             "qty": qty,
             "entry_time": time.time(),
             "trailing_active": False,
+            "trailing_tp_active": False,
             "p_max": price,
             "mfe": 0.0,
             "mae": 0.0,
@@ -1069,6 +1075,7 @@ def reconcile_positions():
             "qty": qty,
             "entry_time": now,
             "trailing_active": False,
+            "trailing_tp_active": False,
             "p_max": price,
             "mfe": 0.0,
             "mae": 0.0,
@@ -1273,20 +1280,31 @@ while True:
             existing_qty = get_free_qty(symbol, quiet_missing=True)
             if existing_qty > 0 and symbol not in open_positions:
                 log(f"[HAVE_BALANCE][{symbol}] Saldo già presente ({existing_qty}) → registro posizione senza comprare.")
+                pack = _compute_atr_and_risk(symbol, price)
+                if not pack:
+                    fallback = price * MIN_SL_PCT
+                    pack = {
+                        "risk_per_unit": fallback,
+                        "sl": price - fallback,
+                        "initial_sl": price - fallback,
+                        "tp": price + fallback * TP_R_MULT
+                    }
                 position_data[symbol] = {
                     "entry_price": price,
-                    "tp": None,
-                    "sl": None,
-                    "initial_sl": None,
-                    "risk_per_unit": None,
+                    "tp": pack["tp"],
+                    "sl": pack["sl"],
+                    "initial_sl": pack["initial_sl"],
+                    "risk_per_unit": pack["risk_per_unit"],
                     "entry_cost": existing_qty * price,
                     "qty": existing_qty,
                     "entry_time": time.time(),
                     "trailing_active": False,
+                    "trailing_tp_active": False,
                     "p_max": price,
                     "mfe": 0.0,
                     "mae": 0.0,
-                    "used_risk": 0.0
+                    "used_risk": pack["risk_per_unit"] * existing_qty,
+                    "synced": True
                 }
                 open_positions.add(symbol)
                 continue
@@ -1483,10 +1501,12 @@ while True:
                 "qty": qty_filled,
                 "entry_time": time.time(),
                 "trailing_active": False,
+                "trailing_tp_active": False,
                 "p_max": entry_price,
                 "mfe": 0.0,
                 "mae": 0.0,
-                "used_risk": used_risk
+                "used_risk": used_risk,
+                "synced": False
             }
             open_positions.add(symbol)
             new_positions_this_cycle += 1
@@ -1679,6 +1699,23 @@ while True:
 
             # propone nuovo SL seguendo (TRAIL_LOCK_FACTOR * risk) sotto il massimo
             target_sl = entry["p_max"] - (risk * TRAIL_LOCK_FACTOR)
+
+            if TRAILING_TP_ENABLE:
+                r_now = (current_price - entry_price) / risk
+                if (not entry.get("trailing_tp_active")) and entry["mfe"] >= TRAILING_TP_TRIGGER_R:
+                    entry["trailing_tp_active"] = True
+                    log(f"🟢 Trailing TP attivo {symbol} (MFE {entry['mfe']:.2f}R ≥ {TRAILING_TP_TRIGGER_R}R)")
+                if entry.get("trailing_tp_active"):
+                    # Calcolo TP dinamico
+                    dyn_tp = entry["p_max"] - (TRAILING_TP_GAP_R * risk)
+                    # Non abbassare sotto TP originale finché non sopra soglia lock
+                    if entry["mfe"] < TRAILING_TP_MIN_LOCK_R:
+                        dyn_tp = max(dyn_tp, entry["tp"])
+                    if dyn_tp > entry["tp"]:
+                        old_tp = entry["tp"]
+                        entry["tp"] = dyn_tp
+                        log(f"📈 TP trail {symbol}: {old_tp:.6f} → {entry['tp']:.6f}")
+
             # mai scendere sotto lock iniziale (entry + TRAILING_LOCK_R*R)
             min_lock = entry_price + (risk * TRAILING_LOCK_R)
             if target_sl < min_lock:
