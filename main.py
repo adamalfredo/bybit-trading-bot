@@ -1177,20 +1177,25 @@ def setup_gspread():
     return client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
 
 # Salva una riga nel foglio
-def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
+def log_trade_to_google(symbol, entry_price, exit_price, pnl_pct, strategy, result_type,
+                        usdt_entry=None, usdt_exit=None):
+    """
+    Registra trade sul foglio Google.
+    Colonne: Timestamp | Symbol | Entry | Exit | PnL % | Strategia | Tipo | USDT Enter | USDT Exit | Delta USD
+    """
     try:
         import base64
 
         SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"
         SHEET_NAME = "Foglio1"
 
-        # Decodifica la variabile base64 in file temporaneo
         encoded = os.getenv("GSPREAD_CREDS_B64")
         if not encoded:
             log("❌ Variabile GSPREAD_CREDS_B64 non trovata")
             return
 
-        creds_path = "/tmp/gspread-creds.json"
+        # Path portabile anche su Windows
+        creds_path = os.path.join(os.getcwd(), "gspread-creds-runtime.json")
         with open(creds_path, "wb") as f:
             f.write(base64.b64decode(encoded))
 
@@ -1198,14 +1203,26 @@ def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type):
         creds = Credentials.from_service_account_file(creds_path, scopes=scope)
         client = gspread.authorize(creds)
         sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
+
+        # Se non forniti li calcoliamo come fallback (ma meglio passarli)
+        if usdt_entry is None:
+            usdt_entry = entry_price
+        if usdt_exit is None:
+            usdt_exit = exit_price
+        delta_usd = usdt_exit - usdt_entry
+
+        # Append row (10 colonne)
         sheet.append_row([
             time.strftime("%Y-%m-%d %H:%M:%S"),
             symbol,
-            round(entry, 6),
-            round(exit, 6),
+            round(entry_price, 6),
+            round(exit_price, 6),
             f"{pnl_pct:.2f}%",
             strategy,
-            result_type
+            result_type,
+            f"{usdt_entry:.2f}",
+            f"{usdt_exit:.2f}",
+            f"{delta_usd:.2f}"
         ])
     except Exception as e:
         log(f"❌ Errore log su Google Sheets: {e}")
@@ -1559,7 +1576,9 @@ while True:
                     price,
                     pnl,
                     f"{strategy} | R={r_multiple:.2f} | MFE={mfe:.2f} | MAE={mae:.2f}",
-                    "Exit Signal"
+                    "Exit Signal",
+                    entry_cost,
+                    exit_value
                 )
                 open_positions.discard(symbol)
                 last_exit_time[symbol] = time.time()
@@ -1617,9 +1636,16 @@ while True:
                             r_mult = (fill_price - entry_price) / risk
                             log(f"⚡ Early Exit {symbol} @ {fill_price:.6f} | R={r_mult:.2f} | MFE={entry['mfe']:.2f}R | MACD flip | RSI={rsi_val:.1f}")
                             notify_telegram(f"⚡ Early Exit {symbol} @ {fill_price:.6f}\nR={r_mult:.2f} MFE={entry['mfe']:.2f}R\nRSI={rsi_val:.1f} MACD flip")
-                            log_trade_to_google(symbol, entry_price, fill_price, pnl_pct,
-                                                f"EarlyExit | MFE={entry['mfe']:.2f}R | MACDflip",
-                                                "Early Exit")
+                            log_trade_to_google(
+                                symbol,
+                                entry_price,
+                                fill_price,
+                                pnl_pct,
+                                f"EarlyExit | MFE={entry['mfe']:.2f}R | MACDflip",
+                                "Early Exit",
+                                entry["entry_cost"],
+                                fill_price * qty
+                            )
                             open_positions.discard(symbol)
                             last_exit_time[symbol] = time.time()
                             position_data.pop(symbol, None)
@@ -1640,9 +1666,16 @@ while True:
                             r_mult = (fill_price - entry_price) / risk
                             log(f"↩️ Giveback Exit {symbol} @ {fill_price:.6f} | Drop {giveback:.2f}R | R={r_mult:.2f} | MFE={entry['mfe']:.2f}R")
                             notify_telegram(f"↩️ Giveback Exit {symbol} @ {fill_price:.6f}\nDrop {giveback:.2f}R | R={r_mult:.2f}\nMFE={entry['mfe']:.2f}R")
-                            log_trade_to_google(symbol, entry_price, fill_price, pnl_pct,
-                                                f"Giveback | MFE={entry['mfe']:.2f}R Drop={giveback:.2f}R",
-                                                "Giveback Exit")
+                            log_trade_to_google(
+                                symbol,
+                                entry_price,
+                                fill_price,
+                                pnl_pct,
+                                f"Giveback | MFE={entry['mfe']:.2f}R Drop={giveback:.2f}R",
+                                "Giveback Exit",
+                                entry["entry_cost"],
+                                fill_price * qty
+                            )
                             open_positions.discard(symbol)
                             last_exit_time[symbol] = time.time()
                             position_data.pop(symbol, None)
@@ -1660,7 +1693,16 @@ while True:
                     r_mult = (fill_price - entry_price) / risk
                     log(f"🎯 TP {symbol} @ {fill_price:.6f} | PnL {pnl_pct:.2f}% | R={r_mult:.2f} | MFE={entry['mfe']:.2f}R | MAE={entry['mae']:.2f}R")
                     notify_telegram(f"🎯 TP {symbol} @ {fill_price:.6f}\nPnL: {pnl_pct:.2f}% | R={r_mult:.2f}\nMFE={entry['mfe']:.2f}R MAE={entry['mae']:.2f}R")
-                    log_trade_to_google(symbol, entry_price, fill_price, pnl_pct, f"TP | R={r_mult:.2f} | MFE={entry['mfe']:.2f} | MAE={entry['mae']:.2f}", "TP Hit")
+                    log_trade_to_google(
+                        symbol,
+                        entry_price,
+                        fill_price,
+                        pnl_pct,
+                        f"TP | R={r_mult:.2f} | MFE={entry['mfe']:.2f} | MAE={entry['mae']:.2f}",
+                        "TP Hit",
+                        entry["entry_cost"],
+                        fill_price * qty
+                    )
                     open_positions.discard(symbol)
                     last_exit_time[symbol] = time.time()
                     position_data.pop(symbol, None)
@@ -1737,7 +1779,16 @@ while True:
                         r_mult = (fill_price - entry_price) / risk
                         log(f"🔻 Trailing Stop {symbol} @ {fill_price:.6f} | PnL {pnl_pct:.2f}% | R={r_mult:.2f} | MFE={entry['mfe']:.2f}R | MAE={entry['mae']:.2f}R")
                         notify_telegram(f"🔻 Trailing Stop {symbol} @ {fill_price:.6f}\nPnL: {pnl_pct:.2f}% | R={r_mult:.2f}\nMFE={entry['mfe']:.2f}R MAE={entry['mae']:.2f}R")
-                        log_trade_to_google(symbol, entry_price, fill_price, pnl_pct, f"Trailing | R={r_mult:.2f} | MFE={entry['mfe']:.2f} | MAE={entry['mae']:.2f}", "SL Triggered")
+                        log_trade_to_google(
+                            symbol,
+                            entry_price,
+                            fill_price,
+                            pnl_pct,
+                            f"Trailing | R={r_mult:.2f} | MFE={entry['mfe']:.2f} | MAE={entry['mae']:.2f}",
+                            "SL Triggered",
+                            entry["entry_cost"],
+                            fill_price * qty
+                        )
                         open_positions.discard(symbol)
                         last_exit_time[symbol] = time.time()
                         position_data.pop(symbol, None)
