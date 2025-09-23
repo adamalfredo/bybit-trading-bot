@@ -173,11 +173,12 @@ _instrument_cache = {}
 
 def get_instrument_info(symbol: str) -> dict:
     """
-    Restituisce info strumento con cache 5 minuti per ridurre chiamate ripetute.
+    Info strumento con cache 5m.
+    Fallback conservativo: qty_step=0.01, min_order_amt=10 per evitare 170137/170140 ripetitivi.
     """
     now = time.time()
     cached = _instrument_cache.get(symbol)
-    if cached and (now - cached["ts"] < 300):  # 300s = 5 minuti
+    if cached and (now - cached["ts"] < 300):
         return cached["data"]
 
     url = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
@@ -186,11 +187,32 @@ def get_instrument_info(symbol: str) -> dict:
         resp = requests.get(url, params=params, timeout=10)
         data = resp.json()
         if data.get("retCode") != 0:
-            log(f"❌ Errore fetch info strumento {symbol}: {data.get('retMsg')}")
-            return {}
+            log(f"❌ get_instrument_info retCode {data.get('retCode')} {data.get('retMsg')} → fallback {symbol}")
+            parsed = {
+                "min_qty": 0.01,
+                "qty_step": 0.01,
+                "precision": 4,
+                "tick_size": 0.01,
+                "min_order_amt": 10.0,
+                "max_order_qty": None,
+                "max_order_amt": None
+            }
+            _instrument_cache[symbol] = {"data": parsed, "ts": now}
+            return parsed
         lst = data.get("result", {}).get("list", [])
         if not lst:
-            return {}
+            log(f"❌ get_instrument_info lista vuota → fallback {symbol}")
+            parsed = {
+                "min_qty": 0.01,
+                "qty_step": 0.01,
+                "precision": 4,
+                "tick_size": 0.01,
+                "min_order_amt": 10.0,
+                "max_order_qty": None,
+                "max_order_amt": None
+            }
+            _instrument_cache[symbol] = {"data": parsed, "ts": now}
+            return parsed
         info = lst[0]
         lot = info.get("lotSizeFilter", {})
         price_filter = info.get("priceFilter", {})
@@ -199,20 +221,35 @@ def get_instrument_info(symbol: str) -> dict:
             tick_size = float(tick_size_raw)
         except:
             tick_size = 0.01
+        qty_step_raw = lot.get("qtyStep", "0.01") or "0.01"
+        try:
+            qty_step = float(qty_step_raw)
+        except:
+            qty_step = 0.01
         parsed = {
             "min_qty": float(lot.get("minOrderQty", 0) or 0),
-            "qty_step": float(lot.get("qtyStep", 0.0001) or 0.0001),
+            "qty_step": qty_step,
             "precision": int(info.get("priceScale", 4) or 4),
             "tick_size": tick_size,
-            "min_order_amt": float(info.get("minOrderAmt", 5) or 5),
+            "min_order_amt": float(info.get("minOrderAmt", 10) or 10),
             "max_order_qty": float(lot.get("maxOrderQty")) if lot.get("maxOrderQty") else None,
             "max_order_amt": float(lot.get("maxOrderAmt")) if lot.get("maxOrderAmt") else None
         }
         _instrument_cache[symbol] = {"data": parsed, "ts": now}
         return parsed
     except Exception as e:
-        log(f"❌ Errore get_instrument_info {symbol}: {e}")
-        return {}
+        log(f"❌ Errore get_instrument_info eccezione → fallback {symbol}: {e}")
+        parsed = {
+            "min_qty": 0.01,
+            "qty_step": 0.01,
+            "precision": 4,
+            "tick_size": 0.01,
+            "min_order_amt": 10.0,
+            "max_order_qty": None,
+            "max_order_amt": None
+        }
+        _instrument_cache[symbol] = {"data": parsed, "ts": now}
+        return parsed
     
 def is_symbol_supported(symbol: str) -> bool:
     info = get_instrument_info(symbol)
@@ -297,7 +334,7 @@ def market_sell(symbol: str, qty: float):
         return
 
     info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.0001)
+    qty_step = info.get("qty_step", 0.01)
     min_order_amt = info.get("min_order_amt", 5)
     min_qty = info.get("min_qty", qty_step)
 
@@ -312,6 +349,8 @@ def market_sell(symbol: str, qty: float):
     max_attempts = 4
     attempt = 1
     qty_work = safe_qty
+
+    log(f"[SELL-INIT][{symbol}] safe_qty={safe_qty} qty_step={qty_step} min_order_amt={min_order_amt}")
 
     while attempt <= max_attempts:
         qty_str = _format_qty_by_step(symbol, qty_work)
@@ -361,13 +400,13 @@ def market_sell(symbol: str, qty: float):
 
             # Troppi decimali
             if ret == 170137 or "too many decimals" in msg:
-                log(f"[SELL-RETRY][{symbol}] Troppi decimali / quantizzazione errata → refresh info & riduco qty marginalmente")
-                # Invalida cache strumento e ricarica
+                log(f"[SELL-RETRY][{symbol}] 170137 → escalation passo")
                 _instrument_cache.pop(symbol, None)
                 info = get_instrument_info(symbol)
-                qty_step = info.get("qty_step", qty_step)
-                # Riduci lievemente la qty (0.5 * passo) per sicurezza
-                step_dec = Decimal(str(qty_step))
+                new_step = info.get("qty_step", 0.01)
+                if new_step < 0.01:
+                    new_step = 0.01
+                step_dec = Decimal(str(new_step))
                 qty_work = float((Decimal(str(qty_work)) // step_dec) * step_dec)
                 attempt += 1
                 continue
@@ -422,7 +461,7 @@ def _format_qty_by_step(symbol: str, qty: float) -> str:
       - Restituisce stringa con esatto numero di decimali consentiti
     """
     info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.0001)
+    qty_step = info.get("qty_step", 0.01)
     # Deriva numero decimali da qty_step via Decimal (più affidabile del float formatting)
     step_dec = Decimal(str(qty_step))
     step_decimals = -step_dec.as_tuple().exponent if step_dec.as_tuple().exponent < 0 else 0
@@ -453,17 +492,18 @@ def execute_buy_order(symbol: str, qty_dec: Decimal, prefer_limit: bool,
                       slippage: float = 0.0015, max_retries: int = 3) -> bool:
     """
     Esegue ordine BUY robusto:
-      - Allinea qty a qty_step
+      - Allinea qty a qty_step (fallback 0.01)
       - LIMIT IOC per large cap / prezzo ≥100
-      - Pre-check saldo per MARKET (include buffer)
+      - Pre‑check saldo per MARKET
       - Retry su:
-          170140 (notional basso) → aumenta qty
-          170134 (decimali prezzo) → riduce qty (LIMIT)
-          170131 (insufficient balance) → riduce qty (−10%)
+          170140 (notional basso) → refresh & escalation min_order_amt
+          170134 (decimali prezzo LIMIT) → riduce qty
+          170131 (insufficient balance) → riduce qty
+          170137 (decimali qty) → forza passo ≥0.01 e rifloor
     """
     global LAST_ORDER_RETCODE
     info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.0001)
+    qty_step = info.get("qty_step", 0.01)
     min_order_amt = info.get("min_order_amt", 5)
     tick = info.get("tick_size", 0.01)
     max_order_qty = info.get("max_order_qty")
@@ -474,6 +514,7 @@ def execute_buy_order(symbol: str, qty_dec: Decimal, prefer_limit: bool,
         log(f"❌ execute_buy_order qty iniziale non valida {symbol}")
         return False
 
+    log(f"[BUY-INIT][{symbol}] qty_init={qty_aligned} step={qty_step} min_amt={min_order_amt}")
     for attempt in range(1, max_retries + 1):
         LAST_ORDER_RETCODE = None
         last_price = get_last_price(symbol)
@@ -556,10 +597,27 @@ def execute_buy_order(symbol: str, qty_dec: Decimal, prefer_limit: bool,
         if attempt == max_retries:
             break
 
-        if rc == 170140:  # notional basso → aumenta
-            bump = qty_aligned * Decimal("1.35")
-            qty_aligned = (bump // step_dec) * step_dec
-            log(f"[RETRY][{symbol}] bump qty per notional basso → {qty_aligned}")
+        if rc == 170140:  # Notional basso
+            log(f"[RETRY][{symbol}] 170140 (notional basso) → refresh & escalation")
+            # Invalida cache e ricarica info reali
+            _instrument_cache.pop(symbol, None)
+            info = get_instrument_info(symbol)
+            real_min = info.get("min_order_amt", min_order_amt)
+            # Se dopo il primo tentativo ancora fallisce e sembriamo già ≥ real_min, escaliamo
+            if attempt >= 2 and (float(qty_aligned) * limit_price) >= real_min * 0.95:
+                real_min = max(real_min * 2, 10)
+            min_order_amt = real_min
+            needed = Decimal(str(min_order_amt / limit_price))
+            needed = (needed // step_dec) * step_dec
+            if needed > qty_aligned:
+                qty_aligned = needed
+                log(f"[RETRY][{symbol}] Adeguo qty per nuovo min_notional {min_order_amt:.2f} → {qty_aligned}")
+            else:
+                # fallback: piccolo bump se ancora insufficiente
+                bump = (qty_aligned * Decimal("1.20")) // step_dec * step_dec
+                if bump > qty_aligned:
+                    qty_aligned = bump
+                    log(f"[RETRY][{symbol}] Bump qty fallback → {qty_aligned}")
             continue
 
         if rc == 170134 and prefer_limit:  # decimali prezzo → riduci qty
@@ -576,6 +634,17 @@ def execute_buy_order(symbol: str, qty_dec: Decimal, prefer_limit: bool,
                 break
             qty_aligned = reduced
             log(f"[RETRY][{symbol}] insufficiente balance: qty→{qty_aligned}")
+            continue
+
+        if rc == 170137:
+            log(f"[RETRY][{symbol}] 170137 (decimali qty) → forzo passo ≥0.01 e rifloor")
+            _instrument_cache.pop(symbol, None)
+            info = get_instrument_info(symbol)
+            step_fix = info.get("qty_step", qty_step)
+            if step_fix < 0.01:
+                step_fix = 0.01
+            step_dec = Decimal(str(step_fix))
+            qty_aligned = (qty_aligned // step_dec) * step_dec
             continue
 
         break
@@ -948,6 +1017,8 @@ def sync_positions_from_wallet():
         if sym == "USDT":
             continue
         qty = get_free_qty(sym)
+        # Se vuoi meno log saldo:
+        # qty = get_free_qty(sym, quiet_missing=True)
         if qty <= 0:
             continue
         price = get_last_price(sym)
@@ -1135,7 +1206,7 @@ def try_add_on(symbol: str):
         return
     live_price = current_price
     info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.0001)
+    qty_step = info.get("qty_step", 0.01)
     step_dec = Decimal(str(qty_step))
     add_qty = Decimal(str(add_notional / live_price))
     add_qty = (add_qty // step_dec) * step_dec
@@ -1395,7 +1466,7 @@ while True:
             qty_risk = risk_capital / risk_per_unit
 
             info = get_instrument_info(symbol)
-            qty_step = info.get("qty_step", 0.0001)
+            qty_step = info.get("qty_step", 0.01)
             min_qty = info.get("min_qty", 0.0)
             min_order_amt = info.get("min_order_amt", 5)
 
