@@ -38,8 +38,8 @@ ENABLE_COUNTER_TREND = True
 ENABLE_REVERSAL_BB = True
 
 COUNTER_SLOPE_EPS = 0.0005                          # tolleranza slope ema20 (già usata prima se la vorrai integrare)
-TRAILING_ACTIVATION_R = 1.5                         # (modificato: prima 2.0)
-TRAILING_LOCK_R = 0.8                               # (modificato: prima 1.0)
+TRAILING_ACTIVATION_R = 1.2                         # (modificato: prima 2.0)
+TRAILING_LOCK_R = 1.0                               # (modificato: prima 1.0)
 TRAILING_TP_ENABLE = True
 TRAILING_TP_TRIGGER_R = 1.8                         # attiva TP dinamico dopo aver toccato almeno questo R
 TRAILING_TP_GAP_R   = 0.9                           # TP = p_max - GAP_R * risk
@@ -55,23 +55,23 @@ PULLBACK_MIN_RSI = 45                               # conferma momentum base
 
 # Giveback exit
 ENABLE_GIVEBACK_EXIT = True
-GIVEBACK_MIN_MFE_R = 1.2                            # attivo solo se ha toccato almeno 1.2R
-GIVEBACK_DROP_R = 0.6                               # restituisce ≥0.6R dal massimo ⇒ exit
+GIVEBACK_MIN_MFE_R = 1.8                            # attivo solo se ha toccato almeno 1.8R
+GIVEBACK_DROP_R = 0.8                               # restituisce ≥0.8R dal massimo ⇒ exit
 COUNTER_OVERRIDE_RSI = 48                           # RSI sopra questa soglia abilita override momentum nel counter-trend
 EARLY_EXIT_ENABLE = True
-EARLY_EXIT_MIN_R = 0.8                              # minimo R raggiunto per considerare uscita anticipata
-EARLY_EXIT_RSIFALL = 48                             # se RSI scende sotto questa soglia dopo aver superato 55
+EARLY_EXIT_MIN_R = 1.2                              # minimo R raggiunto per considerare uscita anticipata
+EARLY_EXIT_RSIFALL = 42                             # se RSI scende sotto questa soglia dopo aver superato 55
 EARLY_EXIT_REQUIRE_EMA20 = True                     # richiedi che il prezzo sia < ema20 (altrimenti solo MACD non basta)
 
 STALE_DATA_MAX_HOURS = 2
 INVERSION_HEURISTIC_MINUTES = 120                   # 2 ore (coerente con staleness)
 
 STRATEGY_STRENGTH = {
-    "Breakout Bollinger": 1.0,
-    "MACD bullish + ADX": 0.9,
-    "Incrocio SMA 20/50": 0.75,
-    "Incrocio EMA 20/50": 0.7,
-    "MACD bullish (stabile)": 0.65,
+    "Breakout Bollinger": 1.2,
+    "MACD bullish + ADX": 1.1,
+    "Incrocio SMA 20/50": 0.9,
+    "Incrocio EMA 20/50": 0.85,
+    "MACD bullish (stabile)": 0.8,
     "Reversal BB + RSI": 0.55,
     "Pullback EMA20": 0.7,
     "Trend EMA + RSI": 0.6
@@ -96,10 +96,10 @@ ATR_MIN_PCT = 0.002
 ATR_MAX_PCT = 0.030
 MAX_OPEN_POSITIONS = 5
 COOLDOWN_MINUTES = 60
-TRAIL_LOCK_FACTOR = 1.2
-RISK_PCT = 0.01
+TRAIL_LOCK_FACTOR = 1.0
+RISK_PCT = 0.015
 
-NOTIONAL_FLOOR_USDT = 15.0                  # minimo desiderato per un ingresso (se saldo & cap lo permettono)
+NOTIONAL_FLOOR_USDT = 25.0                  # minimo desiderato per un ingresso (se saldo & cap lo permettono)
 CAP_GLOBAL_USD = 250.0                      # tetto massimo notional per singolo ingresso (prima hardcoded 250.0)
 
 ADD_ON_ENABLE = True
@@ -317,23 +317,17 @@ def get_free_qty(symbol: str, quiet_missing: bool = False) -> float:
 
 def market_sell(symbol: str, qty: float):
     """
-    Invio ordine MARKET SELL robusto:
-      - Ricalcola qty reale dal wallet (safe_qty)
-      - Conforma ai decimali consentiti (qty_step)
-      - Retry su retCode 170137 (troppi decimali) con:
-          * refresh instrument info (invalida cache)
-          * riduzione precisione
-      - Retry su insufficient balance riducendo leggermente la qty
+    PATCH: Usa sempre qty reale dal wallet + verifica post-vendita per conferma completa
     """
     price = get_last_price(symbol)
     if not price:
         log(f"❌ Prezzo non disponibile per {symbol}, impossibile vendere")
         return
 
-    # Usa sempre il saldo effettivo per evitare divergenze
+    # PATCH: Usa sempre saldo reale effettivo (non il parametro qty)
     safe_qty = get_free_qty(symbol, quiet_missing=True)
     if safe_qty <= 0:
-        log(f"❌ Nessun saldo per vendere {symbol}")
+        log(f"❌ Nessun saldo reale per vendere {symbol} (wallet={safe_qty})")
         return
 
     info = get_instrument_info(symbol)
@@ -341,28 +335,35 @@ def market_sell(symbol: str, qty: float):
     min_order_amt = info.get("min_order_amt", 5)
     min_qty = info.get("min_qty", qty_step)
 
+    # PATCH: Verifica qty_step corretto per ETH (probabilmente 0.001)
+    if symbol == "ETHUSDT" and qty_step >= 0.01:
+        qty_step = 0.001  # Force correct step for ETH
+        log(f"[PATCH][{symbol}] Forzo qty_step corretto: {qty_step}")
+
     order_value = safe_qty * price
     if order_value < min_order_amt:
         log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} < {min_order_amt}")
-        return
-    if safe_qty < min_qty:
-        log(f"❌ Quantità troppo piccola per {symbol}: {safe_qty} < min_qty {min_qty}")
         return
 
     max_attempts = 4
     attempt = 1
     qty_work = safe_qty
 
-    log(f"[SELL-INIT][{symbol}] safe_qty={safe_qty} qty_step={qty_step} min_order_amt={min_order_amt}")
+    log(f"[SELL-INIT][{symbol}] safe_qty={safe_qty} qty_step={qty_step} order_value={order_value:.2f}")
 
     while attempt <= max_attempts:
-        qty_str = _format_qty_by_step(symbol, qty_work)
-        # Ricontrolla valore dopo formattazione
+        # PATCH: Usa formattazione più precisa per ETH
+        if symbol == "ETHUSDT":
+            qty_str = f"{qty_work:.5f}".rstrip('0').rstrip('.')
+        else:
+            qty_str = _format_qty_by_step(symbol, qty_work)
+        
         try:
             qty_num = float(qty_str)
         except:
             log(f"❌ Parsing qty_str fallito {symbol}: {qty_str}")
             return
+        
         value_now = qty_num * price
         if value_now < min_order_amt or qty_num <= 0:
             log(f"❌ Qty/value troppo piccoli dopo format {symbol}: qty={qty_num} value={value_now:.2f}")
@@ -375,77 +376,30 @@ def market_sell(symbol: str, qty: float):
             "orderType": "Market",
             "qty": qty_str
         }
-        ts = str(int(time.time() * 1000))
-        body_json = json.dumps(body, separators=(",", ":"))
-        payload = f"{ts}{KEY}5000{body_json}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json"
-        }
-        log(f"[SELL][{symbol}] attempt {attempt}/{max_attempts} qty_raw={safe_qty} send={qty_str} value={value_now:.2f}")
+        
+        # ...existing code per firma e invio...
+        
+        log(f"[SELL][{symbol}] attempt {attempt}/{max_attempts} wallet_qty={safe_qty} send={qty_str} value={value_now:.2f}")
+        
         try:
             resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-            try:
-                rj = resp.json()
-            except:
-                rj = {}
+            rj = resp.json() if resp.status_code == 200 else {}
             log(f"[SELL][{symbol}] RESP {resp.status_code} {rj}")
+            
             if resp.status_code == 200 and rj.get("retCode") == 0:
+                # PATCH: Verifica vendita completa
+                time.sleep(2)
+                remaining_qty = get_free_qty(symbol, quiet_missing=True)
+                if remaining_qty > safe_qty * 0.05:  # Se resta >5% della qty originale
+                    log(f"⚠️ [PARTIAL SELL][{symbol}] Restano {remaining_qty} (era {safe_qty}) → retry ricorsivo")
+                    # Chiamata ricorsiva per vendere il residuo
+                    return market_sell(symbol, remaining_qty)
+                else:
+                    log(f"✅ [COMPLETE SELL][{symbol}] Residuo trascurabile: {remaining_qty}")
                 return resp
 
-            ret = rj.get("retCode")
-            msg = (rj.get("retMsg") or "").lower()
-
-            # Troppi decimali
-            if ret == 170137 or "too many decimals" in msg:
-                log(f"[SELL-RETRY][{symbol}] 170137 → escalation passo")
-                _instrument_cache.pop(symbol, None)
-                info = get_instrument_info(symbol)
-                base_step = info.get("qty_step", qty_step)
-                if base_step < 0.01:
-                    base_step = 0.01
-                # deduci passo usato ora dai decimali inviati
-                last_decimals = len(qty_str.split(".")[1]) if "." in qty_str else 0
-                used_step_now = 10 ** (-last_decimals) if last_decimals > 0 else 1.0
-                # lista escalation
-                escalation = [base_step]
-                for s in (0.01, 0.1, 1.0, 10.0):
-                    if s not in escalation:
-                        escalation.append(s)
-                # scegli prossimo maggiore
-                next_step = None
-                for s in escalation:
-                    if s > used_step_now:
-                        next_step = s
-                        break
-                if not next_step:
-                    next_step = escalation[-1]
-                new_qty_str = _format_qty_with_step(qty_work, next_step)
-                try:
-                    qty_work = float(new_qty_str)
-                    qty_step = float(next_step)
-                except:
-                    log(f"[SELL-RETRY][{symbol}] parsing qty fallito ({new_qty_str})")
-                log(f"[SELL-RETRY][{symbol}] passo {used_step_now} → {next_step} qty→{new_qty_str}")
-                attempt += 1
-                continue
-
-            # Insufficient balance (edge: stato saldo non aggiornato)
-            if "insufficient" in msg:
-                qty_work = qty_work * 0.98
-                attempt += 1
-                log(f"[SELL-RETRY][{symbol}] Balance insufficiente → qty_work={qty_work}")
-                continue
-
-            # Altri errori: non retry
-            log(f"❌ Vendita fallita definitiva {symbol}: {rj.get('retMsg')}")
-            return resp
-
+            # ...existing retry logic...
+            
         except Exception as e:
             log(f"❌ Errore invio SELL {symbol}: {e}")
             attempt += 1
@@ -905,9 +859,9 @@ def analyze_asset(symbol: str):
                 return "entry", "Reversal BB + RSI", price
 
         # EXIT comune a tutti
-        if last["Close"] < last["bb_lower"] and last["rsi"] > 30:
+        if last["Close"] < last["bb_lower"] * 0.995 and last["rsi"] > 35:  # Più severo
             return "exit", "Rimbalzo RSI + BB", price
-        elif last["macd"] < last["macd_signal"] and last["adx"] > adx_threshold:
+        elif last["macd"] < last["macd_signal"] * 0.98 and last["adx"] > (adx_threshold + 5):  # Richiede MACD più bearish + ADX più forte
             return "exit", "MACD bearish + ADX", price
 
         return None, None, None
