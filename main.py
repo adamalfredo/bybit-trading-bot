@@ -377,7 +377,19 @@ def market_sell(symbol: str, qty: float):
             "qty": qty_str
         }
         
-        # ...existing code per firma e invio...
+        # FIX: Aggiungi generazione headers mancanti
+        ts = str(int(time.time() * 1000))
+        body_json = json.dumps(body, separators=(",", ":"))
+        payload = f"{ts}{KEY}5000{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-SIGN-TYPE": "2",
+            "Content-Type": "application/json"
+        }
         
         log(f"[SELL][{symbol}] attempt {attempt}/{max_attempts} wallet_qty={safe_qty} send={qty_str} value={value_now:.2f}")
         
