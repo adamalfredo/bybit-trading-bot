@@ -175,93 +175,32 @@ def get_last_price(symbol):
         log(f"[BYBIT] Errore get_last_price {symbol}: {e}")
         return None
 
-def get_instrument_info(symbol: str) -> dict:
-    """
-    Info strumento con cache 5m.
-    Fallback conservativo: qty_step=0.01, min_order_amt=10 per evitare 170137/170140 ripetitivi.
-    """
-    now = time.time()
-    # Cache semplice (aggiungi queste variabili globali in alto)
-    global _instrument_cache
-    if '_instrument_cache' not in globals():
-        _instrument_cache = {}
-    
-    cached = _instrument_cache.get(symbol)
-    if cached and (now - cached["ts"] < 300):
-        return cached["data"]
-
+def get_instrument_info(symbol):
     try:
         endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
-        params = {"category": "linear", "symbol": symbol}
+        params = {"category": "linear", "symbol": symbol}  # PATCH: era "spot"
         resp = requests.get(endpoint, params=params, timeout=10)
         data = resp.json()
-        if data.get("retCode") != 0:
-            log(f"❌ get_instrument_info retCode {data.get('retCode')} → fallback {symbol}")
-            parsed = {
-                "min_qty": 0.01,
-                "qty_step": 0.01,
-                "precision": 4,
-                "price_step": 0.01,
-                "min_order_amt": 10.0
+        if data.get("retCode") == 0:
+            info = data["result"]["list"][0]
+            qty_step = float(info.get("lotSizeFilter", {}).get("qtyStep", 0.0001))
+            price_step = float(info.get("priceFilter", {}).get("tickSize", 0.0001))
+            precision = int(info.get("basePrecision", 4))
+            min_order_amt = float(info.get("minOrderAmt", 5))
+            min_qty = float(info.get("lotSizeFilter", {}).get("minOrderQty", 0.0))
+            return {
+                "qty_step": qty_step,
+                "price_step": price_step,
+                "precision": precision,
+                "min_order_amt": min_order_amt,
+                "min_qty": min_qty
             }
-            _instrument_cache[symbol] = {"data": parsed, "ts": now}
-            return parsed
-        
-        lst = data.get("result", {}).get("list", [])
-        if not lst:
-            log(f"❌ get_instrument_info lista vuota → fallback {symbol}")
-            parsed = {
-                "min_qty": 0.01,
-                "qty_step": 0.01,
-                "precision": 4,
-                "price_step": 0.01,
-                "min_order_amt": 10.0
-            }
-            _instrument_cache[symbol] = {"data": parsed, "ts": now}
-            return parsed
-            
-        info = lst[0]
-        lot = info.get("lotSizeFilter", {})
-        price_filter = info.get("priceFilter", {})
-        
-        qty_step_raw = lot.get("qtyStep", "0.01") or "0.01"
-        try:
-            qty_step = float(qty_step_raw)
-        except:
-            qty_step = 0.01
-            
-        parsed = {
-            "min_qty": float(lot.get("minOrderQty", 0) or 0),
-            "qty_step": qty_step,
-            "precision": int(info.get("priceScale", 4) or 4),
-            "price_step": float(price_filter.get("tickSize", "0.01") or "0.01"),
-            "min_order_amt": float(info.get("minOrderAmt", 10) or 10)
-        }
-        _instrument_cache[symbol] = {"data": parsed, "ts": now}
-        return parsed
-        
+        else:
+            log(f"[BYBIT] Errore get_instrument_info {symbol}: {data}")
+            return {"qty_step": 0.0001, "precision": 4, "min_order_amt": 5, "min_qty": 0.0}
     except Exception as e:
-        log(f"❌ Errore get_instrument_info eccezione → fallback {symbol}: {e}")
-        parsed = {
-            "min_qty": 0.01,
-            "qty_step": 0.01,
-            "precision": 4,
-            "price_step": 0.01,
-            "min_order_amt": 10.0
-        }
-        _instrument_cache[symbol] = {"data": parsed, "ts": now}
-        return parsed
-
-def _format_qty_with_step(qty: float, step: float) -> str:
-    step_dec = Decimal(str(step))
-    q = Decimal(str(qty))
-    floored = (q // step_dec) * step_dec
-    step_decimals = -step_dec.as_tuple().exponent if step_dec.as_tuple().exponent < 0 else 0
-    pattern = Decimal('1.' + '0'*step_decimals) if step_decimals > 0 else Decimal('1')
-    floored = floored.quantize(pattern, rounding=ROUND_DOWN)
-    if step_decimals > 0:
-        return f"{floored:.{step_decimals}f}".rstrip('0').rstrip('.') or "0"
-    return f"{int(floored)}"
+        log(f"[BYBIT] Errore get_instrument_info {symbol}: {e}")
+        return {"qty_step": 0.0001, "precision": 4, "min_order_amt": 5, "min_qty": 0.0}
 
 def get_free_qty(symbol):
     if symbol.endswith("USDT") and len(symbol) > 4:
@@ -373,159 +312,84 @@ def market_short(symbol: str, usdt_amount: float):
     if not price:
         log(f"❌ Prezzo non disponibile per {symbol}")
         return None
-    
     safe_usdt_amount = usdt_amount * 0.98
+    qty_str = calculate_quantity(symbol, safe_usdt_amount)
+    if not qty_str:
+        log(f"❌ Quantità non valida per short di {symbol}")
+        return None
     info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.01)  # Fallback conservativo
-    
-    # Calcola quantità iniziale
-    raw_qty = safe_usdt_amount / price
-    step_dec = Decimal(str(qty_step))
-    qty_aligned = (Decimal(str(raw_qty)) // step_dec) * step_dec
-    
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
-        qty_str = _format_qty_with_step(float(qty_aligned), qty_step)
-        
-        body = {
-            "category": "linear",
-            "symbol": symbol,
-            "side": "Sell",
-            "orderType": "Market",
-            "qty": qty_str
-        }
-        
-        # Invio ordine (mantieni la logica esistente)
-        ts = str(int(time.time() * 1000))
-        body_json = json.dumps(body, separators=(",", ":"))
-        payload = f"{ts}{KEY}5000{body_json}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json"
-        }
-        
-        response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"[SHORT][{symbol}] attempt {attempt}/{max_retries} BODY={body_json}")
-        
-        try:
-            resp_json = response.json()
-        except:
-            resp_json = {}
-        
-        log(f"[SHORT][{symbol}] RESP {response.status_code} {resp_json}")
-        
-        if resp_json.get("retCode") == 0:
-            return float(qty_str)
-            
-        # Gestione errori con escalation
-        ret_code = resp_json.get("retCode")
-        if ret_code == 170137:  # Too many decimals
-            log(f"[RETRY][{symbol}] 170137 → escalation passo")
-            # Escalation passo: 0.01 → 0.1 → 1.0
-            if qty_step < 0.1:
-                qty_step = 0.1
-            elif qty_step < 1.0:
-                qty_step = 1.0
-            else:
-                qty_step = 10.0
-            
-            step_dec = Decimal(str(qty_step))
-            qty_aligned = (qty_aligned // step_dec) * step_dec
-            log(f"[RETRY][{symbol}] nuovo passo {qty_step}, qty→{qty_aligned}")
-            continue
-            
-        elif ret_code == 170131:  # Insufficient balance
-            log(f"[RETRY][{symbol}] 170131 → riduco qty del 10%")
-            qty_aligned *= Decimal("0.9")
-            continue
-            
-        else:
-            log(f"[ERROR][{symbol}] Errore non gestito: {ret_code}")
-            break
-    
-    return None
+    min_qty = info.get("min_qty", 0.0)
+    min_order_amt = info.get("min_order_amt", 5)
+    precision = info.get("precision", 4)
+    body = {
+        "category": "linear",
+        "symbol": symbol,
+        "side": "Sell",  # PATCH: apertura short
+        "orderType": "Market",
+        "qty": qty_str
+    }
+    ts = str(int(time.time() * 1000))
+    body_json = json.dumps(body, separators=(",", ":"))
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json"
+    }
+    response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+    log(f"SHORT BODY: {body_json}")
+    try:
+        resp_json = response.json()
+    except Exception:
+        resp_json = {}
+    log(f"RESPONSE: {response.status_code} {resp_json}")
+    # PATCH: restituisci la quantità effettiva shortata se l'ordine è OK
+    if resp_json.get("retCode") == 0:
+        # Bybit non restituisce sempre la qty eseguita, quindi usa qty_str come fallback
+        return float(qty_str)
+    else:
+        return None
 
 def market_cover(symbol: str, qty: float):
     price = get_last_price(symbol)
     if not price:
         log(f"❌ Prezzo non disponibile per {symbol}, impossibile ricoprire")
-        return None
-    
+        return
     info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.01)  # Fallback conservativo
-    
-    # Allinea quantità al passo
-    step_dec = Decimal(str(qty_step))
-    qty_aligned = (Decimal(str(qty)) // step_dec) * step_dec
-    
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
-        qty_str = _format_qty_with_step(float(qty_aligned), qty_step)
-        
-        body = {
-            "category": "linear",
-            "symbol": symbol,
-            "side": "Buy",  # Chiusura short = Buy
-            "orderType": "Market",
-            "qty": qty_str
-        }
-        
-        ts = str(int(time.time() * 1000))
-        body_json = json.dumps(body, separators=(",", ":"))
-        payload = f"{ts}{KEY}5000{body_json}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json"
-        }
-        
-        response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"[COVER][{symbol}] attempt {attempt}/{max_retries} BODY={body_json}")
-        
-        try:
-            resp_json = response.json()
-        except:
-            resp_json = {}
-        
-        log(f"[COVER][{symbol}] RESP {response.status_code} {resp_json}")
-        
-        if resp_json.get("retCode") == 0:
-            return response
-            
-        # Gestione errori con escalation
-        ret_code = resp_json.get("retCode")
-        if ret_code == 170137:  # Too many decimals
-            log(f"[RETRY-COVER][{symbol}] 170137 → escalation passo")
-            if qty_step < 0.1:
-                qty_step = 0.1
-            elif qty_step < 1.0:
-                qty_step = 1.0
-            else:
-                qty_step = 10.0
-            
-            step_dec = Decimal(str(qty_step))
-            qty_aligned = (qty_aligned // step_dec) * step_dec
-            log(f"[RETRY-COVER][{symbol}] nuovo passo {qty_step}, qty→{qty_aligned}")
-            continue
-            
-        elif ret_code == 170131:  # Insufficient balance (non dovrebbe accadere per cover)
-            log(f"[RETRY-COVER][{symbol}] 170131 → problema inaspettato")
-            break
-            
-        else:
-            log(f"[ERROR-COVER][{symbol}] Errore non gestito: {ret_code}")
-            break
-    
-    return None
+    qty_step = info.get("qty_step", 0.0001)
+    precision = info.get("precision", 4)
+    qty_str = format_quantity_bybit(float(qty), float(qty_step), precision=precision)
+    body = {
+        "category": "linear",
+        "symbol": symbol,
+        "side": "Buy",  # PATCH: chiusura short
+        "orderType": "Market",
+        "qty": qty_str
+    }
+    ts = str(int(time.time() * 1000))
+    body_json = json.dumps(body, separators=(",", ":"))
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json"
+    }
+    response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+    log(f"COVER BODY: {body_json}")
+    try:
+        resp_json = response.json()
+    except Exception:
+        resp_json = {}
+    log(f"RESPONSE: {response.status_code} {resp_json}")
+    return response
 
 def fetch_history(symbol: str, interval=15, limit=300):  # <-- aumenta il limit
     """
@@ -623,10 +487,9 @@ def analyze_asset(symbol: str):
         prev = df.iloc[-2]
         price = float(last["Close"])
 
-        # Filtro trend più flessibile: consenti SHORT anche in correzioni moderate
-        trend_ratio = last["ema50"] / last["ema200"]
-        if trend_ratio > 1.02:  # Solo se EMA50 > 2% sopra EMA200
-            log(f"[STRATEGY][{symbol}] Bull market troppo forte, skip SHORT (ratio={trend_ratio:.4f})")
+        # PATCH: filtro trend più rigoroso (solo se EMA50 < EMA200)
+        if last["ema50"] >= last["ema200"]:
+            log(f"[STRATEGY][{symbol}] Filtro trend NON superato (EMA50 >= EMA200): ema50={last['ema50']:.4f} >= ema200={last['ema200']:.4f}")
             return None, None, None
 
         # --- SHORT: condizioni ribassiste ---
@@ -833,7 +696,7 @@ def get_portfolio_value():
     for symbol in ASSETS:
         if symbol == "USDT":
             continue
-        qty = get_open_short_qty(symbol)
+        qty = get_free_qty(symbol)
         if qty and qty > 0:
             price = get_last_price(symbol)
             if price:
@@ -881,25 +744,15 @@ def trailing_stop_worker():
                     if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                         exit_value = current_price * qty
                         delta = exit_value - entry_cost
-                        log_trade_to_google(
-                            symbol, 
-                            entry_price, 
-                            current_price, 
-                            pnl_pct, 
-                            "MAX LOSS", 
-                            "Forced Exit", 
-                            usdt_enter=entry_cost,        # ✅ VALORE investito
-                            usdt_exit=exit_value,         # ✅ VALORE ricevuto
-                            delta_usd=delta               # ✅ DIFFERENZA
-                        )
+                        log_trade_to_google(symbol, entry_price, current_price, pnl_pct, "MAX LOSS", "Forced Exit", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
                         open_positions.discard(symbol)
                         last_exit_time[symbol] = time.time()
                         position_data.pop(symbol, None)
                     continue
             if symbol in VOLATILE_ASSETS:
-                trailing_threshold = 0.02
+                trailing_threshold = 0.03
             else:
-                trailing_threshold = 0.008
+                trailing_threshold = 0.01
             soglia_attivazione = entry["entry_price"] * (1 - trailing_threshold)
             log(f"[TRAILING CHECK][SHORT] {symbol} | entry_price={entry['entry_price']:.4f} | current_price={current_price:.4f} | soglia={soglia_attivazione:.4f} | trailing_active={entry['trailing_active']} | threshold={trailing_threshold}")
             if not entry["trailing_active"] and current_price <= soglia_attivazione:
@@ -912,13 +765,13 @@ def trailing_stop_worker():
                     entry["p_min"] = current_price
                     log(f"⬇️ Nuovo minimo raggiunto per {symbol}: {entry['p_min']:.4f}")
                 # Trailing Take Profit SHORT: se il prezzo risale di X% dal minimo, chiudi la posizione
-                tp_trailing_buffer = 0.008 if symbol in VOLATILE_ASSETS else 0.005  # Più tight
+                tp_trailing_buffer = 0.01  # 1% sopra il minimo raggiunto
                 trailing_tp_price = entry["p_min"] * (1 + tp_trailing_buffer)
                 log(f"[DEBUG][TRAILING_TP] {symbol} | current_price={current_price:.4f} | trailing_tp_price={trailing_tp_price:.4f} | p_min={entry['p_min']:.4f}")
                 if current_price >= trailing_tp_price:
                     log(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
                     notify_telegram(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} a {current_price:.4f}")
-                    qty = get_open_short_qty(symbol)
+                    qty = get_free_qty(symbol)
                     if qty > 0:
                         usdt_before = get_usdt_balance()
                         resp = market_cover(symbol, qty)
@@ -931,17 +784,7 @@ def trailing_stop_worker():
                             pnl = (delta / entry_cost) * 100
                             log(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
                             notify_telegram(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
-                            log_trade_to_google(
-                                symbol, 
-                                entry_price, 
-                                current_price, 
-                                pnl, 
-                                "Trailing TP SHORT", 
-                                "TP Triggered", 
-                                usdt_enter=entry_cost,        # ✅ VALORE investito
-                                usdt_exit=exit_value,         # ✅ VALORE ricevuto  
-                                delta_usd=delta               # ✅ DIFFERENZA
-                            )
+                            log_trade_to_google(symbol, entry_price, current_price, pnl, "Trailing TP SHORT", "TP Triggered", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
                             open_positions.discard(symbol)
                             last_exit_time[symbol] = time.time()
                             position_data.pop(symbol, None)
@@ -961,7 +804,7 @@ def trailing_stop_worker():
                 sl_triggered = True
                 sl_type = "Stop Loss SHORT"
             if sl_triggered:
-                qty = get_open_short_qty(symbol)
+                qty = get_free_qty(symbol)
                 log(f"[TEST][SL_TRIGGER] {symbol} | SL type: {sl_type} | qty: {qty} | current_price: {current_price} | SL: {entry['sl']}")
                 info = get_instrument_info(symbol)
                 min_qty = info.get("min_qty", 0.0)
@@ -984,17 +827,7 @@ def trailing_stop_worker():
                         log(f"[TEST][SL_OK] {symbol} | {sl_type} attivato → Prezzo: {current_price:.4f} | SL: {entry['sl']:.4f} | PnL: {pnl:.2f}%")
                         icon = "🛑" if "Stop Loss" in sl_type else "🔃"
                         notify_telegram(f"{icon} {sl_type} ricoperto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
-                        log_trade_to_google(
-                            symbol, 
-                            entry_price, 
-                            current_price, 
-                            pnl, 
-                            sl_type,                      # "Trailing Stop SHORT" o "Stop Loss SHORT"
-                            "SL Triggered", 
-                            usdt_enter=entry_cost,        # ✅ VALORE investito
-                            usdt_exit=exit_value,         # ✅ VALORE ricevuto
-                            delta_usd=delta               # ✅ DIFFERENZA
-                        )
+                        log_trade_to_google(symbol, entry_price, current_price, pnl, sl_type, "SL Triggered", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
                         open_positions.discard(symbol)
                         last_exit_time[symbol] = time.time()
                         position_data.pop(symbol, None)
@@ -1012,9 +845,8 @@ while True:
     update_assets()
     sync_positions_from_wallet()
     portfolio_value, usdt_balance, coin_values = get_portfolio_value()
-    # SHORT: più conservativo sui volatili, più aggressivo su large cap
-    volatile_budget = portfolio_value * 0.4  # Era 0.7
-    stable_budget = portfolio_value * 0.6    # Era 0.3
+    volatile_budget = portfolio_value * 0.7
+    stable_budget = portfolio_value * 0.3
     volatile_invested = sum(
         coin_values.get(s, 0) for s in open_positions if s in VOLATILE_ASSETS
     )
@@ -1167,69 +999,6 @@ while True:
             notify_telegram(f"🟢📉 SHORT aperto per {symbol}\nPrezzo: {get_last_price(symbol):.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f} USDT\nSL: {sl:.4f}\nTP: {tp:.4f}")
             time.sleep(3)
 
-        # 🔴 USCITA SHORT (EXIT) - INSERISCI QUI
-        elif signal == "exit" and symbol in open_positions:
-            entry = position_data.get(symbol, {})
-            entry_price = entry.get("entry_price", price)
-            entry_cost = entry.get("entry_cost", ORDER_USDT)
-            
-            # Verifica holding time minimo
-            holding_seconds = time.time() - entry.get("entry_time", 0)
-            if holding_seconds < MIN_HOLDING_MINUTES * 60:
-                log(f"[HOLDING][EXIT] {symbol}: attendo ancora {MIN_HOLDING_MINUTES - holding_seconds/60:.1f} min prima di poter ricoprire")
-                continue
-            
-            qty = get_open_short_qty(symbol)
-            log(f"[EXIT-SIGNAL][{symbol}] qty effettiva: {qty} | entry_price: {entry_price} | current_price: {price}")
-            
-            info = get_instrument_info(symbol)
-            min_qty = info.get("min_qty", 0.0)
-            
-            if qty is None or qty < min_qty:
-                log(f"[CLEANUP][EXIT] {symbol}: quantità troppo piccola per ricopertura ({qty} < min_qty {min_qty})")
-                open_positions.discard(symbol)
-                position_data.pop(symbol, None)
-                continue
-            
-            if qty <= 0:
-                log(f"[EXIT-FAIL] Nessuna quantità short effettiva da ricoprire per {symbol}")
-                open_positions.discard(symbol)
-                position_data.pop(symbol, None)
-                continue
-            
-            # Esegui chiusura
-            resp = market_cover(symbol, qty)
-            if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
-                current_price = get_last_price(symbol)
-                exit_value = current_price * qty
-                delta = exit_value - entry_cost
-                pnl = ((entry_price - current_price) / entry_price) * 100  # PnL SHORT corretto
-                
-                log(f"[EXIT-OK] Ricopertura completata per {symbol} | PnL: {pnl:.2f}%")
-                notify_telegram(f"✅ Exit Signal: ricopertura SHORT per {symbol} a {current_price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}%")
-                
-                log_trade_to_google(
-                    symbol, 
-                    entry_price, 
-                    current_price, 
-                    pnl, 
-                    strategy, 
-                    "Exit Signal",
-                    usdt_enter=entry_cost,     # ✅ VALORE USDT investito inizialmente
-                    usdt_exit=exit_value,      # ✅ VALORE USDT ricevuto dalla chiusura
-                    delta_usd=delta            # ✅ DIFFERENZA in USDT
-                )
-                
-                open_positions.discard(symbol)
-                last_exit_time[symbol] = time.time()
-                position_data.pop(symbol, None)
-            else:
-                log(f"[EXIT-FAIL] Ricopertura fallita per {symbol}")
-                try:
-                    log(f"[BYBIT ERROR] status={resp.status_code} resp={resp.json()}")
-                except:
-                    log(f"[BYBIT ERROR] status={resp.status_code} resp=non-json")
-
     # PATCH: rimuovi posizioni con saldo < 1 (polvere) anche nel ciclo principale
     for symbol in list(open_positions):
         saldo = get_open_short_qty(symbol)
@@ -1246,6 +1015,50 @@ while True:
         if holding_seconds < MIN_HOLDING_MINUTES * 60:
             log(f"[HOLDING][EXIT] {symbol}: attendo ancora {MIN_HOLDING_MINUTES - holding_seconds/60:.1f} min prima di poter ricoprire")
             continue
+
+        # 🔴 USCITA SHORT (EXIT)
+        elif signal == "exit" and symbol in open_positions:
+            entry_price = entry.get("entry_price", price)
+            entry_cost = entry.get("entry_cost", ORDER_USDT)
+            qty = get_open_short_qty(symbol)  # PATCH: usa sempre la quantità effettiva short aperta
+            log(f"[TEST][EXIT_SIGNAL] {symbol} | qty effettiva: {qty} | entry_price: {entry_price} | current_price: {price}")
+            notify_telegram(f"[TEST] EXIT_SIGNAL per {symbol}\nQty effettiva: {qty}\nEntry: {entry_price}\nPrezzo attuale: {price}")
+            info = get_instrument_info(symbol)
+            min_qty = info.get("min_qty", 0.0)
+            qty_step = info.get("qty_step", 0.0001)
+            if qty is None or qty < min_qty or qty < qty_step:
+                log(f"[CLEANUP] {symbol}: quantità troppo piccola per ricopertura ({qty} < min_qty {min_qty}), rimuovo da open_positions e position_data (polvere)")
+                open_positions.discard(symbol)
+                position_data.pop(symbol, None)
+                continue
+            if qty <= 0:
+                log(f"[TEST][EXIT_FAIL] Nessuna quantità short effettiva da ricoprire per {symbol}")
+                notify_telegram(f"⚠️ Nessuna quantità short effettiva da ricoprire per {symbol} durante EXIT SIGNAL!")
+                open_positions.discard(symbol)
+                position_data.pop(symbol, None)
+                continue
+            usdt_before = get_usdt_balance()
+            resp = market_cover(symbol, qty)
+            if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+                price = get_last_price(symbol)
+                price = round(price, 6)
+                exit_value = price * qty
+                delta = exit_value - entry_cost
+                pnl = (delta / entry_cost) * 100
+                log(f"[TEST][EXIT_OK] Ricopertura completata per {symbol} | PnL stimato: {pnl:.2f}% | Delta: {delta:.2f}")
+                notify_telegram(f"✅ Exit Signal: ricopertura SHORT per {symbol} a {price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}%")
+                log_trade_to_google(symbol, entry_price, price, pnl, strategy, "Exit Signal", usdt_enter=entry_cost, usdt_exit=exit_value, delta_usd=delta)
+                open_positions.discard(symbol)
+                last_exit_time[symbol] = time.time()
+                position_data.pop(symbol, None)
+            else:
+                saldo_attuale = get_free_qty(symbol)
+                log(f"[EXIT_FAIL] Ricopertura fallita per {symbol}")
+                try:
+                    log(f"[BYBIT SELL ERROR] status={resp.status_code} resp={resp.json()}")
+                except Exception:
+                    log(f"[BYBIT SELL ERROR] status={resp.status_code} resp=??")
+                notify_telegram(f"❌ Ricopertura SHORT NON RIUSCITA per {symbol} durante EXIT SIGNAL!\nSaldo attuale: {saldo_attuale}")
 
     # Sicurezza: attesa tra i cicli principali
     time.sleep(INTERVAL_MINUTES * 60)
