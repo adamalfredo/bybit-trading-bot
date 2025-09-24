@@ -317,14 +317,14 @@ def get_free_qty(symbol: str, quiet_missing: bool = False) -> float:
 
 def market_sell(symbol: str, qty: float):
     """
-    PATCH: Usa sempre qty reale dal wallet + verifica post-vendita per conferma completa
+    PATCH DEFINITIVA: Gestione corretta qty_step + retry escalation
     """
     price = get_last_price(symbol)
     if not price:
         log(f"❌ Prezzo non disponibile per {symbol}, impossibile vendere")
         return
 
-    # PATCH: Usa sempre saldo reale effettivo (non il parametro qty)
+    # Usa sempre saldo reale effettivo
     safe_qty = get_free_qty(symbol, quiet_missing=True)
     if safe_qty <= 0:
         log(f"❌ Nessun saldo reale per vendere {symbol} (wallet={safe_qty})")
@@ -333,12 +333,17 @@ def market_sell(symbol: str, qty: float):
     info = get_instrument_info(symbol)
     qty_step = info.get("qty_step", 0.01)
     min_order_amt = info.get("min_order_amt", 5)
-    min_qty = info.get("min_qty", qty_step)
 
-    # PATCH: Verifica qty_step corretto per ETH (probabilmente 0.001)
-    if symbol == "ETHUSDT" and qty_step >= 0.01:
-        qty_step = 0.001  # Force correct step for ETH
-        log(f"[PATCH][{symbol}] Forzo qty_step corretto: {qty_step}")
+    # FIX SPECIFICO: Override qty_step per coin problematiche
+    step_overrides = {
+        "BARDUSDT": 1.0,      # BARD richiede numeri interi
+        "ETHUSDT": 0.001,     # ETH ha step piccolo
+        "BTCUSDT": 0.00001,   # BTC ha step molto piccolo
+    }
+    
+    if symbol in step_overrides:
+        qty_step = step_overrides[symbol]
+        log(f"[OVERRIDE][{symbol}] Forzo qty_step: {qty_step}")
 
     order_value = safe_qty * price
     if order_value < min_order_amt:
@@ -352,11 +357,27 @@ def market_sell(symbol: str, qty: float):
     log(f"[SELL-INIT][{symbol}] safe_qty={safe_qty} qty_step={qty_step} order_value={order_value:.2f}")
 
     while attempt <= max_attempts:
-        # PATCH: Usa formattazione più precisa per ETH
-        if symbol == "ETHUSDT":
-            qty_str = f"{qty_work:.5f}".rstrip('0').rstrip('.')
+        # FIX: Formattazione qty robusta per ogni step
+        if qty_step >= 1.0:
+            # Numeri interi (es. BARD, SHIB, ecc.)
+            qty_formatted = int(qty_work // qty_step) * int(qty_step)
+            qty_str = str(int(qty_formatted))
+        elif qty_step >= 0.1:
+            # 1 decimale
+            qty_formatted = (qty_work // qty_step) * qty_step
+            qty_str = f"{qty_formatted:.1f}"
+        elif qty_step >= 0.01:
+            # 2 decimali
+            qty_formatted = (qty_work // qty_step) * qty_step
+            qty_str = f"{qty_formatted:.2f}".rstrip('0').rstrip('.')
+        elif qty_step >= 0.001:
+            # 3 decimali (ETH)
+            qty_formatted = (qty_work // qty_step) * qty_step
+            qty_str = f"{qty_formatted:.3f}".rstrip('0').rstrip('.')
         else:
-            qty_str = _format_qty_by_step(symbol, qty_work)
+            # 5+ decimali (BTC, ecc.)
+            qty_formatted = (qty_work // qty_step) * qty_step
+            qty_str = f"{qty_formatted:.8f}".rstrip('0').rstrip('.')
         
         try:
             qty_num = float(qty_str)
@@ -364,20 +385,23 @@ def market_sell(symbol: str, qty: float):
             log(f"❌ Parsing qty_str fallito {symbol}: {qty_str}")
             return
         
+        if qty_num <= 0:
+            log(f"❌ Qty finale zero dopo format {symbol}: {qty_str}")
+            return
+            
         value_now = qty_num * price
-        if value_now < min_order_amt or qty_num <= 0:
-            log(f"❌ Qty/value troppo piccoli dopo format {symbol}: qty={qty_num} value={value_now:.2f}")
+        if value_now < min_order_amt:
+            log(f"❌ Value troppo basso dopo format {symbol}: {value_now:.2f} < {min_order_amt}")
             return
 
         body = {
             "category": "spot",
-            "symbol": symbol,
+            "symbol": symbol,  
             "side": "Sell",
             "orderType": "Market",
             "qty": qty_str
         }
         
-        # FIX: Aggiungi generazione headers mancanti
         ts = str(int(time.time() * 1000))
         body_json = json.dumps(body, separators=(",", ":"))
         payload = f"{ts}{KEY}5000{body_json}"
@@ -399,23 +423,46 @@ def market_sell(symbol: str, qty: float):
             log(f"[SELL][{symbol}] RESP {resp.status_code} {rj}")
             
             if resp.status_code == 200 and rj.get("retCode") == 0:
-                # PATCH: Verifica vendita completa
+                # Verifica vendita completa
                 time.sleep(2)
                 remaining_qty = get_free_qty(symbol, quiet_missing=True)
-                if remaining_qty > safe_qty * 0.05:  # Se resta >5% della qty originale
-                    log(f"⚠️ [PARTIAL SELL][{symbol}] Restano {remaining_qty} (era {safe_qty}) → retry ricorsivo")
-                    # Chiamata ricorsiva per vendere il residuo
+                if remaining_qty > safe_qty * 0.05:
+                    log(f"⚠️ [PARTIAL SELL][{symbol}] Restano {remaining_qty} → retry ricorsivo")
                     return market_sell(symbol, remaining_qty)
                 else:
-                    log(f"✅ [COMPLETE SELL][{symbol}] Residuo trascurabile: {remaining_qty}")
+                    log(f"✅ [COMPLETE SELL][{symbol}] Vendita completata")
                 return resp
 
-            # ...existing retry logic...
+            # Gestione errore 170137 specifico
+            rc = rj.get("retCode")
+            if rc == 170137:
+                log(f"[RETRY][{symbol}] 170137 decimali → escalation step")
+                # Escalation step: 0.01 → 0.1 → 1.0 → 10.0
+                if qty_step < 0.1:
+                    qty_step = 0.1
+                elif qty_step < 1.0:
+                    qty_step = 1.0
+                elif qty_step < 10.0:
+                    qty_step = 10.0
+                else:
+                    log(f"❌ [FAIL][{symbol}] Step escalation esaurita")
+                    break
+                qty_work = safe_qty  # Reset qty base
+                attempt += 1
+                continue
+            
+            # Altri errori: riduci qty e riprova
+            if attempt < max_attempts:
+                qty_work = qty_work * 0.9  # Riduci 10%
+                attempt += 1
+                log(f"[RETRY][{symbol}] Errore {rc} → riduci qty a {qty_work:.6f}")
+                continue
             
         except Exception as e:
             log(f"❌ Errore invio SELL {symbol}: {e}")
-            attempt += 1
-            time.sleep(0.8)
+            
+        attempt += 1
+        time.sleep(0.8)
 
     log(f"❌ Tutti i tentativi SELL falliti per {symbol}")
     return None
