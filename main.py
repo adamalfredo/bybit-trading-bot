@@ -38,12 +38,13 @@ ENABLE_COUNTER_TREND = True
 ENABLE_REVERSAL_BB = True
 
 COUNTER_SLOPE_EPS = 0.0005                          # tolleranza slope ema20 (già usata prima se la vorrai integrare)
-TRAILING_ACTIVATION_R = 1.2                         # (modificato: prima 2.0)
-TRAILING_LOCK_R = 1.0                               # (modificato: prima 1.0)
 TRAILING_TP_ENABLE = True
-TRAILING_TP_TRIGGER_R = 1.8                         # attiva TP dinamico dopo aver toccato almeno questo R
-TRAILING_TP_GAP_R   = 0.9                           # TP = p_max - GAP_R * risk
-TRAILING_TP_MIN_LOCK_R = 1.4                        # finché non supera questo R non alzare il TP sopra il TP originale
+TRAILING_ACTIVATION_R = 0.8                         # PATCH: era 1.2, trailing parte prima
+TRAILING_LOCK_R = 0.5                               # PATCH: era 1.0, lock più vicino all'entry
+TRAIL_LOCK_FACTOR = 0.5                             # PATCH: era 1.0, trailing più stretto
+TRAILING_TP_TRIGGER_R = 1.2                         # PATCH: era 1.8, TP dinamico prima
+TRAILING_TP_GAP_R   = 0.5                           # PATCH: era 0.9, TP dinamico più vicino
+TRAILING_TP_MIN_LOCK_R = 1.0                        # PATCH: era 1.4, TP dinamico sopra TP originale prima
 
 # Pullback + Giveback nuova logica
 ENABLE_PULLBACK_EMA20 = True
@@ -93,11 +94,11 @@ ATR_WINDOW = 14
 SL_ATR_MULT = 1.0
 TP_R_MULT   = 2.5
 ATR_MIN_PCT = 0.002
-ATR_MAX_PCT = 0.030
+ATR_MAX_PCT = 0.020                         # PATCH: era 0.030, filtra asset troppo volatili
 MAX_OPEN_POSITIONS = 5
-COOLDOWN_MINUTES = 60
-TRAIL_LOCK_FACTOR = 1.0
-RISK_PCT = 0.015
+RISK_PCT = 0.0075                           # PATCH: era 0.015, dimezza il rischio per trade
+MAX_NEW_POSITIONS_PER_CYCLE = 1             # PATCH: era 2, meno ingressi per ciclo
+COOLDOWN_MINUTES = 90                       # PATCH: era 60, aumenta cooldown tra trade stesso asset
 
 NOTIONAL_FLOOR_USDT = 25.0                  # minimo desiderato per un ingresso (se saldo & cap lo permettono)
 CAP_GLOBAL_USD = 250.0                      # tetto massimo notional per singolo ingresso (prima hardcoded 250.0)
@@ -111,26 +112,26 @@ ADD_ON_MIN_GAP_SEC = 300                    # almeno 5m tra add-on
 MIN_HOLDING_MINUTES = 5                     # tempo minimo prima di accettare exit/trailing
 TRAILING_ENABLED = True                     # per disattivare tutta la logica trailing
 MIN_SL_PCT = 0.010                          # SL minimo = 1% del prezzo (se ATR troppo piccolo)
-MAX_NEW_POSITIONS_PER_CYCLE = 2             # massimo ingressi per ciclo di scansione
 USE_DYNAMIC_ASSET_LIST = True               # Fase 2: se True sostituirà ASSETS dinamicamente
 USE_SAFE_ORDER_BUY   = False                # Fase 3: se True userà safe_market_buy() al posto di market_buy_qty()
 LARGE_CAP_MIN_NOTIONAL_MULT = 1.10          # quanto sopra il notional minimo per tentativo large cap
 LARGE_CAP_LIMIT_SLIPPAGE    = 0.0015        # 0.15% sopra last price per LIMIT IOC (fill immediato)
 ENFORCE_DIVERGENCE_CHECK = False
-DIVERGENCE_MAX_PCT = 0.05           # 5% sul testnet
-EXCLUDE_LOW_PRICE    = True         # Se True (fase 1) solo DRY-RUN (non modifica ASSETS)
-PRICE_MIN_ACTIVE     = 0.01         # Soglia prezzo per esclusione preventiva (dry-run ora)
-DYNAMIC_ASSET_MIN_VOLUME = 500000   # Filtro volume quote (USDT)
-MAX_DYNAMIC_ASSETS   = 25           # Limite massimo asset dinamici
-DYNAMIC_REFRESH_MIN  = 30           # Ogni X minuti (fase 2)
-RECONCILE_INTERVAL_SEC = 60         # ogni 60s verifica posizioni fantasma / nuove manuali
-LAST_DYNAMIC_REFRESH = 0            # evita NameError se init dinamico non setta il valore
+DIVERGENCE_MAX_PCT = 0.05                   # 5% sul testnet
+EXCLUDE_LOW_PRICE    = True                 # Se True (fase 1) solo DRY-RUN (non modifica ASSETS)
+PRICE_MIN_ACTIVE     = 0.01                 # Soglia prezzo per esclusione preventiva (dry-run ora)
+DYNAMIC_ASSET_MIN_VOLUME = 1000000          # PATCH: era 500000, filtra asset con poco volume
+MAX_DYNAMIC_ASSETS   = 25                   # Limite massimo asset dinamici
+DYNAMIC_REFRESH_MIN  = 30                   # Ogni X minuti (fase 2)
+RECONCILE_INTERVAL_SEC = 60                 # ogni 60s verifica posizioni fantasma / nuove manuali
+LAST_DYNAMIC_REFRESH = 0                    # evita NameError se init dinamico non setta il valore
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
 
 def notify_telegram(message: str):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+        message += "\n⚠️ Bot patch selettività/stop attiva"
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
         try:
@@ -822,6 +823,17 @@ def analyze_asset(symbol: str):
             last = df.iloc[-1]
             prev = df.iloc[-2]
             last_ts_used = df.index[-1]
+
+        # PATCH: Richiedi almeno 2 conferme tra MACD, RSI, ADX per ingresso
+        macd_bull = last["macd"] > last["macd_signal"]
+        rsi_bull = last["rsi"] > 50
+        adx_strong = last["adx"] > adx_threshold
+        confirmations = sum([macd_bull, rsi_bull, adx_strong])
+
+        if confirmations < 2:
+            log(f"[FILTER][{symbol}] Conferme insufficienti per ingresso: MACD={macd_bull} RSI={rsi_bull} ADX={adx_strong}")
+            return None, None, None
+
         log(f"[BAR][{symbol}] last_ts={last_ts_used} inverted={inverted} age={(time.time()-last_ts_used.timestamp()):.1f}s")
         price = float(last["Close"])
         atr_val = float(last["atr"])
@@ -1903,6 +1915,12 @@ while True:
             # aggiorna massimo
             if current_price > entry["p_max"]:
                 entry["p_max"] = current_price
+
+            # PATCH: Stop a break-even dopo 1R
+            if entry["mfe"] >= 1.0 and entry["sl"] < entry_price:
+                entry["sl"] = entry_price
+                log(f"🟩 SL spostato a break-even per {symbol} (MFE≥1R)")
+                notify_telegram(f"🟩 SL spostato a break-even per {symbol} (MFE≥1R)")
 
             # propone nuovo SL seguendo (TRAIL_LOCK_FACTOR * risk) sotto il massimo
             target_sl = entry["p_max"] - (risk * TRAIL_LOCK_FACTOR)
