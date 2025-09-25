@@ -22,6 +22,24 @@ BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
 BYBIT_BASE_URL = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
+INTERVAL_MINUTES = 60  # era 15
+ATR_WINDOW = 14
+TP_FACTOR = 2.0
+SL_FACTOR = 1.5
+# Soglie dinamiche consigliate
+TP_MIN = 1.5
+TP_MAX = 3.0
+SL_MIN = 1.0
+SL_MAX = 2.5
+TRAILING_MIN = 0.015  # era 0.005, trailing più largo
+TRAILING_MAX = 0.05   # era 0.03, trailing più largo
+TRAILING_ACTIVATION_THRESHOLD = 0.04  # era 0.02, trailing parte dopo -4%
+TRAILING_SL_BUFFER = 0.015            # era 0.007, trailing SL più largo
+TRAILING_DISTANCE = 0.04              # era 0.02, trailing SL più largo
+INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
+COOLDOWN_MINUTES = 60
+cooldown = {}
+
 ORDER_USDT = 50.0
 
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
@@ -34,6 +52,47 @@ LIQUIDITY_MIN_VOLUME = 1_000_000  # Soglia minima volume 24h USDT (consigliato)
 STABLECOIN_BLACKLIST = [
     "USDCUSDT", "USDEUSDT", "TUSDUSDT", "USDPUSDT", "BUSDUSDT", "FDUSDUSDT", "DAIUSDT", "EURUSDT", "USDTUSDT"
 ]
+
+def is_trending_down(symbol: str, tf: str = "240"):
+    """
+    Ritorna True se l'asset è in downtrend su timeframe superiore (default 4h).
+    """
+    endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
+    params = {
+        "category": "linear",
+        "symbol": symbol,
+        "interval": tf,
+        "limit": 220  # almeno 200 barre per EMA200
+    }
+    try:
+        resp = requests.get(endpoint, params=params, timeout=10)
+        data = resp.json()
+        if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
+            return False
+        raw = data["result"]["list"]
+        df = pd.DataFrame(raw, columns=[
+            "timestamp", "Open", "High", "Low", "Close", "Volume", "turnover"
+        ])
+        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+        df.dropna(subset=["Close"], inplace=True)
+        if len(df) < 200:
+            return False
+        ema200 = EMAIndicator(close=df["Close"], window=200).ema_indicator()
+        # Downtrend se EMA200 decrescente e prezzo sotto EMA200
+        return df["Close"].iloc[-1] < ema200.iloc[-1] and ema200.iloc[-1] < ema200.iloc[-10]
+    except Exception:
+        return False
+
+def is_breaking_weekly_low(symbol: str):
+    """
+    True se il prezzo attuale è sotto il minimo delle ultime 7*24/15 = 672 candele (7 giorni su 15m)
+    """
+    df = fetch_history(symbol)
+    if df is None or len(df) < 672:
+        return False
+    last_close = df["Close"].iloc[-1]
+    weekly_low = df["Low"].iloc[-672:].min()
+    return last_close <= weekly_low * 1.005  # tolleranza 0.5%
 
 def update_assets(top_n=18, n_stable=7):
     """
@@ -73,24 +132,6 @@ def update_assets(top_n=18, n_stable=7):
         log(f"[ASSETS] Aggiornati: {ASSETS}\nMeno volatili: {LESS_VOLATILE_ASSETS}\nVolatili: {VOLATILE_ASSETS}")
     except Exception as e:
         log(f"[ASSETS] Errore aggiornamento lista asset: {e}")
-
-INTERVAL_MINUTES = 15
-ATR_WINDOW = 14
-TP_FACTOR = 2.0
-SL_FACTOR = 1.5
-# Soglie dinamiche consigliate
-TP_MIN = 1.5
-TP_MAX = 3.0
-SL_MIN = 1.0
-SL_MAX = 2.5
-TRAILING_MIN = 0.005  # 0.5%
-TRAILING_MAX = 0.03   # 3%
-TRAILING_ACTIVATION_THRESHOLD = 0.02
-TRAILING_SL_BUFFER = 0.007
-TRAILING_DISTANCE = 0.02
-INITIAL_STOP_LOSS_PCT = 0.02
-COOLDOWN_MINUTES = 60
-cooldown = {}
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
@@ -580,6 +621,14 @@ def is_symbol_linear(symbol):
     
 # 4. Inverti la logica di ingresso/uscita in analyze_asset
 def analyze_asset(symbol: str):
+    # PATCH: Filtro trend su timeframe superiore (4h)
+    if not is_trending_down(symbol, tf="240"):
+        log(f"[TREND-FILTER][{symbol}] Non in downtrend su 4h, salto analisi.")
+        return None, None, None
+    # PATCH: Filtro breakout minimi settimanali
+    if not is_breaking_weekly_low(symbol):
+        log(f"[BREAKOUT-FILTER][{symbol}] Non in breakout minimi settimanali, salto analisi.")
+        return None, None, None
     try:
         df = fetch_history(symbol)
         if df is None or len(df) < 3:
