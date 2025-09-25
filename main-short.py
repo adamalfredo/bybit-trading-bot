@@ -916,11 +916,8 @@ def trailing_stop_worker():
                 trailing_tp_price = entry["p_min"] * (1 + tp_trailing_buffer)
                 log(f"[DEBUG][TRAILING_TP] {symbol} | current_price={current_price:.4f} | trailing_tp_price={trailing_tp_price:.4f} | p_min={entry['p_min']:.4f}")
                 if current_price >= trailing_tp_price:
-                    log(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
-                    notify_telegram(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} a {current_price:.4f}")
                     qty = get_open_short_qty(symbol)
                     if qty > 0:
-                        usdt_before = get_usdt_balance()
                         resp = market_cover(symbol, qty)
                         if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                             entry_price = entry["entry_price"]
@@ -928,8 +925,8 @@ def trailing_stop_worker():
                             qty = entry.get("qty", qty)
                             exit_value = current_price * qty
                             delta = exit_value - entry_cost
-                            pnl = (delta / entry_cost) * 100
-                            log(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} → Prezzo: {current_price:.4f} | TP trailing: {trailing_tp_price:.4f}")
+                            pnl = ((entry_price - current_price) / entry_price) * 100
+                            log(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} → Prezzo: {current_price:.4f} | PnL: {pnl:.2f}%")
                             notify_telegram(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
                             log_trade_to_google(
                                 symbol, 
@@ -938,9 +935,9 @@ def trailing_stop_worker():
                                 pnl, 
                                 "Trailing TP SHORT", 
                                 "TP Triggered", 
-                                usdt_enter=entry_cost,        # ✅ VALORE investito
-                                usdt_exit=exit_value,         # ✅ VALORE ricevuto  
-                                delta_usd=delta               # ✅ DIFFERENZA
+                                usdt_enter=entry_cost,
+                                usdt_exit=exit_value,
+                                delta_usd=delta
                             )
                             open_positions.discard(symbol)
                             last_exit_time[symbol] = time.time()
@@ -980,8 +977,8 @@ def trailing_stop_worker():
                         qty = entry.get("qty", qty)
                         exit_value = current_price * qty
                         delta = exit_value - entry_cost
-                        pnl = (delta / entry_cost) * 100
-                        log(f"[TEST][SL_OK] {symbol} | {sl_type} attivato → Prezzo: {current_price:.4f} | SL: {entry['sl']:.4f} | PnL: {pnl:.2f}%")
+                        pnl = ((entry_price - current_price) / entry_price) * 100
+                        log(f"[TEST][SL_OK] {symbol} | {sl_type} attivato → Prezzo: {current_price:.4f} | PnL: {pnl:.2f}%")
                         icon = "🛑" if "Stop Loss" in sl_type else "🔃"
                         notify_telegram(f"{icon} {sl_type} ricoperto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
                         log_trade_to_google(
