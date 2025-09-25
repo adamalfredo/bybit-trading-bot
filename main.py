@@ -39,12 +39,12 @@ ENABLE_REVERSAL_BB = True
 
 COUNTER_SLOPE_EPS = 0.0005                          # tolleranza slope ema20 (già usata prima se la vorrai integrare)
 TRAILING_TP_ENABLE = True
-TRAILING_ACTIVATION_R = 0.8                         # PATCH: era 1.2, trailing parte prima
-TRAILING_LOCK_R = 0.5                               # PATCH: era 1.0, lock più vicino all'entry
-TRAIL_LOCK_FACTOR = 0.5                             # PATCH: era 1.0, trailing più stretto
-TRAILING_TP_TRIGGER_R = 1.2                         # PATCH: era 1.8, TP dinamico prima
-TRAILING_TP_GAP_R   = 0.5                           # PATCH: era 0.9, TP dinamico più vicino
-TRAILING_TP_MIN_LOCK_R = 1.0                        # PATCH: era 1.4, TP dinamico sopra TP originale prima
+TRAILING_ACTIVATION_R = 2.0      # trailing parte solo dopo almeno 2R di profitto
+TRAILING_LOCK_R = 1.0            # lock più lontano dall'entry (1R)
+TRAIL_LOCK_FACTOR = 1.0          # trailing più largo (1R sotto il massimo)
+TRAILING_TP_TRIGGER_R = 3.0      # TP dinamico solo dopo 3R
+TRAILING_TP_GAP_R   = 1.5        # TP dinamico più distante
+TRAILING_TP_MIN_LOCK_R = 2.0     # TP dinamico sopra TP originale solo dopo 2R
 
 # Pullback + Giveback nuova logica
 ENABLE_PULLBACK_EMA20 = True
@@ -89,9 +89,9 @@ VOLATILE_ASSETS = [
     "SEIUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "TONUSDT", "DOGEUSDT"
 ]
 
-INTERVAL_MINUTES = 15
+INTERVAL_MINUTES = 60
 ATR_WINDOW = 14
-SL_ATR_MULT = 1.0
+SL_ATR_MULT = 1.5   # era 1.0, stop loss più largo
 TP_R_MULT   = 2.5
 ATR_MIN_PCT = 0.002
 ATR_MAX_PCT = 0.020                         # PATCH: era 0.030, filtra asset troppo volatili
@@ -131,13 +131,53 @@ def log(msg):
 
 def notify_telegram(message: str):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        message += "\n⚠️ Bot patch selettività/stop attiva"
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
         try:
             requests.post(url, data=data, timeout=10)
         except Exception as e:
             log(f"Errore invio Telegram: {e}")
+
+def is_trending_up(symbol: str, tf: str = "240"):
+    """
+    Ritorna True se l'asset è in uptrend su timeframe superiore (default 4h).
+    """
+    endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
+    params = {
+        "category": "spot",
+        "symbol": symbol,
+        "interval": tf,
+        "limit": 220  # almeno 200 barre per EMA200
+    }
+    try:
+        resp = requests.get(endpoint, params=params, timeout=10)
+        data = resp.json()
+        if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
+            return False
+        raw = data["result"]["list"]
+        df = pd.DataFrame(raw, columns=[
+            "timestamp", "Open", "High", "Low", "Close", "Volume", "turnover"
+        ])
+        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+        df.dropna(subset=["Close"], inplace=True)
+        if len(df) < 200:
+            return False
+        ema200 = EMAIndicator(close=df["Close"], window=200).ema_indicator()
+        # Uptrend se EMA200 crescente e prezzo sopra EMA200
+        return df["Close"].iloc[-1] > ema200.iloc[-1] and ema200.iloc[-1] > ema200.iloc[-10]
+    except Exception:
+        return False
+
+def is_breaking_weekly_high(symbol: str):
+    """
+    True se il prezzo attuale è sopra il massimo delle ultime 7*24/15 = 672 candele (7 giorni su 15m)
+    """
+    df = fetch_history(symbol)
+    if df is None or len(df) < 672:
+        return False
+    last_close = df["Close"].iloc[-1]
+    weekly_high = df["High"].iloc[-672:].max()
+    return last_close >= weekly_high * 0.995  # tolleranza 0.5%
 
 def get_last_price(symbol: str) -> Optional[float]:
     try:
@@ -771,6 +811,14 @@ def fetch_history(symbol: str):
         return None
 
 def analyze_asset(symbol: str):
+    # PATCH: Filtro trend su timeframe superiore (4h)
+    if not is_trending_up(symbol, tf="240"):
+        log(f"[TREND-FILTER][{symbol}] Non in uptrend su 4h, salto analisi.")
+        return None, None, None
+    # PATCH: Filtro breakout settimanale
+    if not is_breaking_weekly_high(symbol):
+        log(f"[BREAKOUT-FILTER][{symbol}] Non in breakout settimanale, salto analisi.")
+        return None, None, None
     try:
         df = fetch_history(symbol)
         if df is None:
