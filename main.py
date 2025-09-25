@@ -346,8 +346,18 @@ def market_sell(symbol: str, qty: float):
         log(f"[OVERRIDE][{symbol}] Forzo qty_step: {qty_step}")
 
     order_value = safe_qty * price
-    if order_value < min_order_amt:
-        log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} < {min_order_amt}")
+    # FIX: Per le vendite, usa solo min_qty (non min_order_amt rigido)
+    min_qty = info.get("min_qty", 0.0)
+    
+    # Controllo qty minima (non valore minimo per vendite)
+    if safe_qty < min_qty:
+        log(f"❌ Quantità sotto min_qty per {symbol}: {safe_qty} < {min_qty}")
+        return
+        
+    # Per vendite: soglia molto più permissiva (1 USDT invece di 10)
+    min_sell_value = 1.0  
+    if order_value < min_sell_value:
+        log(f"❌ Valore vendita troppo basso per {symbol}: {order_value:.2f} < {min_sell_value}")
         return
 
     max_attempts = 4
