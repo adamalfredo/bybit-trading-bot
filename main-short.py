@@ -83,16 +83,47 @@ def is_trending_down(symbol: str, tf: str = "240"):
     except Exception:
         return False
 
+def is_trending_down_1h(symbol: str, tf: str = "60"):
+    """
+    Ritorna True se l'asset è in downtrend su timeframe 1h.
+    """
+    endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
+    params = {
+        "category": "linear",
+        "symbol": symbol,
+        "interval": tf,
+        "limit": 120  # almeno 100 barre per EMA100
+    }
+    try:
+        resp = requests.get(endpoint, params=params, timeout=10)
+        data = resp.json()
+        if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
+            return False
+        raw = data["result"]["list"]
+        df = pd.DataFrame(raw, columns=[
+            "timestamp", "Open", "High", "Low", "Close", "Volume", "turnover"
+        ])
+        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+        df.dropna(subset=["Close"], inplace=True)
+        if len(df) < 100:
+            return False
+        ema100 = EMAIndicator(close=df["Close"], window=100).ema_indicator()
+        # Downtrend se EMA100 decrescente e prezzo sotto EMA100
+        return df["Close"].iloc[-1] < ema100.iloc[-1] and ema100.iloc[-1] < ema100.iloc[-10]
+    except Exception:
+        return False
+
 def is_breaking_weekly_low(symbol: str):
     """
-    True se il prezzo attuale è sotto il minimo delle ultime 7*24/15 = 672 candele (7 giorni su 15m)
+    True se il prezzo attuale è sotto il minimo delle ultime 3 giorni (3*24*60/INTERVAL_MINUTES candele)
     """
-    df = fetch_history(symbol)
-    if df is None or len(df) < 672:
+    df = fetch_history(symbol, interval=INTERVAL_MINUTES)
+    bars = int(3 * 24 * 60 / INTERVAL_MINUTES)
+    if df is None or len(df) < bars:
         return False
     last_close = df["Close"].iloc[-1]
-    weekly_low = df["Low"].iloc[-672:].min()
-    return last_close <= weekly_low * 1.005  # tolleranza 0.5%
+    low = df["Low"].iloc[-bars:].min()
+    return last_close <= low * 1.005  # tolleranza 0.5%
 
 def update_assets(top_n=18, n_stable=7):
     """
@@ -621,9 +652,9 @@ def is_symbol_linear(symbol):
     
 # 4. Inverti la logica di ingresso/uscita in analyze_asset
 def analyze_asset(symbol: str):
-    # PATCH: Filtro trend su timeframe superiore (4h)
-    if not is_trending_down(symbol, tf="240"):
-        log(f"[TREND-FILTER][{symbol}] Non in downtrend su 4h, salto analisi.")
+    # PATCH: Filtro trend su 4h OPPURE trend forte su 1h
+    if not (is_trending_down(symbol, tf="240") or is_trending_down_1h(symbol, tf="60")):
+        log(f"[TREND-FILTER][{symbol}] Non in downtrend su 4h né su 1h, salto analisi.")
         return None, None, None
     # PATCH: Filtro breakout minimi settimanali
     if not is_breaking_weekly_low(symbol):
@@ -699,7 +730,7 @@ def analyze_asset(symbol: str):
                 entry_conditions.append(True)
                 entry_strategies.append("MACD bearish + ADX")
             # PATCH: almeno 3 condizioni ribassiste vere per entrare short su volatili
-            if len(entry_conditions) >= 3:
+            if len(entry_conditions) >= 2:
                 log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT generato: strategie attive: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
             else:
@@ -722,7 +753,7 @@ def analyze_asset(symbol: str):
                 entry_conditions.append(True)
                 entry_strategies.append("Trend EMA + RSI (bearish)")
             # PATCH: almeno 2 condizioni ribassiste vere per entrare short su meno volatili
-            if len(entry_conditions) >= 2:
+            if len(entry_conditions) >= 1:
                 log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT generato: strategie attive: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
             else:
