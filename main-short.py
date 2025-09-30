@@ -118,7 +118,8 @@ def is_breaking_weekly_low(symbol: str):
     True se il prezzo attuale è sotto il minimo delle ultime 3 giorni (3*24*60/INTERVAL_MINUTES candele)
     """
     df = fetch_history(symbol, interval=INTERVAL_MINUTES)
-    bars = int(1 * 24 * 60 / INTERVAL_MINUTES)
+    # bars = int(1 * 24 * 60 / INTERVAL_MINUTES)
+    bars = int(6 * 60 / INTERVAL_MINUTES)
     if df is None or len(df) < bars:
         return False
     last_close = df["Close"].iloc[-1]
