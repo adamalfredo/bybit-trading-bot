@@ -203,7 +203,7 @@ def is_breaking_weekly_high(symbol: str):
     True se il prezzo attuale è sopra il massimo delle ultime 3 giorni (3*24*60/INTERVAL_MINUTES candele)
     """
     df = fetch_history(symbol)
-    bars = int(1 * 24 * 60 / INTERVAL_MINUTES)
+    bars = int(6 * 60 / INTERVAL_MINUTES)
     if df is None or len(df) < bars:
         return False
     last_close = df["Close"].iloc[-1]
@@ -910,7 +910,7 @@ def analyze_asset(symbol: str):
         confirmations = sum([macd_bull, rsi_bull, adx_strong])
 
         if is_volatile:
-            min_conf = 2
+            min_conf = 1
         else:
             min_conf = 1
 
