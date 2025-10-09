@@ -968,6 +968,19 @@ def trailing_stop_worker():
             current_price = get_last_price(symbol)
             if not current_price:
                 continue
+            # Calcola MFE/MAE per SHORT
+            if "mfe" not in entry:
+                entry["mfe"] = 0.0
+                entry["mae"] = 0.0
+            
+            entry_price = entry.get("entry_price", current_price)
+            # Per SHORT: MFE = quanto in basso è andato (profitto), MAE = quanto in alto (perdita)
+            profit_pct = ((entry_price - current_price) / entry_price) * 100
+            if profit_pct > entry["mfe"]:
+                entry["mfe"] = profit_pct
+            if profit_pct < entry["mae"]:
+                entry["mae"] = profit_pct
+                
             entry_price = entry.get("entry_price", current_price)
             entry_cost = entry.get("entry_cost", ORDER_USDT)
             qty = get_open_short_qty(symbol)
