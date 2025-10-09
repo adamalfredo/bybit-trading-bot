@@ -1887,6 +1887,40 @@ while True:
         if r_current < entry["mae"]:
             entry["mae"] = r_current
         
+        # STOP LOSS HARD (per perdite)
+        if current_price <= entry["sl"]:
+            qty = get_free_qty(symbol, quiet_missing=True)
+            if qty > 0:
+                resp = market_sell(symbol, qty)
+                if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+                    fill_price = get_last_price(symbol) or current_price
+                    pnl_val = (fill_price - entry_price) * qty
+                    pnl_pct = (pnl_val / entry["entry_cost"]) * 100
+                    r_mult = (fill_price - entry_price) / risk
+                    log(f"🔻 STOP LOSS {symbol} @ {fill_price:.6f} | PnL {pnl_pct:.2f}% | R={r_mult:.2f}")
+                    notify_telegram(f"🔻 STOP LOSS {symbol} @ {fill_price:.6f}\nPnL: {pnl_pct:.2f}% | R={r_mult:.2f}")
+                    log_trade_to_google(
+                        symbol,
+                        entry_price,
+                        fill_price,
+                        pnl_pct,
+                        f"Stop Loss | R={r_mult:.2f} | MFE={entry['mfe']:.2f} | MAE={entry['mae']:.2f}",
+                        "SL Triggered",
+                        entry["entry_cost"],
+                        fill_price * qty,
+                        holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
+                        mfe_r=entry['mfe'],
+                        mae_r=entry['mae'],
+                        r_multiple=r_mult,
+                        market_condition="stop_loss"
+                    )
+                    open_positions.discard(symbol)
+                    last_exit_time[symbol] = time.time()
+                    position_data.pop(symbol, None)
+                    continue
+                else:
+                    log(f"❌ Vendita SL fallita per {symbol}")
+
         # Early Exit (momentum deteriora prima di trailing/giveback)
         if EARLY_EXIT_ENABLE and entry["mfe"] >= EARLY_EXIT_MIN_R and r_current > 0:
             cache_ind = ANALYSIS_CACHE.get(symbol)
