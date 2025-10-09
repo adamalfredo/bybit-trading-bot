@@ -867,27 +867,20 @@ def setup_gspread():
     return client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
 
 # Salva una riga nel foglio
-def log_trade_to_google(symbol, entry_price, exit_price, pnl_pct, strategy, result_type,
-                        usdt_entry=None, usdt_exit=None, holding_time_min=None, 
-                        mfe_r=None, mae_r=None, r_multiple=None, market_condition=None):
-    """
-    Registra trade sul foglio Google.
-    Colonne: Timestamp | Symbol | Entry | Exit | PnL % | Strategia | Tipo | USDT Enter | USDT Exit | 
-             Delta USD | Holding Min | MFE R | MAE R | R Multiple | Market Condition
-    """
+def log_trade_to_google(symbol, entry, exit, pnl_pct, strategy, result_type, usdt_enter=None, usdt_exit=None, delta_usd=None):
     try:
         import base64
 
         SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"
         SHEET_NAME = "Foglio1"
 
+        # Decodifica la variabile base64 in file temporaneo
         encoded = os.getenv("GSPREAD_CREDS_B64")
         if not encoded:
             log("❌ Variabile GSPREAD_CREDS_B64 non trovata")
             return
 
-        # Path portabile anche su Windows
-        creds_path = os.path.join(os.getcwd(), "gspread-creds-runtime.json")
+        creds_path = "/tmp/gspread-creds.json"
         with open(creds_path, "wb") as f:
             f.write(base64.b64decode(encoded))
 
@@ -896,30 +889,17 @@ def log_trade_to_google(symbol, entry_price, exit_price, pnl_pct, strategy, resu
         client = gspread.authorize(creds)
         sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
 
-        # Se non forniti li calcoliamo come fallback
-        if usdt_entry is None:
-            usdt_entry = entry_price
-        if usdt_exit is None:
-            usdt_exit = exit_price
-        delta_usd = usdt_exit - usdt_entry
-
-        # Append row (15 colonne ora)
         sheet.append_row([
             time.strftime("%Y-%m-%d %H:%M:%S"),
             symbol,
-            round(entry_price, 6),
-            round(exit_price, 6),
+            round(entry, 6),
+            round(exit, 6),
             f"{pnl_pct:.2f}%",
             strategy,
             result_type,
-            f"{usdt_entry:.2f}",
-            f"{usdt_exit:.2f}",
-            f"{delta_usd:.2f}",
-            f"{holding_time_min:.1f}" if holding_time_min else "",
-            f"{mfe_r:.2f}" if mfe_r else "",
-            f"{mae_r:.2f}" if mae_r else "",
-            f"{r_multiple:.2f}" if r_multiple else "",
-            market_condition or ""
+            usdt_enter if usdt_enter is not None else "",
+            usdt_exit if usdt_exit is not None else "",
+            delta_usd if delta_usd is not None else ""
         ])
     except Exception as e:
         log(f"❌ Errore log su Google Sheets: {e}")
@@ -989,13 +969,9 @@ def trailing_stop_worker():
                             pnl_pct, 
                             "MAX LOSS", 
                             "Forced Exit", 
-                            usdt_entry=entry_cost,
-                            usdt_exit=exit_value,
-                            holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
-                            mfe_r=entry.get('mfe', 0),
-                            mae_r=entry.get('mae', 0),
-                            r_multiple=None,
-                            market_condition="max_loss"
+                            usdt_enter=entry_cost,        # ✅ VALORE investito
+                            usdt_exit=exit_value,         # ✅ VALORE ricevuto
+                            delta_usd=delta               # ✅ DIFFERENZA
                         )
                         open_positions.discard(symbol)
                         last_exit_time[symbol] = time.time()
@@ -1040,13 +1016,9 @@ def trailing_stop_worker():
                                 pnl, 
                                 "Trailing TP SHORT", 
                                 "TP Triggered", 
-                                usdt_entry=entry_cost,
+                                usdt_enter=entry_cost,
                                 usdt_exit=exit_value,
-                                holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
-                                mfe_r=entry.get('mfe', 0),
-                                mae_r=entry.get('mae', 0),
-                                r_multiple=None,
-                                market_condition="trailing_tp"
+                                delta_usd=delta
                             )
                             open_positions.discard(symbol)
                             last_exit_time[symbol] = time.time()
@@ -1095,15 +1067,11 @@ def trailing_stop_worker():
                             entry_price, 
                             current_price, 
                             pnl, 
-                            sl_type,
+                            sl_type,                      # "Trailing Stop SHORT" o "Stop Loss SHORT"
                             "SL Triggered", 
-                            usdt_entry=entry_cost,
-                            usdt_exit=exit_value,
-                            holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
-                            mfe_r=entry.get('mfe', 0),
-                            mae_r=entry.get('mae', 0),
-                            r_multiple=None,
-                            market_condition="sl_triggered"
+                            usdt_enter=entry_cost,        # ✅ VALORE investito
+                            usdt_exit=exit_value,         # ✅ VALORE ricevuto
+                            delta_usd=delta               # ✅ DIFFERENZA
                         )
                         open_positions.discard(symbol)
                         last_exit_time[symbol] = time.time()
@@ -1325,13 +1293,9 @@ while True:
                     pnl, 
                     strategy, 
                     "Exit Signal",
-                    usdt_entry=entry_cost,
-                    usdt_exit=exit_value,
-                    holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
-                    mfe_r=entry.get('mfe', 0),
-                    mae_r=entry.get('mae', 0),
-                    r_multiple=None,
-                    market_condition="exit_signal"
+                    usdt_enter=entry_cost,     # ✅ VALORE USDT investito inizialmente
+                    usdt_exit=exit_value,      # ✅ VALORE USDT ricevuto dalla chiusura
+                    delta_usd=delta            # ✅ DIFFERENZA in USDT
                 )
                 
                 open_positions.discard(symbol)

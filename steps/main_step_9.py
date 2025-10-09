@@ -1431,12 +1431,10 @@ def setup_gspread():
 
 # Salva una riga nel foglio
 def log_trade_to_google(symbol, entry_price, exit_price, pnl_pct, strategy, result_type,
-                        usdt_entry=None, usdt_exit=None, holding_time_min=None, 
-                        mfe_r=None, mae_r=None, r_multiple=None, market_condition=None):
+                        usdt_entry=None, usdt_exit=None):
     """
     Registra trade sul foglio Google.
-    Colonne: Timestamp | Symbol | Entry | Exit | PnL % | Strategia | Tipo | USDT Enter | USDT Exit | 
-             Delta USD | Holding Min | MFE R | MAE R | R Multiple | Market Condition
+    Colonne: Timestamp | Symbol | Entry | Exit | PnL % | Strategia | Tipo | USDT Enter | USDT Exit | Delta USD
     """
     try:
         import base64
@@ -1459,14 +1457,14 @@ def log_trade_to_google(symbol, entry_price, exit_price, pnl_pct, strategy, resu
         client = gspread.authorize(creds)
         sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
 
-        # Se non forniti li calcoliamo come fallback
+        # Se non forniti li calcoliamo come fallback (ma meglio passarli)
         if usdt_entry is None:
             usdt_entry = entry_price
         if usdt_exit is None:
             usdt_exit = exit_price
         delta_usd = usdt_exit - usdt_entry
 
-        # Append row (15 colonne ora)
+        # Append row (10 colonne)
         sheet.append_row([
             time.strftime("%Y-%m-%d %H:%M:%S"),
             symbol,
@@ -1477,12 +1475,7 @@ def log_trade_to_google(symbol, entry_price, exit_price, pnl_pct, strategy, resu
             result_type,
             f"{usdt_entry:.2f}",
             f"{usdt_exit:.2f}",
-            f"{delta_usd:.2f}",
-            f"{holding_time_min:.1f}" if holding_time_min else "",
-            f"{mfe_r:.2f}" if mfe_r else "",
-            f"{mae_r:.2f}" if mae_r else "",
-            f"{r_multiple:.2f}" if r_multiple else "",
-            market_condition or ""
+            f"{delta_usd:.2f}"
         ])
     except Exception as e:
         log(f"❌ Errore log su Google Sheets: {e}")
@@ -1847,12 +1840,7 @@ while True:
                     f"{strategy} | R={r_multiple:.2f} | MFE={mfe:.2f} | MAE={mae:.2f}",
                     "Exit Signal",
                     entry_cost,
-                    exit_value,
-                    holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
-                    mfe_r=mfe,
-                    mae_r=mae,
-                    r_multiple=r_multiple,
-                    market_condition="exit_signal"
+                    exit_value
                 )
                 open_positions.discard(symbol)
                 last_exit_time[symbol] = time.time()
@@ -1918,12 +1906,7 @@ while True:
                                 f"EarlyExit | MFE={entry['mfe']:.2f}R | MACDflip",
                                 "Early Exit",
                                 entry["entry_cost"],
-                                fill_price * qty,
-                                holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
-                                mfe_r=entry['mfe'],
-                                mae_r=entry['mae'],
-                                r_multiple=(fill_price - entry_price) / entry.get("risk_per_unit", 1),
-                                market_condition="early_exit"
+                                fill_price * qty
                             )
                             open_positions.discard(symbol)
                             last_exit_time[symbol] = time.time()
@@ -1953,12 +1936,7 @@ while True:
                                 f"Giveback | MFE={entry['mfe']:.2f}R Drop={giveback:.2f}R",
                                 "Giveback Exit",
                                 entry["entry_cost"],
-                                fill_price * qty,
-                                holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
-                                mfe_r=entry['mfe'],
-                                mae_r=entry['mae'],
-                                r_multiple=(fill_price - entry_price) / entry.get("risk_per_unit", 1),
-                                market_condition="giveback"
+                                fill_price * qty
                             )
                             open_positions.discard(symbol)
                             last_exit_time[symbol] = time.time()
@@ -1985,12 +1963,7 @@ while True:
                         f"TP | R={r_mult:.2f} | MFE={entry['mfe']:.2f} | MAE={entry['mae']:.2f}",
                         "TP Hit",
                         entry["entry_cost"],
-                        fill_price * qty,
-                        holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
-                        mfe_r=entry['mfe'],
-                        mae_r=entry['mae'],
-                        r_multiple=r_mult,
-                        market_condition="tp_hit"
+                        fill_price * qty
                     )
                     open_positions.discard(symbol)
                     last_exit_time[symbol] = time.time()
@@ -2082,12 +2055,7 @@ while True:
                             f"Trailing | R={r_mult:.2f} | MFE={entry['mfe']:.2f} | MAE={entry['mae']:.2f}",
                             "SL Triggered",
                             entry["entry_cost"],
-                            fill_price * qty,
-                            holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
-                            mfe_r=entry['mfe'],
-                            mae_r=entry['mae'],
-                            r_multiple=r_mult,
-                            market_condition="trailing"
+                            fill_price * qty
                         )
                         open_positions.discard(symbol)
                         last_exit_time[symbol] = time.time()
