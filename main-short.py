@@ -39,7 +39,7 @@ TRAILING_DISTANCE = 0.04              # era 0.02, trailing SL più largo
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
 COOLDOWN_MINUTES = 60
 cooldown = {}
-
+MAX_LOSS_PCT = -5.0  # perdita massima accettata su SHORT in %, default -5
 ORDER_USDT = 50.0
 
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
@@ -115,16 +115,15 @@ def is_trending_down_1h(symbol: str, tf: str = "60"):
 
 def is_breaking_weekly_low(symbol: str):
     """
-    True se il prezzo attuale è sotto il minimo delle ultime 3 giorni (3*24*60/INTERVAL_MINUTES candele)
+    True se il prezzo attuale è sotto il minimo delle ultime 6 ore.
     """
     df = fetch_history(symbol, interval=INTERVAL_MINUTES)
-    # bars = int(1 * 24 * 60 / INTERVAL_MINUTES)
     bars = int(6 * 60 / INTERVAL_MINUTES)
     if df is None or len(df) < bars:
         return False
     last_close = df["Close"].iloc[-1]
     low = df["Low"].iloc[-bars:].min()
-    return last_close <= low * 1.005  # tolleranza 0.5%
+    return last_close <= low * 0.995  # tolleranza 0.5% sotto il minimo
 
 def update_assets(top_n=18, n_stable=7):
     """
@@ -600,11 +599,11 @@ def market_cover(symbol: str, qty: float):
     
     return None
 
-def fetch_history(symbol: str, interval=15, limit=300):  # <-- aumenta il limit
+def fetch_history(symbol: str, interval=INTERVAL_MINUTES, limit=400):
     """
     Scarica la cronologia dei prezzi per il simbolo dato da Bybit (linear/futures).
     """
-    try:# ✅ ENTRATA SHORT
+    try:
         endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
         params = {
             "category": "linear",
@@ -659,7 +658,7 @@ def analyze_asset(symbol: str):
         return None, None, None
     # PATCH: Filtro breakout minimi settimanali
     if not is_breaking_weekly_low(symbol):
-        log(f"[BREAKOUT-FILTER][{symbol}] Non in breakout minimi settimanali, salto analisi.")
+        log(f"[BREAKOUT-FILTER][{symbol}] Non in breakout 6h, salto analisi.")
         return None, None, None
     try:
         df = fetch_history(symbol)
@@ -844,11 +843,12 @@ sync_positions_from_wallet()
 def get_usdt_balance() -> float:
     return get_free_qty("USDT")
 
-def calculate_stop_loss(entry_price, current_price, p_max, trailing_active):
+def calculate_stop_loss(entry_price, current_price, p_min, trailing_active):
+    # SHORT: SL iniziale sopra l’entry; in trailing usa p_min
     if not trailing_active:
-        return entry_price * (1 - INITIAL_STOP_LOSS_PCT)
+        return entry_price * (1 + INITIAL_STOP_LOSS_PCT)
     else:
-        return p_max * (1 - TRAILING_DISTANCE)
+        return p_min * (1 + TRAILING_DISTANCE)
 
 
 import threading
@@ -987,10 +987,9 @@ def trailing_stop_worker():
             # PATCH MAX LOSS SHORT
             if qty > 0 and entry_price and current_price:
                 pnl_pct = ((entry_price - current_price) / entry_price) * 100
-                max_loss_pct = -2.0  # Soglia massima di perdita accettata (-2%)
-                if pnl_pct < max_loss_pct:
-                    log(f"🔴 [MAX LOSS] Ricopro SHORT su {symbol} per perdita superiore al {abs(max_loss_pct)}% | PnL: {pnl_pct:.2f}%")
-                    notify_telegram(f"🛑 MAX LOSS: ricopertura SHORT su {symbol} per perdita > {abs(max_loss_pct)}%\nPnL: {pnl_pct:.2f}%")
+                if pnl_pct < MAX_LOSS_PCT:
+                    log(f"🔴 [MAX LOSS] Ricopro SHORT su {symbol} per perdita superiore al {abs(MAX_LOSS_PCT)}% | PnL: {pnl_pct:.2f}%")
+                    notify_telegram(f"🛑 MAX LOSS: ricopertura SHORT su {symbol} per perdita > {abs(MAX_LOSS_PCT)}%\nPnL: {pnl_pct:.2f}%")
                     resp = market_cover(symbol, qty)
                     if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                         exit_value = current_price * qty
@@ -1133,7 +1132,7 @@ trailing_thread.start()
 while True:
     # Aggiorna la lista asset dinamicamente ogni ciclo
     update_assets()
-    sync_positions_from_wallet()
+    # sync_positions_from_wallet()  # evita di resettare position_data/trailing ad ogni ciclo
     portfolio_value, usdt_balance, coin_values = get_portfolio_value()
     # SHORT: più conservativo sui volatili, più aggressivo su large cap
     volatile_budget = portfolio_value * 0.4  # Era 0.7
@@ -1198,12 +1197,12 @@ while True:
 
             # 📊 Valuta la forza del segnale in base alla strategia
             strategy_strength = {
-                "Breakout Bollinger": 1.0,
-                "MACD bullish + ADX": 0.9,
-                "Incrocio SMA 20/50": 0.75,
-                "Incrocio EMA 20/50": 0.7,
-                "MACD bullish (stabile)": 0.65,
-                "Trend EMA + RSI": 0.6
+                "Breakdown Bollinger": 1.0,
+                "MACD bearish + ADX": 0.9,
+                "Incrocio SMA 20/50 (bearish)": 0.75,
+                "Incrocio EMA 20/50 (bearish)": 0.7,
+                "MACD bearish (stabile)": 0.65,
+                "Trend EMA + RSI (bearish)": 0.6
             }
             strength = strategy_strength.get(strategy, 0.5)  # default prudente
 

@@ -200,10 +200,9 @@ def is_trending_up_1h(symbol: str, tf: str = "60"):
 
 def is_breaking_weekly_high(symbol: str):
     """
-    True se il prezzo attuale è sopra il massimo delle ultime 3 giorni (3*24*60/INTERVAL_MINUTES candele)
+    True se il prezzo attuale è sopra il massimo delle ultime 6 ore.
     """
     df = fetch_history(symbol)
-    # bars = int(1 * 24 * 60 / INTERVAL_MINUTES)
     bars = int(6 * 60 / INTERVAL_MINUTES)
     if df is None or len(df) < bars:
         return False
@@ -473,8 +472,10 @@ def market_sell(symbol: str, qty: float):
             return
             
         value_now = qty_num * price
-        if value_now < min_order_amt:
-            log(f"❌ Value troppo basso dopo format {symbol}: {value_now:.2f} < {min_order_amt}")
+        # Per SELL permettiamo ordini piccoli: usa min_sell_value invece di min_order_amt
+        min_sell_value = 1.0
+        if value_now < min_sell_value:
+            log(f"❌ Value troppo basso dopo format {symbol}: {value_now:.2f} < {min_sell_value}")
             return
 
         body = {
@@ -847,9 +848,9 @@ def analyze_asset(symbol: str):
     if not (is_trending_up(symbol, tf="240") or is_trending_up_1h(symbol, tf="60")):
         log(f"[TREND-FILTER][{symbol}] Non in uptrend su 4h né su 1h, salto analisi.")
         return None, None, None
-    # PATCH: Filtro breakout settimanale
+    # PATCH: Filtro breakout 6h
     if not is_breaking_weekly_high(symbol):
-        log(f"[BREAKOUT-FILTER][{symbol}] Non in breakout settimanale, salto analisi.")
+        log(f"[BREAKOUT-FILTER][{symbol}] Non in breakout 6h, salto analisi.")
         return None, None, None
     try:
         df = fetch_history(symbol)
@@ -1502,7 +1503,8 @@ while True:
                 preserve = [s for s in open_positions if s not in dyn_assets]
                 if preserve:
                     log(f"[DYN][PRESERVE] Mantengo asset con posizioni aperte: {preserve}")
-                ASSETS = dyn_assets + preserve
+                # Deduplica mantenendo l'ordine
+                ASSETS = list(dict.fromkeys(dyn_assets + preserve))
 
                 added = set(dyn_assets) - prev_set
                 removed_raw = prev_set - set(dyn_assets)
@@ -1518,12 +1520,12 @@ while True:
                 LAST_DYNAMIC_REFRESH = now
                 log(f"[DYN][ACTIVE] ASSETS={len(ASSETS)} VOLATILE={len(VOLATILE_ASSETS)}")
                 
-    # Determina slot candela corrente (inizio minuto relativo al frame 15m)
+    # Determina slot candela corrente (timeframe attuale)
     slot = int(time.time() // (INTERVAL_MINUTES * 60))
     if LAST_BAR_SLOT is None or slot > LAST_BAR_SLOT:
         SCAN_THIS_CYCLE = True
         LAST_BAR_SLOT = slot
-        log(f"[BAR-NEW] Nuova candela 15m slot={slot}")
+        log(f"[BAR-NEW] Nuova candela {INTERVAL_MINUTES}m slot={slot}")
     else:
         SCAN_THIS_CYCLE = False
 
@@ -1625,7 +1627,7 @@ while True:
                 log(f"❌ ATR cache ≤0 per {symbol}")
                 continue
             age_cache = time.time() - cache["ts"]
-            stale_limit = INTERVAL_MINUTES * 60 - 30  # ricalcolo se oltre (frame 15m → 870s)
+            stale_limit = INTERVAL_MINUTES * 60 - 30  # ricalcolo se oltre (timeframe attuale)
             if age_cache > stale_limit:
                 log(f"[STALE-CACHE][{symbol}] Cache {age_cache:.0f}s > {stale_limit}s → ricalcolo")
                 sig_r, strat_r, price_r = analyze_asset(symbol)
@@ -2132,4 +2134,4 @@ while True:
     # Sicurezza: attesa tra i cicli principali
     # Aggiungi pausa di sicurezza per evitare ciclo troppo veloce se tutto salta
     log(f"[CYCLE] Completato ciclo. Posizioni aperte: {len(open_positions)}")
-    time.sleep(60)  # ciclo ogni 60s; segnali su base 15m restano validi
+    time.sleep(60)  # ciclo ogni 60s; segnali su base timeframe corrente
