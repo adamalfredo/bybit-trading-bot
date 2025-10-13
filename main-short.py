@@ -41,6 +41,7 @@ COOLDOWN_MINUTES = 60
 cooldown = {}
 MAX_LOSS_PCT = -5.0  # perdita massima accettata su SHORT in %, default -5
 ORDER_USDT = 50.0
+ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
 
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
 ASSETS = []
@@ -156,8 +157,7 @@ def update_assets(top_n=18, n_stable=7):
         ASSETS = [t["symbol"] for t in top]
         # --- PATCH: filtra solo simboli disponibili su futures linear ---
         ASSETS = [s for s in ASSETS if is_symbol_linear(s)]
-        # Ordina per market cap stimata (lastPrice * totalVolume)
-        top.sort(key=lambda x: float(x.get("lastPrice", 0)) * float(x.get("totalVolume", 0)), reverse=True)
+        # Usa direttamente i top per volume 24h
         LESS_VOLATILE_ASSETS = [t["symbol"] for t in top[:n_stable] if t["symbol"] in ASSETS]
         VOLATILE_ASSETS = [s for s in ASSETS if s not in LESS_VOLATILE_ASSETS]
         log(f"[ASSETS] Aggiornati: {ASSETS}\nMeno volatili: {LESS_VOLATILE_ASSETS}\nVolatili: {VOLATILE_ASSETS}")
@@ -544,7 +544,8 @@ def market_cover(symbol: str, qty: float):
             "symbol": symbol,
             "side": "Buy",  # Chiusura short = Buy
             "orderType": "Market",
-            "qty": qty_str
+            "qty": qty_str,
+            "reduceOnly": "true"
         }
         
         ts = str(int(time.time() * 1000))
@@ -656,8 +657,8 @@ def analyze_asset(symbol: str):
     if not (is_trending_down(symbol, tf="240") or is_trending_down_1h(symbol, tf="60")):
         log(f"[TREND-FILTER][{symbol}] Non in downtrend su 4h né su 1h, salto analisi.")
         return None, None, None
-    # PATCH: Filtro breakout minimi settimanali
-    if not is_breaking_weekly_low(symbol):
+    # PATCH: Filtro breakout 6h (opzionale)
+    if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_low(symbol):
         log(f"[BREAKOUT-FILTER][{symbol}] Non in breakout 6h, salto analisi.")
         return None, None, None
     try:
@@ -931,7 +932,8 @@ def get_portfolio_value():
     usdt_balance = get_usdt_balance()
     total = usdt_balance
     coin_values = {}
-    for symbol in ASSETS:
+    symbols = set(ASSETS) | set(open_positions)  # includi sempre gli short aperti
+    for symbol in symbols:
         if symbol == "USDT":
             continue
         qty = get_open_short_qty(symbol)
@@ -1306,8 +1308,9 @@ while True:
             
             info = get_instrument_info(symbol)
             min_qty = info.get("min_qty", 0.0)
+            qty_step = info.get("qty_step", 0.0)
             
-            if qty is None or qty < min_qty:
+            if qty is None or qty < min_qty or qty < qty_step:
                 log(f"[CLEANUP][EXIT] {symbol}: quantità troppo piccola per ricopertura ({qty} < min_qty {min_qty})")
                 open_positions.discard(symbol)
                 position_data.pop(symbol, None)
@@ -1374,4 +1377,5 @@ while True:
             continue
 
     # Sicurezza: attesa tra i cicli principali
-    time.sleep(INTERVAL_MINUTES * 60)
+    # time.sleep(INTERVAL_MINUTES * 60)
+    time.sleep(120)  # analizza ogni 2 minuti (più ingressi)

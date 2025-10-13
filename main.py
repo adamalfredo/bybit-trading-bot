@@ -28,8 +28,8 @@ MARKET_COST_BUFFER_PCT = 0.0025                     # 0.25% buffer (fee + micro 
 ALLOW_SUB_MIN_BALANCE_ENTRY = True                  # consente ingresso se saldo < MIN_BALANCE_USDT ma >= min_order_amt
 SYNC_BACKFILL_HOLDING_EXEMPT = True                 # posizioni sincronizzate esentate da holding minimo per exit/trailing
 LARGE_ASSETS = {"BTCUSDT", "ETHUSDT", "SOLUSDT"}    # gruppo large cap
-EXTENSION_ATR_MULT_BASE = 1.2
-EXTENSION_ATR_MULT_LARGE = 1.5                      # large cap più permissive
+EXTENSION_ATR_MULT_BASE = 1.5
+EXTENSION_ATR_MULT_LARGE = 1.8                      # large cap più permissive
 TREND_MIN_RATIO = 0.985                             # prima 0.995
 SECONDARY_RATIO = 0.970                             # prima 0.980
 COUNTER_TREND_MIN_RATIO = 0.950
@@ -94,11 +94,11 @@ ATR_WINDOW = 14
 SL_ATR_MULT = 1.5   # era 1.0, stop loss più largo
 TP_R_MULT   = 2.5
 ATR_MIN_PCT = 0.002
-ATR_MAX_PCT = 0.020                         # PATCH: era 0.030, filtra asset troppo volatili
+ATR_MAX_PCT = 0.030                         # era 0.020, più permissivo
 MAX_OPEN_POSITIONS = 5
 RISK_PCT = 0.0075                           # PATCH: era 0.015, dimezza il rischio per trade
-MAX_NEW_POSITIONS_PER_CYCLE = 1             # PATCH: era 2, meno ingressi per ciclo
-COOLDOWN_MINUTES = 90                       # PATCH: era 60, aumenta cooldown tra trade stesso asset
+MAX_NEW_POSITIONS_PER_CYCLE = 2             # più ingressi per ciclo
+COOLDOWN_MINUTES = 60                       # cooldown più corto
 
 NOTIONAL_FLOOR_USDT = 25.0                  # minimo desiderato per un ingresso (se saldo & cap lo permettono)
 CAP_GLOBAL_USD = 250.0                      # tetto massimo notional per singolo ingresso (prima hardcoded 250.0)
@@ -120,11 +120,14 @@ ENFORCE_DIVERGENCE_CHECK = False
 DIVERGENCE_MAX_PCT = 0.05                   # 5% sul testnet
 EXCLUDE_LOW_PRICE    = True                 # Se True (fase 1) solo DRY-RUN (non modifica ASSETS)
 PRICE_MIN_ACTIVE     = 0.01                 # Soglia prezzo per esclusione preventiva (dry-run ora)
-DYNAMIC_ASSET_MIN_VOLUME = 1000000          # PATCH: era 500000, filtra asset con poco volume
+DYNAMIC_ASSET_MIN_VOLUME = 500000           # era 1000000, più permissivo
 MAX_DYNAMIC_ASSETS   = 25                   # Limite massimo asset dinamici
 DYNAMIC_REFRESH_MIN  = 30                   # Ogni X minuti (fase 2)
 RECONCILE_INTERVAL_SEC = 60                 # ogni 60s verifica posizioni fantasma / nuove manuali
 LAST_DYNAMIC_REFRESH = 0                    # evita NameError se init dinamico non setta il valore
+ENABLE_BREAKOUT_FILTER = False     # rende opzionale il filtro breakout 6h
+# Filtro trend configurabile: "4h_or_1h" (default), "4h_only", "1h_only"
+TREND_FILTER_MODE = "4h_or_1h"
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
@@ -389,103 +392,98 @@ def get_free_qty(symbol: str, quiet_missing: bool = False) -> float:
 
 def market_sell(symbol: str, qty: float):
     """
-    PATCH DEFINITIVA: Gestione corretta qty_step + retry escalation
+    Gestione robusta sell:
+      - Rispetta qty richiesta (se >0), altrimenti usa tutto il wallet
+      - Rileva 'dust' (qty < max(min_qty, qty_step)) e pulisce lo stato per evitare loop
+      - Usa Decimal per allineare alla step size
+      - Retri su 170137 (decimali qty) con escalation del passo
+      - Evita ordini con valore troppo basso (< min_sell_value)
     """
+    global open_positions, position_data, last_exit_time
+
     price = get_last_price(symbol)
     if not price:
         log(f"❌ Prezzo non disponibile per {symbol}, impossibile vendere")
         return
 
-    # Usa sempre saldo reale effettivo
-    safe_qty = get_free_qty(symbol, quiet_missing=True)
-    if safe_qty <= 0:
-        log(f"❌ Nessun saldo reale per vendere {symbol} (wallet={safe_qty})")
+    # Saldo reale
+    wallet_qty = get_free_qty(symbol, quiet_missing=True)
+    if wallet_qty <= 0:
+        log(f"❌ Nessun saldo reale per vendere {symbol} (wallet={wallet_qty})")
         return
+
+    # Rispetta la qty richiesta: se qty<=0 o None → usa tutto il wallet
+    desired_qty = float(qty) if qty and qty > 0 else wallet_qty
+    sell_qty = min(wallet_qty, desired_qty)
 
     info = get_instrument_info(symbol)
     qty_step = info.get("qty_step", 0.01)
     min_order_amt = info.get("min_order_amt", 5)
+    min_qty = info.get("min_qty", 0.0) or 0.0
 
-    # FIX SPECIFICO: Override qty_step per coin problematiche
-    step_overrides = {
-        "BARDUSDT": 1.0,      # BARD richiede numeri interi
-        "ETHUSDT": 0.001,     # ETH ha step piccolo
-        "BTCUSDT": 0.00001,   # BTC ha step molto piccolo
-    }
-    
+    # Override opzionali per symbol noti
+    step_overrides = {"BARDUSDT": 1.0, "ETHUSDT": 0.001, "BTCUSDT": 0.00001}
     if symbol in step_overrides:
         qty_step = step_overrides[symbol]
         log(f"[OVERRIDE][{symbol}] Forzo qty_step: {qty_step}")
 
-    order_value = safe_qty * price
-    # FIX: Per le vendite, usa solo min_qty (non min_order_amt rigido)
-    min_qty = info.get("min_qty", 0.0)
-    
-    # Controllo qty minima (non valore minimo per vendite)
-    if safe_qty < min_qty:
-        log(f"❌ Quantità sotto min_qty per {symbol}: {safe_qty} < {min_qty}")
+    # Dust: sotto la quantità minima vendibile non è tecnicamente inviabile
+    min_tradeable = max(min_qty, qty_step)
+    if sell_qty < min_tradeable:
+        log(f"🧹 Dust non vendibile per {symbol}: qty={sell_qty} < min_tradeable={min_tradeable}. Pulizia stato interno.")
+        open_positions.discard(symbol)
+        position_data.pop(symbol, None)
+        last_exit_time[symbol] = time.time()
         return
-        
-    # Per vendite: soglia molto più permissiva (1 USDT invece di 10)
-    min_sell_value = 1.0  
+
+    order_value = sell_qty * price
+    min_sell_value = 1.0  # soglia permissiva per evitare blocchi su residui
     if order_value < min_sell_value:
-        log(f"❌ Valore vendita troppo basso per {symbol}: {order_value:.2f} < {min_sell_value}")
+        log(f"❌ Valore vendita troppo basso per {symbol}: {order_value:.2f} < {min_sell_value}. Pulizia stato.")
+        open_positions.discard(symbol)
+        position_data.pop(symbol, None)
+        last_exit_time[symbol] = time.time()
         return
 
     max_attempts = 4
     attempt = 1
-    qty_work = safe_qty
+    qty_work = sell_qty
+    pre_wallet = wallet_qty  # per stimare quanto è stato venduto realmente
 
-    log(f"[SELL-INIT][{symbol}] safe_qty={safe_qty} qty_step={qty_step} order_value={order_value:.2f}")
+    log(f"[SELL-INIT][{symbol}] wallet={wallet_qty} want={desired_qty} send_init={qty_work} qty_step={qty_step} order_value={order_value:.2f}")
 
     while attempt <= max_attempts:
-        # FIX: Formattazione qty robusta per ogni step
-        if qty_step >= 1.0:
-            # Numeri interi (es. BARD, SHIB, ecc.)
-            qty_formatted = int(qty_work // qty_step) * int(qty_step)
-            qty_str = str(int(qty_formatted))
-        elif qty_step >= 0.1:
-            # 1 decimale
-            qty_formatted = (qty_work // qty_step) * qty_step
-            qty_str = f"{qty_formatted:.1f}"
-        elif qty_step >= 0.01:
-            # 2 decimali
-            qty_formatted = (qty_work // qty_step) * qty_step
-            qty_str = f"{qty_formatted:.2f}".rstrip('0').rstrip('.')
-        elif qty_step >= 0.001:
-            # 3 decimali (ETH)
-            qty_formatted = (qty_work // qty_step) * qty_step
-            qty_str = f"{qty_formatted:.3f}".rstrip('0').rstrip('.')
-        else:
-            # 5+ decimali (BTC, ecc.)
-            qty_formatted = (qty_work // qty_step) * qty_step
-            qty_str = f"{qty_formatted:.8f}".rstrip('0').rstrip('.')
-        
+        # Allinea qty al passo, in stringa
+        qty_str = _format_qty_by_step(symbol, qty_work)
         try:
             qty_num = float(qty_str)
         except:
             log(f"❌ Parsing qty_str fallito {symbol}: {qty_str}")
             return
-        
+
         if qty_num <= 0:
-            log(f"❌ Qty finale zero dopo format {symbol}: {qty_str}")
+            log(f"🧹 Qty formattata nulla (dust) per {symbol} → pulizia stato interno")
+            open_positions.discard(symbol)
+            position_data.pop(symbol, None)
+            last_exit_time[symbol] = time.time()
             return
-            
+
         value_now = qty_num * price
-        # Per SELL permettiamo ordini piccoli: usa min_sell_value invece di min_order_amt
-        min_sell_value = 1.0
         if value_now < min_sell_value:
-            log(f"❌ Value troppo basso dopo format {symbol}: {value_now:.2f} < {min_sell_value}")
+            log(f"❌ Value troppo basso dopo format {symbol}: {value_now:.2f} < {min_sell_value}. Pulizia stato.")
+            open_positions.discard(symbol)
+            position_data.pop(symbol, None)
+            last_exit_time[symbol] = time.time()
             return
 
         body = {
             "category": "spot",
-            "symbol": symbol,  
+            "symbol": symbol,
             "side": "Sell",
             "orderType": "Market",
             "qty": qty_str
         }
-        
+
         ts = str(int(time.time() * 1000))
         body_json = json.dumps(body, separators=(",", ":"))
         payload = f"{ts}{KEY}5000{body_json}"
@@ -498,53 +496,52 @@ def market_sell(symbol: str, qty: float):
             "X-BAPI-SIGN-TYPE": "2",
             "Content-Type": "application/json"
         }
-        
-        log(f"[SELL][{symbol}] attempt {attempt}/{max_attempts} wallet_qty={safe_qty} send={qty_str} value={value_now:.2f}")
-        
+
+        log(f"[SELL][{symbol}] attempt {attempt}/{max_attempts} send={qty_str} value={value_now:.2f}")
+
         try:
             resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
             rj = resp.json() if resp.status_code == 200 else {}
             log(f"[SELL][{symbol}] RESP {resp.status_code} {rj}")
-            
+
             if resp.status_code == 200 and rj.get("retCode") == 0:
-                # Verifica vendita completa
+                # Verifica quanto resta in wallet
                 time.sleep(2)
-                remaining_qty = get_free_qty(symbol, quiet_missing=True)
-                if remaining_qty > safe_qty * 0.05:
-                    log(f"⚠️ [PARTIAL SELL][{symbol}] Restano {remaining_qty} → retry ricorsivo")
-                    return market_sell(symbol, remaining_qty)
+                remaining_wallet = get_free_qty(symbol, quiet_missing=True)
+                sold_est = max(0.0, pre_wallet - remaining_wallet)
+                remaining_wanted = max(0.0, desired_qty - sold_est)
+
+                if remaining_wanted >= min_tradeable and remaining_wallet >= min_tradeable:
+                    log(f"⚠️ [PARTIAL SELL][{symbol}] Venduto≈{sold_est:.6f}, voglio ancora {remaining_wanted:.6f} → retry per il residuo")
+                    return market_sell(symbol, remaining_wanted)
                 else:
-                    log(f"✅ [COMPLETE SELL][{symbol}] Vendita completata")
+                    log(f"✅ [COMPLETE SELL][{symbol}] Vendita completata (venduto≈{sold_est:.6f})")
                 return resp
 
-            # Gestione errore 170137 specifico
             rc = rj.get("retCode")
             if rc == 170137:
                 log(f"[RETRY][{symbol}] 170137 decimali → escalation step")
-                # Escalation step: 0.01 → 0.1 → 1.0 → 10.0
-                if qty_step < 0.1:
-                    qty_step = 0.1
-                elif qty_step < 1.0:
-                    qty_step = 1.0
-                elif qty_step < 10.0:
-                    qty_step = 10.0
+                # Escalation della step size
+                if qty_step < 0.1:   qty_step = 0.1
+                elif qty_step < 1.0: qty_step = 1.0
+                elif qty_step < 10.: qty_step = 10.0
                 else:
                     log(f"❌ [FAIL][{symbol}] Step escalation esaurita")
                     break
-                qty_work = safe_qty  # Reset qty base
+                qty_work = sell_qty
                 attempt += 1
                 continue
-            
-            # Altri errori: riduci qty e riprova
+
+            # altri errori → riduci qty e riprova
             if attempt < max_attempts:
-                qty_work = qty_work * 0.9  # Riduci 10%
+                qty_work = qty_work * 0.9
                 attempt += 1
-                log(f"[RETRY][{symbol}] Errore {rc} → riduci qty a {qty_work:.6f}")
+                log(f"[RETRY][{symbol}] Errore {rc} → riduco qty a {qty_work:.6f}")
                 continue
-            
+
         except Exception as e:
             log(f"❌ Errore invio SELL {symbol}: {e}")
-            
+
         attempt += 1
         time.sleep(0.8)
 
@@ -844,12 +841,18 @@ def fetch_history(symbol: str):
         return None
 
 def analyze_asset(symbol: str):
-    # PATCH: Filtro trend su 4h OPPURE trend forte su 1h
-    if not (is_trending_up(symbol, tf="240") or is_trending_up_1h(symbol, tf="60")):
+    # Filtro trend configurabile
+    if TREND_FILTER_MODE == "4h_only":
+        trend_ok = is_trending_up(symbol, tf="240")
+    elif TREND_FILTER_MODE == "1h_only":
+        trend_ok = is_trending_up_1h(symbol, tf="60")
+    else:  # "4h_or_1h"
+        trend_ok = is_trending_up(symbol, tf="240") or is_trending_up_1h(symbol, tf="60")
+    if not trend_ok:
         log(f"[TREND-FILTER][{symbol}] Non in uptrend su 4h né su 1h, salto analisi.")
         return None, None, None
-    # PATCH: Filtro breakout 6h
-    if not is_breaking_weekly_high(symbol):
+    # Filtro breakout 6h (opzionale)
+    if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_high(symbol):
         log(f"[BREAKOUT-FILTER][{symbol}] Non in breakout 6h, salto analisi.")
         return None, None, None
     try:
@@ -1167,6 +1170,8 @@ ANALYSIS_CACHE = {}   # <— aggiunto: cache indicatori per sizing / trailing
 LAST_BAR_SLOT = None         # id dell’ultima candela analizzata
 SCAN_THIS_CYCLE = True       # flag se eseguiamo analisi completa
 _LAST_RECONCILE_TS = 0       # timestamp ultimo reconcile
+LAST_SCAN_TICK = None
+ANALYZE_EVERY_MIN = 15
 
 def _compute_atr_and_risk(symbol: str, price: float):
     df_hist = fetch_history(symbol)
@@ -1527,7 +1532,13 @@ while True:
         LAST_BAR_SLOT = slot
         log(f"[BAR-NEW] Nuova candela {INTERVAL_MINUTES}m slot={slot}")
     else:
-        SCAN_THIS_CYCLE = False
+        # Esegui comunque una scansione ogni ANALYZE_EVERY_MIN minuti
+        scan_tick = int(time.time() // (ANALYZE_EVERY_MIN * 60))
+        if LAST_SCAN_TICK is None or scan_tick > LAST_SCAN_TICK:
+            SCAN_THIS_CYCLE = True
+            LAST_SCAN_TICK = scan_tick
+        else:
+            SCAN_THIS_CYCLE = False
 
     _support_cache = {}
     new_positions_this_cycle = 0
