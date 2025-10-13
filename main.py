@@ -30,8 +30,8 @@ SYNC_BACKFILL_HOLDING_EXEMPT = True                 # posizioni sincronizzate es
 LARGE_ASSETS = {"BTCUSDT", "ETHUSDT", "SOLUSDT"}    # gruppo large cap
 EXTENSION_ATR_MULT_BASE = 1.5
 EXTENSION_ATR_MULT_LARGE = 1.8                      # large cap più permissive
-TREND_MIN_RATIO = 0.985                             # prima 0.995
-SECONDARY_RATIO = 0.970                             # prima 0.980
+TREND_MIN_RATIO = 0.970                             # rilassato da 0.985
+SECONDARY_RATIO = 0.950                             # rilassato da 0.970
 COUNTER_TREND_MIN_RATIO = 0.950
 REVERSAL_MIN_RATIO = 0.940
 ENABLE_COUNTER_TREND = True
@@ -94,7 +94,7 @@ ATR_WINDOW = 14
 SL_ATR_MULT = 1.5   # era 1.0, stop loss più largo
 TP_R_MULT   = 2.5
 ATR_MIN_PCT = 0.002
-ATR_MAX_PCT = 0.030                         # era 0.020, più permissivo
+ATR_MAX_PCT = 0.040                         # era 0.030, ancora più permissivo
 MAX_OPEN_POSITIONS = 5
 RISK_PCT = 0.0075                           # PATCH: era 0.015, dimezza il rischio per trade
 MAX_NEW_POSITIONS_PER_CYCLE = 2             # più ingressi per ciclo
@@ -1745,9 +1745,23 @@ while True:
                     risk_capital = float(qty_adj) * risk_per_unit
                     log(f"[LARGE][{symbol}] Bump notional → {order_amount:.2f} (min_req {min_notional_required:.2f})")
 
+            # Final check: se ancora sotto dopo tutti i bump, forza a min + 5%
             if order_amount < min_notional_required:
-                log(f"❌ Notional < required ({order_amount:.2f} < {min_notional_required:.2f}) {symbol}")
-                continue
+                if symbol in LARGE_ASSETS:
+                    # Ultima chance per large cap: forza minimo + margine
+                    force_notional = min_notional_required * 1.05
+                    force_qty = Decimal(str(force_notional / live_price))
+                    force_qty = (force_qty // step_dec) * step_dec
+                    if float(force_qty) > 0 and force_notional <= avail_cap:
+                        qty_adj = force_qty
+                        order_amount = float(qty_adj) * live_price
+                        log(f"[FORCE-LARGE][{symbol}] Ultima chance → {order_amount:.2f}")
+                    else:
+                        log(f"❌ Notional < required ({order_amount:.2f} < {min_notional_required:.2f}) {symbol}")
+                        continue
+                else:
+                    log(f"❌ Notional < required ({order_amount:.2f} < {min_notional_required:.2f}) {symbol}")
+                    continue
             if float(qty_adj) <= 0:
                 log(f"❌ Qty finale nulla per {symbol}")
                 continue
@@ -2145,4 +2159,4 @@ while True:
     # Sicurezza: attesa tra i cicli principali
     # Aggiungi pausa di sicurezza per evitare ciclo troppo veloce se tutto salta
     log(f"[CYCLE] Completato ciclo. Posizioni aperte: {len(open_positions)}")
-    time.sleep(60)  # ciclo ogni 60s; segnali su base timeframe corrente
+    time.sleep(60)  # ciclo ogni 60s; analisi ogni 15m + candele 60m
