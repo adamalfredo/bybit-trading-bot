@@ -1016,9 +1016,9 @@ def trailing_stop_worker():
                         position_data.pop(symbol, None)
                     continue
             if symbol in VOLATILE_ASSETS:
-                trailing_threshold = 0.02
+                trailing_threshold = max(TRAILING_ACTIVATION_THRESHOLD, 0.02)
             else:
-                trailing_threshold = 0.008
+                trailing_threshold = max(TRAILING_ACTIVATION_THRESHOLD / 2, 0.008)
             soglia_attivazione = entry["entry_price"] * (1 - trailing_threshold)
             log(f"[TRAILING CHECK][SHORT] {symbol} | entry_price={entry['entry_price']:.4f} | current_price={current_price:.4f} | soglia={soglia_attivazione:.4f} | trailing_active={entry['trailing_active']} | threshold={trailing_threshold}")
             if not entry["trailing_active"] and current_price <= soglia_attivazione:
