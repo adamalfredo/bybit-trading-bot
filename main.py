@@ -340,11 +340,10 @@ def get_instrument_info(symbol: str) -> dict:
         _instrument_cache[symbol] = {"data": parsed, "ts": now}
         return parsed
 
-# Sostituisci INTERAMENTE la funzione is_dust_position con questa
 def is_dust_position(symbol: str, qty: float, price: Optional[float] = None) -> bool:
     """
-    True se qty è sotto i minimi Bybit o il valore è sotto min_order_amt.
-    In fallback API, ignora min_qty/qty_step e valuta solo il notional.
+    True se NON rispetta min_qty/qty_step oppure min_order_amt.
+    In fallback API (strumento non trovato), usa SOLO il notional.
     """
     if qty is None or qty <= 0:
         return True
@@ -357,7 +356,7 @@ def is_dust_position(symbol: str, qty: float, price: Optional[float] = None) -> 
 
     min_notional = float(info.get("min_order_amt", 5) or 5)
 
-    # Se siamo in fallback, non fidarti di min_qty/qty_step (spesso 0.01 fittizio)
+    # In fallback non ci fidiamo di min_qty/qty_step: usa solo notional
     if info.get("fallback", False):
         return (qty * price) < min_notional
 
@@ -365,14 +364,9 @@ def is_dust_position(symbol: str, qty: float, price: Optional[float] = None) -> 
     qty_step = float(info.get("qty_step", 0.0) or 0.0)
     min_tradeable = max(min_qty, qty_step)
 
-    # Se supera il notional minimo, NON è dust anche se min_qty è borderline per rounding
-    if (qty * price) >= min_notional:
-        return False
-
-    # Altrimenti applica il vincolo quantità minima
-    if min_tradeable > 0 and qty < min_tradeable:
+    # Dust se viola QUALSIASI vincolo (quantità o notional)
+    if min_tradeable > 0 and qty + 1e-12 < min_tradeable:
         return True
-
     return (qty * price) < min_notional
 
 def is_symbol_supported(symbol: str) -> bool:
