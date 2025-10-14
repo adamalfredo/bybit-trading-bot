@@ -328,7 +328,27 @@ def get_instrument_info(symbol: str) -> dict:
         }
         _instrument_cache[symbol] = {"data": parsed, "ts": now}
         return parsed
-    
+
+def is_dust_position(symbol: str, qty: float, price: Optional[float] = None) -> bool:
+    """
+    True se qty è sotto i minimi Bybit (min_qty/qty_step) o il valore è sotto min_order_amt.
+    Evita di tracciare 'polvere' non vendibile.
+    """
+    if qty is None or qty <= 0:
+        return True
+    info = get_instrument_info(symbol)
+    min_qty = info.get("min_qty", 0.0) or 0.0
+    qty_step = info.get("qty_step", 0.0) or 0.0
+    min_tradeable = max(min_qty, qty_step)
+    if qty < min_tradeable:
+        return True
+    if price is None:
+        price = get_last_price(symbol)
+    if not price:
+        return False
+    min_notional = info.get("min_order_amt", 5) or 5
+    return (qty * price) < min_notional
+
 def is_symbol_supported(symbol: str) -> bool:
     info = get_instrument_info(symbol)
     return bool(info)  # se vuoto consideriamo non supportato
@@ -437,9 +457,9 @@ def market_sell(symbol: str, qty: float):
         return
 
     order_value = sell_qty * price
-    min_sell_value = 1.0  # soglia permissiva per evitare blocchi su residui
-    if order_value < min_sell_value:
-        log(f"❌ Valore vendita troppo basso per {symbol}: {order_value:.2f} < {min_sell_value}. Pulizia stato.")
+    min_sell_value = max(1.0, float(min_order_amt))
+    if value_now < min_sell_value:
+        log(f"❌ Valore vendita troppo basso per {symbol}: {value_now:.2f} < {min_sell_value}. Pulizia stato.")
         open_positions.discard(symbol)
         position_data.pop(symbol, None)
         last_exit_time[symbol] = time.time()
@@ -454,7 +474,7 @@ def market_sell(symbol: str, qty: float):
 
     while attempt <= max_attempts:
         # Allinea qty al passo, in stringa
-        qty_str = _format_qty_by_step(symbol, qty_work)
+        qty_str = _format_qty_with_step(qty_work, qty_step)
         try:
             qty_num = float(qty_str)
         except:
@@ -1212,6 +1232,9 @@ def sync_positions_from_wallet():
         price = get_last_price(sym)
         if not price:
             continue
+        if is_dust_position(sym, qty, price):
+            log(f"[SYNC][DUST][SKIP] {sym} qty={qty} → sotto minimi, non traccio")
+            continue
         pack = _compute_atr_and_risk(sym, price)
         if not pack:
             # fallback 1% se ATR non disponibile
@@ -1270,7 +1293,7 @@ def retrofit_missing_risk():
 def _snapshot_wallet_positions():
     """
     Ritorna dict {symbol: qty} per tutte le coin candidate (ASSETS ∪ open_positions)
-    escludendo USDT. Usa get_free_qty (wallet o available).
+    escludendo USDT. Usa get_free_qty (wallet o available). Filtra 'polvere'.
     """
     snapshot = {}
     symbols = set(ASSETS) | set(open_positions)
@@ -1279,6 +1302,10 @@ def _snapshot_wallet_positions():
             continue
         qty = get_free_qty(sym, quiet_missing=True)
         if qty and qty > 0:
+            price = get_last_price(sym)
+            if is_dust_position(sym, qty, price):
+                log(f"[WALLET][DUST][SKIP] {sym} qty={qty} value≈{(price or 0)*qty:.2f} → non traccio")
+                continue
             snapshot[sym] = qty
     return snapshot
 
@@ -1312,6 +1339,10 @@ def reconcile_positions():
     for sym in new_syms:
         price = get_last_price(sym)
         if not price:
+            continue
+        qty = wallet[sym]
+        if is_dust_position(sym, qty, price):
+            log(f"[RECONCILE][DUST][SKIP] {sym} qty={qty} → sotto minimi, non traccio")
             continue
         pack = _compute_atr_and_risk(sym, price)
         if not pack:
@@ -1885,6 +1916,11 @@ while True:
                 last_exit_time[symbol] = time.time()
                 position_data.pop(symbol, None)
             else:
+                # Se market_sell ha pulito come 'dust', la posizione non esiste più internamente
+                if symbol not in open_positions and symbol not in position_data:
+                    last_exit_time[symbol] = time.time()
+                    log(f"🧹 [EXIT][DUST] {symbol}: posizione rimossa (qty sotto minimi di scambio)")
+                    continue
                 log(f"❌ Vendita fallita per {symbol}")
 
     time.sleep(1)
@@ -1946,6 +1982,10 @@ while True:
                     position_data.pop(symbol, None)
                     continue
                 else:
+                    if symbol not in open_positions and symbol not in position_data:
+                        last_exit_time[symbol] = time.time()
+                        log(f"🧹 [SL][DUST] {symbol}: posizione rimossa (qty sotto minimi)")
+                        continue
                     log(f"❌ Vendita SL fallita per {symbol}")
 
         # Early Exit (momentum deteriora prima di trailing/giveback)
@@ -1990,6 +2030,12 @@ while True:
                             last_exit_time[symbol] = time.time()
                             position_data.pop(symbol, None)
                             continue
+                        else:
+                            # market_sell può aver già ripulito come 'dust'
+                            if symbol not in open_positions and symbol not in position_data:
+                                last_exit_time[symbol] = time.time()
+                                log(f"🧹 [EARLY][DUST] {symbol}: posizione rimossa (qty sotto minimi)")
+                                continue
 
         # Giveback exit: se forte ritracciamento dal massimo favorevole
         if ENABLE_GIVEBACK_EXIT:
@@ -2025,6 +2071,11 @@ while True:
                             last_exit_time[symbol] = time.time()
                             position_data.pop(symbol, None)
                             continue
+                        else:
+                            if symbol not in open_positions and symbol not in position_data:
+                                last_exit_time[symbol] = time.time()
+                                log(f"🧹 [GIVEBACK][DUST] {symbol}: posizione rimossa (qty sotto minimi)")
+                                continue
 
         # TP hard
         if current_price >= entry["tp"]:
@@ -2058,6 +2109,10 @@ while True:
                     position_data.pop(symbol, None)
                     continue
                 else:
+                    if symbol not in open_positions and symbol not in position_data:
+                        last_exit_time[symbol] = time.time()
+                        log(f"🧹 [TP][DUST] {symbol}: posizione rimossa (qty sotto minimi)")
+                        continue
                     log(f"❌ Vendita TP fallita per {symbol}")
 
         # Gestione trailing
@@ -2154,6 +2209,10 @@ while True:
                         last_exit_time[symbol] = time.time()
                         position_data.pop(symbol, None)
                     else:
+                        if symbol not in open_positions and symbol not in position_data:
+                            last_exit_time[symbol] = time.time()
+                            log(f"🧹 [TRAIL][DUST] {symbol}: posizione rimossa (qty sotto minimi)")
+                            continue
                         log(f"❌ Vendita fallita Trailing {symbol}")
 
     # Sicurezza: attesa tra i cicli principali
