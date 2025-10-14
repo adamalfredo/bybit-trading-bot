@@ -306,11 +306,11 @@ def get_instrument_info(symbol: str) -> dict:
         except:
             tick_size = 0.01
 
-        qty_step_raw = lot.get("qtyStep", "0.01") or "0.01"
+        qty_step_raw = lot.get("qtyStep", "0.000001") or "0.000001"
         try:
             qty_step = float(qty_step_raw)
         except:
-            qty_step = 0.01
+            qty_step = 0.000001
 
         parsed = {
             "min_qty": float(lot.get("minOrderQty", 0) or 0),
@@ -342,8 +342,8 @@ def get_instrument_info(symbol: str) -> dict:
 
 def is_dust_position(symbol: str, qty: float, price: Optional[float] = None) -> bool:
     """
-    True se NON rispetta min_qty/qty_step oppure min_order_amt.
-    In fallback API (strumento non trovato), usa SOLO il notional.
+    True se NON rispetta min_qty oppure il valore è sotto min_order_amt.
+    In fallback API, valuta solo il notional.
     """
     if qty is None or qty <= 0:
         return True
@@ -356,16 +356,18 @@ def is_dust_position(symbol: str, qty: float, price: Optional[float] = None) -> 
 
     min_notional = float(info.get("min_order_amt", 5) or 5)
 
-    # In fallback non ci fidiamo di min_qty/qty_step: usa solo notional
+    # In fallback non fidarti di min_qty/qty_step: usa solo notional
     if info.get("fallback", False):
         return (qty * price) < min_notional
 
     min_qty = float(info.get("min_qty", 0.0) or 0.0)
-    qty_step = float(info.get("qty_step", 0.0) or 0.0)
-    min_tradeable = max(min_qty, qty_step)
 
-    # Dust se viola QUALSIASI vincolo (quantità o notional)
-    if min_tradeable > 0 and qty + 1e-12 < min_tradeable:
+    # Se rispetta min_qty e notional, NON è dust
+    if (min_qty == 0.0 or qty + 1e-12 >= min_qty) and (qty * price) >= min_notional:
+        return False
+
+    # Dust se viola almeno uno dei due vincoli
+    if min_qty > 0.0 and qty + 1e-12 < min_qty:
         return True
     return (qty * price) < min_notional
 
@@ -462,15 +464,14 @@ def market_sell(symbol: str, qty: float):
     min_qty = info.get("min_qty", 0.0) or 0.0
 
     # Override opzionali per symbol noti
-    step_overrides = {"BARDUSDT": 1.0, "ETHUSDT": 0.001, "BTCUSDT": 0.00001}
+    step_overrides = {"BARDUSDT": 1.0, "ETHUSDT": 0.001, "BTCUSDT": 0.00001, "STETHUSDT": 0.0001}
     if symbol in step_overrides:
         qty_step = step_overrides[symbol]
         log(f"[OVERRIDE][{symbol}] Forzo qty_step: {qty_step}")
 
-    # Dust: sotto la quantità minima vendibile non è tecnicamente inviabile
-    min_tradeable = max(min_qty, qty_step)
-    if sell_qty < min_tradeable:
-        log(f"🧹 Dust non vendibile per {symbol}: qty={sell_qty} < min_tradeable={min_tradeable}. Pulizia stato interno.")
+    # Dust: valida SOLO min_qty (qty_step verrà applicato in formattazione)
+    if min_qty > 0.0 and sell_qty + 1e-12 < min_qty:
+        log(f"🧹 Qty sotto min_qty per {symbol}: qty={sell_qty} < min_qty={min_qty}. Pulizia stato interno.")
         open_positions.discard(symbol)
         position_data.pop(symbol, None)
         last_exit_time[symbol] = time.time()
