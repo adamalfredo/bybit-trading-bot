@@ -468,6 +468,10 @@ def market_sell(symbol: str, qty: float):
     if symbol in step_overrides:
         qty_step = step_overrides[symbol]
         log(f"[OVERRIDE][{symbol}] Forzo qty_step: {qty_step}")
+    
+    # Soglie per decidere un eventuale secondo SELL (parziale)
+    min_tradeable = max(float(min_qty), float(qty_step))  # qty minima sensata per un ordine
+    min_notional = float(min_order_amt)
 
     # Dust: valida SOLO min_qty (qty_step verrà applicato in formattazione)
     if min_qty > 0.0 and sell_qty + 1e-12 < min_qty:
@@ -552,12 +556,18 @@ def market_sell(symbol: str, qty: float):
                 sold_est = max(0.0, pre_wallet - remaining_wallet)
                 remaining_wanted = max(0.0, desired_qty - sold_est)
 
-                if remaining_wanted >= min_tradeable and remaining_wallet >= min_tradeable:
-                    log(f"⚠️ [PARTIAL SELL][{symbol}] Venduto≈{sold_est:.6f}, voglio ancora {remaining_wanted:.6f} → retry per il residuo")
+                # Tenta un secondo SELL solo se la quantità residua è realmente tradabile
+                if (
+                    remaining_wanted >= min_tradeable
+                    and remaining_wallet >= min_tradeable
+                    and (remaining_wanted * price) >= min_notional
+                    and (remaining_wallet * price) >= min_notional
+                ):
+                    log(f"⚠️ [PARTIAL SELL][{symbol}] Venduto≈{sold_est:.6f}, residuo {remaining_wanted:.6f} → provo a vendere il residuo")
                     return market_sell(symbol, remaining_wanted)
                 else:
-                    log(f"✅ [COMPLETE SELL][{symbol}] Vendita completata (venduto≈{sold_est:.6f})")
-                return resp
+                    log(f"✅ [COMPLETE SELL][{symbol}] Vendita completata (venduto≈{sold_est:.6f}, residuo non tradabile)")
+                    return resp
 
             rc = rj.get("retCode")
             if rc == 170137:
