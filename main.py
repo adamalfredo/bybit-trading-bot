@@ -249,10 +249,11 @@ def get_last_price(symbol: str) -> Optional[float]:
 # --- CACHE INFO STRUMENTI (nuovo) ---
 _instrument_cache = {}
 
+# Sostituisci INTERAMENTE la funzione get_instrument_info con questa
 def get_instrument_info(symbol: str) -> dict:
     """
     Info strumento con cache 5m.
-    Fallback conservativo: qty_step=0.01, min_order_amt=10 per evitare 170137/170140 ripetitivi.
+    Fallback conservativo sui vincoli di NOTIONAL, ma PERMISSIVO su qty_step/min_qty per evitare falsi 'dust'.
     """
     now = time.time()
     cached = _instrument_cache.get(symbol)
@@ -267,43 +268,50 @@ def get_instrument_info(symbol: str) -> dict:
         if data.get("retCode") != 0:
             log(f"❌ get_instrument_info retCode {data.get('retCode')} {data.get('retMsg')} → fallback {symbol}")
             parsed = {
-                "min_qty": 0.01,
-                "qty_step": 0.01,
+                "min_qty": 0.0,            # permissivo
+                "qty_step": 0.000001,      # permissivo
                 "precision": 4,
                 "tick_size": 0.01,
-                "min_order_amt": 10.0,
+                "min_order_amt": 10.0,     # vincolo notional conservativo
                 "max_order_qty": None,
-                "max_order_amt": None
+                "max_order_amt": None,
+                "fallback": True
             }
             _instrument_cache[symbol] = {"data": parsed, "ts": now}
             return parsed
+
         lst = data.get("result", {}).get("list", [])
         if not lst:
             log(f"❌ get_instrument_info lista vuota → fallback {symbol}")
             parsed = {
-                "min_qty": 0.01,
-                "qty_step": 0.01,
+                "min_qty": 0.0,
+                "qty_step": 0.000001,
                 "precision": 4,
                 "tick_size": 0.01,
                 "min_order_amt": 10.0,
                 "max_order_qty": None,
-                "max_order_amt": None
+                "max_order_amt": None,
+                "fallback": True
             }
             _instrument_cache[symbol] = {"data": parsed, "ts": now}
             return parsed
+
         info = lst[0]
         lot = info.get("lotSizeFilter", {})
         price_filter = info.get("priceFilter", {})
+
         tick_size_raw = price_filter.get("tickSize", "0.01") or "0.01"
         try:
             tick_size = float(tick_size_raw)
         except:
             tick_size = 0.01
+
         qty_step_raw = lot.get("qtyStep", "0.01") or "0.01"
         try:
             qty_step = float(qty_step_raw)
         except:
             qty_step = 0.01
+
         parsed = {
             "min_qty": float(lot.get("minOrderQty", 0) or 0),
             "qty_step": qty_step,
@@ -311,42 +319,60 @@ def get_instrument_info(symbol: str) -> dict:
             "tick_size": tick_size,
             "min_order_amt": float(info.get("minOrderAmt", 10) or 10),
             "max_order_qty": float(lot.get("maxOrderQty")) if lot.get("maxOrderQty") else None,
-            "max_order_amt": float(lot.get("maxOrderAmt")) if lot.get("maxOrderAmt") else None
-        }
-        _instrument_cache[symbol] = {"data": parsed, "ts": now}
-        return parsed
-    except Exception as e:
-        log(f"❌ Errore get_instrument_info eccezione → fallback {symbol}: {e}")
-        parsed = {
-            "min_qty": 0.01,
-            "qty_step": 0.01,
-            "precision": 4,
-            "tick_size": 0.01,
-            "min_order_amt": 10.0,
-            "max_order_qty": None,
-            "max_order_amt": None
+            "max_order_amt": float(lot.get("maxOrderAmt")) if lot.get("maxOrderAmt") else None,
+            "fallback": False
         }
         _instrument_cache[symbol] = {"data": parsed, "ts": now}
         return parsed
 
+    except Exception as e:
+        log(f"❌ Errore get_instrument_info eccezione → fallback {symbol}: {e}")
+        parsed = {
+            "min_qty": 0.0,
+            "qty_step": 0.000001,
+            "precision": 4,
+            "tick_size": 0.01,
+            "min_order_amt": 10.0,
+            "max_order_qty": None,
+            "max_order_amt": None,
+            "fallback": True
+        }
+        _instrument_cache[symbol] = {"data": parsed, "ts": now}
+        return parsed
+
+# Sostituisci INTERAMENTE la funzione is_dust_position con questa
 def is_dust_position(symbol: str, qty: float, price: Optional[float] = None) -> bool:
     """
-    True se qty è sotto i minimi Bybit (min_qty/qty_step) o il valore è sotto min_order_amt.
-    Evita di tracciare 'polvere' non vendibile.
+    True se qty è sotto i minimi Bybit o il valore è sotto min_order_amt.
+    In fallback API, ignora min_qty/qty_step e valuta solo il notional.
     """
     if qty is None or qty <= 0:
         return True
+
     info = get_instrument_info(symbol)
-    min_qty = info.get("min_qty", 0.0) or 0.0
-    qty_step = info.get("qty_step", 0.0) or 0.0
-    min_tradeable = max(min_qty, qty_step)
-    if qty < min_tradeable:
-        return True
     if price is None:
         price = get_last_price(symbol)
     if not price:
         return False
-    min_notional = info.get("min_order_amt", 5) or 5
+
+    min_notional = float(info.get("min_order_amt", 5) or 5)
+
+    # Se siamo in fallback, non fidarti di min_qty/qty_step (spesso 0.01 fittizio)
+    if info.get("fallback", False):
+        return (qty * price) < min_notional
+
+    min_qty = float(info.get("min_qty", 0.0) or 0.0)
+    qty_step = float(info.get("qty_step", 0.0) or 0.0)
+    min_tradeable = max(min_qty, qty_step)
+
+    # Se supera il notional minimo, NON è dust anche se min_qty è borderline per rounding
+    if (qty * price) >= min_notional:
+        return False
+
+    # Altrimenti applica il vincolo quantità minima
+    if min_tradeable > 0 and qty < min_tradeable:
+        return True
+
     return (qty * price) < min_notional
 
 def is_symbol_supported(symbol: str) -> bool:
@@ -458,8 +484,8 @@ def market_sell(symbol: str, qty: float):
 
     order_value = sell_qty * price
     min_sell_value = max(1.0, float(min_order_amt))
-    if value_now < min_sell_value:
-        log(f"❌ Valore vendita troppo basso per {symbol}: {value_now:.2f} < {min_sell_value}. Pulizia stato.")
+    if order_value < min_sell_value:
+        log(f"❌ Valore vendita troppo basso per {symbol}: {order_value:.2f} < {min_sell_value}. Pulizia stato.")
         open_positions.discard(symbol)
         position_data.pop(symbol, None)
         last_exit_time[symbol] = time.time()
