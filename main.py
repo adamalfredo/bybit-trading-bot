@@ -249,11 +249,10 @@ def get_last_price(symbol: str) -> Optional[float]:
 # --- CACHE INFO STRUMENTI (nuovo) ---
 _instrument_cache = {}
 
-# Sostituisci INTERAMENTE la funzione get_instrument_info con questa
 def get_instrument_info(symbol: str) -> dict:
     """
     Info strumento con cache 5m.
-    Fallback conservativo sui vincoli di NOTIONAL, ma PERMISSIVO su qty_step/min_qty per evitare falsi 'dust'.
+    Fallback conservativo sui vincoli di NOTIONAL, ma con override min_qty/qty_step per asset noti (BNB, MNT).
     """
     now = time.time()
     cached = _instrument_cache.get(symbol)
@@ -268,15 +267,24 @@ def get_instrument_info(symbol: str) -> dict:
         if data.get("retCode") != 0:
             log(f"❌ get_instrument_info retCode {data.get('retCode')} {data.get('retMsg')} → fallback {symbol}")
             parsed = {
-                "min_qty": 0.0,            # permissivo
-                "qty_step": 0.000001,      # permissivo
+                "min_qty": 0.0,
+                "qty_step": 0.001,   # fallback più realistico per spot
                 "precision": 4,
                 "tick_size": 0.01,
-                "min_order_amt": 10.0,     # vincolo notional conservativo
+                "min_order_amt": 10.0,
                 "max_order_qty": None,
                 "max_order_amt": None,
                 "fallback": True
             }
+            # Override noti: rendi affidabili min_qty/qty_step anche in fallback
+            if symbol == "BNBUSDT":
+                parsed["min_qty"] = 0.01
+                parsed["qty_step"] = 0.001
+                parsed["fallback"] = False
+            if symbol == "MNTUSDT":
+                parsed["min_qty"] = 10.0
+                parsed["qty_step"] = 0.01
+                parsed["fallback"] = False
             _instrument_cache[symbol] = {"data": parsed, "ts": now}
             return parsed
 
@@ -285,7 +293,7 @@ def get_instrument_info(symbol: str) -> dict:
             log(f"❌ get_instrument_info lista vuota → fallback {symbol}")
             parsed = {
                 "min_qty": 0.0,
-                "qty_step": 0.000001,
+                "qty_step": 0.001,
                 "precision": 4,
                 "tick_size": 0.01,
                 "min_order_amt": 10.0,
@@ -293,12 +301,20 @@ def get_instrument_info(symbol: str) -> dict:
                 "max_order_amt": None,
                 "fallback": True
             }
+            if symbol == "BNBUSDT":
+                parsed["min_qty"] = 0.01
+                parsed["qty_step"] = 0.001
+                parsed["fallback"] = False
+            if symbol == "MNTUSDT":
+                parsed["min_qty"] = 10.0
+                parsed["qty_step"] = 0.01
+                parsed["fallback"] = False
             _instrument_cache[symbol] = {"data": parsed, "ts": now}
             return parsed
 
         info = lst[0]
-        lot = info.get("lotSizeFilter", {})
-        price_filter = info.get("priceFilter", {})
+        lot = info.get("lotSizeFilter", {}) or {}
+        price_filter = info.get("priceFilter", {}) or {}
 
         tick_size_raw = price_filter.get("tickSize", "0.01") or "0.01"
         try:
@@ -306,14 +322,17 @@ def get_instrument_info(symbol: str) -> dict:
         except:
             tick_size = 0.01
 
-        qty_step_raw = lot.get("qtyStep", "0.000001") or "0.000001"
+        # qty_step: preferisci qtyStep; se mancante usa basePrecision o, in ultima istanza, minOrderQty come “granularità”
+        qty_step_raw = lot.get("qtyStep") or lot.get("basePrecision") or lot.get("minOrderQty") or "0.001"
         try:
             qty_step = float(qty_step_raw)
         except:
-            qty_step = 0.000001
+            qty_step = 0.001
+
+        min_qty = float(lot.get("minOrderQty", 0) or 0.0)
 
         parsed = {
-            "min_qty": float(lot.get("minOrderQty", 0) or 0),
+            "min_qty": min_qty,
             "qty_step": qty_step,
             "precision": int(info.get("priceScale", 4) or 4),
             "tick_size": tick_size,
@@ -322,6 +341,15 @@ def get_instrument_info(symbol: str) -> dict:
             "max_order_amt": float(lot.get("maxOrderAmt")) if lot.get("maxOrderAmt") else None,
             "fallback": False
         }
+
+        # Override sicuri per asset noti
+        if symbol == "BNBUSDT":
+            if parsed["min_qty"] < 0.01: parsed["min_qty"] = 0.01
+            if parsed["qty_step"] < 0.001: parsed["qty_step"] = 0.001
+        if symbol == "MNTUSDT":
+            if parsed["min_qty"] < 10.0: parsed["min_qty"] = 10.0
+            if parsed["qty_step"] < 0.01: parsed["qty_step"] = 0.01
+
         _instrument_cache[symbol] = {"data": parsed, "ts": now}
         return parsed
 
@@ -329,7 +357,7 @@ def get_instrument_info(symbol: str) -> dict:
         log(f"❌ Errore get_instrument_info eccezione → fallback {symbol}: {e}")
         parsed = {
             "min_qty": 0.0,
-            "qty_step": 0.000001,
+            "qty_step": 0.001,
             "precision": 4,
             "tick_size": 0.01,
             "min_order_amt": 10.0,
@@ -337,6 +365,14 @@ def get_instrument_info(symbol: str) -> dict:
             "max_order_amt": None,
             "fallback": True
         }
+        if symbol == "BNBUSDT":
+            parsed["min_qty"] = 0.01
+            parsed["qty_step"] = 0.001
+            parsed["fallback"] = False
+        if symbol == "MNTUSDT":
+            parsed["min_qty"] = 10.0
+            parsed["qty_step"] = 0.01
+            parsed["fallback"] = False
         _instrument_cache[symbol] = {"data": parsed, "ts": now}
         return parsed
 
@@ -482,7 +518,7 @@ def market_sell(symbol: str, qty: float):
         return
 
     order_value = sell_qty * price
-    min_sell_value = max(1.0, float(min_order_amt))
+    min_sell_value = 1.0  # per SELL non bloccare in pre-check col min_order_amt (lascia decidere all'API)
     if order_value < min_sell_value:
         log(f"❌ Valore vendita troppo basso per {symbol}: {order_value:.2f} < {min_sell_value}. Pulizia stato.")
         open_positions.discard(symbol)
@@ -507,11 +543,8 @@ def market_sell(symbol: str, qty: float):
             return
 
         if qty_num <= 0:
-            log(f"🧹 Qty formattata nulla (dust) per {symbol} → pulizia stato interno")
-            open_positions.discard(symbol)
-            position_data.pop(symbol, None)
-            last_exit_time[symbol] = time.time()
-            return
+            log(f"⚠️ Qty formattata nulla per {symbol} (step={qty_step}) → stop retry (nessuna pulizia stato)")
+            break
 
         value_now = qty_num * price
         if value_now < min_sell_value:
@@ -570,18 +603,29 @@ def market_sell(symbol: str, qty: float):
                     return resp
 
             rc = rj.get("retCode")
+            
             if rc == 170137:
-                log(f"[RETRY][{symbol}] 170137 decimali → escalation step")
-                # Escalation della step size
-                if qty_step < 0.1:   qty_step = 0.1
-                elif qty_step < 1.0: qty_step = 1.0
-                elif qty_step < 10.: qty_step = 10.0
-                else:
-                    log(f"❌ [FAIL][{symbol}] Step escalation esaurita")
-                    break
-                qty_work = sell_qty
+                log(f"[RETRY][{symbol}] 170137 (decimali qty) → refresh instrument e riallineo passo")
+                _instrument_cache.pop(symbol, None)
+                info = get_instrument_info(symbol)
+                new_step = info.get("qty_step", qty_step)
+                # Safety overrides per asset noti
+                if symbol == "BNBUSDT" and new_step < 0.001:
+                    new_step = 0.001
+                if symbol == "MNTUSDT" and new_step < 0.01:
+                    new_step = 0.01
+                qty_step = new_step
+                qty_work = sell_qty  # riparti dalla qty originale, rifloor al nuovo step
                 attempt += 1
                 continue
+
+            if rc == 170140:
+                # Notional troppo basso per Bybit → irrimediabile, pulisci stato ed esci per evitare loop
+                log(f"🧹 [SELL][{symbol}] 170140 notional basso → pulizia stato interno")
+                open_positions.discard(symbol)
+                position_data.pop(symbol, None)
+                last_exit_time[symbol] = time.time()
+                return resp
 
             # altri errori → riduci qty e riprova
             if attempt < max_attempts:
