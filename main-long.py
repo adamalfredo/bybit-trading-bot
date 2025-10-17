@@ -506,7 +506,14 @@ def market_long(symbol: str, usdt_amount: float):
     max_retries = 3
     for attempt in range(1, max_retries + 1):
         qty_str = _format_qty_with_step(float(qty_aligned), qty_step)
-        body = {"category": "linear", "symbol": symbol, "side": "Buy", "orderType": "Market", "qty": qty_str}
+        body = {
+            "category": "linear",
+            "symbol": symbol,
+            "side": "Buy",
+            "orderType": "Market",
+            "qty": qty_str,
+            "positionIdx": 1  # Hedge: lato LONG
+        }
         ts = str(int(time.time() * 1000))
         body_json = json.dumps(body, separators=(",", ":"))
         payload = f"{ts}{KEY}5000{body_json}"
@@ -560,7 +567,15 @@ def market_close_long(symbol: str, qty: float):
     max_retries = 3
     for attempt in range(1, max_retries + 1):
         qty_str = _format_qty_with_step(float(qty_aligned), qty_step)
-        body = {"category": "linear", "symbol": symbol, "side": "Sell", "orderType": "Market", "qty": qty_str, "reduceOnly": "true"}
+        body = {
+            "category": "linear",
+            "symbol": symbol,
+            "side": "Sell",
+            "orderType": "Market",
+            "qty": qty_str,
+            "reduceOnly": "true",
+            "positionIdx": 1  # Hedge: chiude il lato LONG
+        }
         ts = str(int(time.time() * 1000))
         body_json = json.dumps(body, separators=(",", ":"))
         payload = f"{ts}{KEY}5000{body_json}"

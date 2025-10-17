@@ -476,7 +476,8 @@ def market_short(symbol: str, usdt_amount: float):
             "symbol": symbol,
             "side": "Sell",
             "orderType": "Market",
-            "qty": qty_str
+            "qty": qty_str,
+            "positionIdx": 2  # SHORT
         }
         
         # Invio ordine (mantieni la logica esistente)
@@ -557,7 +558,8 @@ def market_cover(symbol: str, qty: float):
             "side": "Buy",  # Chiusura short = Buy
             "orderType": "Market",
             "qty": qty_str,
-            "reduceOnly": "true"
+            "reduceOnly": "true",
+            "positionIdx": 2  # SHORT
         }
         
         ts = str(int(time.time() * 1000))
