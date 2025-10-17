@@ -42,7 +42,11 @@ cooldown = {}
 MAX_LOSS_PCT = -5.0  # perdita massima accettata su SHORT in %, default -5
 ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
-
+# --- MTF entry: segnali su 15m, trend su 4h/1h ---
+USE_MTF_ENTRY = True
+ENTRY_TF_MINUTES = 15
+ENTRY_ADX_VOLATILE = 12   # soglia ADX più bassa su 15m per non arrivare tardi
+ENTRY_ADX_STABLE = 10
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
 ASSETS = []
 LESS_VOLATILE_ASSETS = []
@@ -662,7 +666,8 @@ def analyze_asset(symbol: str):
         log(f"[BREAKOUT-FILTER][{symbol}] Non in breakout 6h, salto analisi.")
         return None, None, None
     try:
-        df = fetch_history(symbol)
+        # Segnali di timing su 15m per anticipare l'ingresso
+        df = fetch_history(symbol, interval=ENTRY_TF_MINUTES if USE_MTF_ENTRY else INTERVAL_MINUTES)
         if df is None or len(df) < 3:
             log(f"[ANALYZE] Dati storici insufficienti per {symbol} (df is None o len < 3)")
             return None, None, None
@@ -698,14 +703,14 @@ def analyze_asset(symbol: str):
             return None, None, None
 
         is_volatile = symbol in VOLATILE_ASSETS
-        adx_threshold = 15 if is_volatile else 10
+        adx_threshold = (ENTRY_ADX_VOLATILE if is_volatile else ENTRY_ADX_STABLE)
 
         last = df.iloc[-1]
         prev = df.iloc[-2]
         price = float(last["Close"])
 
-        # Filtro trend più flessibile: consenti SHORT anche in correzioni moderate
-        trend_ratio = last["ema50"] / last["ema200"]
+        # Filtro iper-bull per evitare entrare short contro trend forte (calcolato sul TF di entry)
+        trend_ratio = last["ema50"] / last["ema200"] if last["ema200"] else 1.0
         if trend_ratio > 1.02:  # Solo se EMA50 > 2% sopra EMA200
             log(f"[STRATEGY][{symbol}] Bull market troppo forte, skip SHORT (ratio={trend_ratio:.4f})")
             return None, None, None
@@ -713,6 +718,12 @@ def analyze_asset(symbol: str):
         # --- SHORT: condizioni ribassiste ---
         entry_conditions = []
         entry_strategies = []
+        # Trigger anticipato: incrocio EMA20/EMA50 o MACD cross su 15m
+        if prev["ema20"] >= prev["ema50"] and last["ema20"] < last["ema50"]:
+            entry_conditions.append(True); entry_strategies.append("Incrocio EMA 20/50 (15m)")
+        if (last["macd"] - last["macd_signal"]) < 0 and (prev["macd"] - prev["macd_signal"]) >= 0:
+            entry_conditions.append(True); entry_strategies.append("MACD cross down (15m)")
+
         if is_volatile:
             # SHORT: breakdown BB, incrocio SMA ribassista, MACD bearish
             cond1 = last["Close"] < last["bb_lower"]
@@ -738,22 +749,19 @@ def analyze_asset(symbol: str):
                 log(f"[STRATEGY][{symbol}] Nessun segnale ENTRY SHORT: condizioni soddisfatte = {len(entry_conditions)}")
         else:
             # SHORT: incrocio EMA ribassista, MACD bearish, trend EMA+RSI ribassista
-            cond1 = prev["ema20"] > prev["ema50"]
-            cond2 = last["ema20"] < last["ema50"]
-            if cond1 and cond2:
-                entry_conditions.append(True)
-                entry_strategies.append("Incrocio EMA 20/50 (bearish)")
+            # Se EMA20 < EMA50 su 15m, considera già valido
+            if last["ema20"] < last["ema50"]:
+                entry_conditions.append(True); entry_strategies.append("EMA20<EMA50 (15m)")
             cond3 = last["macd"] < last["macd_signal"]
             cond4 = last["adx"] > adx_threshold
             if cond3 and cond4:
                 entry_conditions.append(True)
-                entry_strategies.append("MACD bearish (stabile)")
-            cond5 = last["rsi"] < 40  # PATCH: RSI sotto 40, più selettivo
+                entry_strategies.append("MACD bearish (15m)")
+            cond5 = last["rsi"] < 45  # meno restrittivo su 15m
             cond6 = last["ema20"] < last["ema50"]
             if cond5 and cond6:
                 entry_conditions.append(True)
-                entry_strategies.append("Trend EMA + RSI (bearish)")
-            # PATCH: almeno 2 condizioni ribassiste vere per entrare short su meno volatili
+                entry_strategies.append("Trend EMA+RSI (15m)")
             if len(entry_conditions) >= 1:
                 log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT generato: strategie attive: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
