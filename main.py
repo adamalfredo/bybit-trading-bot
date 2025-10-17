@@ -723,7 +723,7 @@ def execute_buy_order(symbol: str, qty_dec: Decimal, prefer_limit: bool,
           170140 (notional basso) → refresh & escalation min_order_amt
           170134 (decimali prezzo LIMIT) → riduce qty
           170131 (insufficient balance) → riduce qty
-          170137 (decimali qty) → forza passo ≥0.01 e rifloor
+          170137 (decimali qty) → refresh strumenti e rifloor con qty_step reale (nessun clamp)
     """
     global LAST_ORDER_RETCODE
     info = get_instrument_info(symbol)
