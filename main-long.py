@@ -663,9 +663,17 @@ def is_symbol_linear(symbol):
 # 4. Inverti la logica di ingresso/uscita in analyze_asset
 def analyze_asset(symbol: str):
     # Trend rialzista su 4h o 1h
-    if not (is_trending_up(symbol, tf="240") or is_trending_up_1h(symbol, tf="60")):
-        log(f"[TREND-FILTER][{symbol}] Non in uptrend su 4h né su 1h, salto analisi.")
+    # if not (is_trending_up(symbol, tf="240") or is_trending_up_1h(symbol, tf="60")):
+    #     log(f"[TREND-FILTER][{symbol}] Non in uptrend su 4h né su 1h, salto analisi.")
+    #     return None, None, None
+    if not (is_trending_up(symbol, "240") and is_trending_up_1h(symbol, "60")):
+        log(f"[TREND-FILTER][{symbol}] No alignment 4h & 1h uptrend, skip LONG.")
         return None, None, None
+    
+    if is_trending_down(symbol, "240") or is_trending_down_1h(symbol, "60"):
+        log(f"[TREND-FILTER][{symbol}] Downtrend su 4h/1h rilevato, skip LONG.")
+        return None, None, None
+    
     if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_low(symbol):
         # per LONG puoi anche usare un filtro “breakout 6h al rialzo” se lo implementi
         pass
