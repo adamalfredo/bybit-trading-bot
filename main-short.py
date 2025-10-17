@@ -38,13 +38,16 @@ SL_MIN = 1.0
 SL_MAX = 2.5
 TRAILING_MIN = 0.015  # era 0.005, trailing più largo
 TRAILING_MAX = 0.05   # era 0.03, trailing più largo
-TRAILING_ACTIVATION_THRESHOLD = 0.04  # era 0.02, trailing parte dopo -4%
+TRAILING_ACTIVATION_THRESHOLD = 0.02  # trailing parte dopo -2%
 TRAILING_SL_BUFFER = 0.015            # era 0.007, trailing SL più largo
 TRAILING_DISTANCE = 0.04              # era 0.02, trailing SL più largo
+ENABLE_TP1 = True       # abilita TP parziale a 1R
+TP1_R_MULT = 1.0        # target TP1 a 1R
+TP1_CLOSE_PCT = 0.5     # chiudi il 50% a TP1
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
 COOLDOWN_MINUTES = 60
 cooldown = {}
-MAX_LOSS_PCT = -5.0  # perdita massima accettata su SHORT in %, default -5
+MAX_LOSS_PCT = -2.5  # perdita massima accettata su SHORT in %, più stretto
 ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
 # --- MTF entry: segnali su 15m, trend su 4h/1h ---
@@ -983,6 +986,7 @@ def get_portfolio_value():
     return total, usdt_balance, coin_values
 
 low_balance_alerted = False  # Deve essere fuori dal ciclo per persistere tra i cicli
+
 def trailing_stop_worker():
     log("[DEBUG] Avvio ciclo trailing_stop_worker")
     while True:
@@ -990,6 +994,7 @@ def trailing_stop_worker():
             log(f"[DEBUG] Worker processa: {symbol} | open_positions: {open_positions} | position_data: {position_data.keys()}")
             if symbol not in position_data:
                 continue
+
             saldo = get_open_short_qty(symbol)
             info = get_instrument_info(symbol)
             min_qty = info.get("min_qty", 0.0)
@@ -999,31 +1004,32 @@ def trailing_stop_worker():
                 open_positions.discard(symbol)
                 position_data.pop(symbol, None)
                 continue
+
             entry = position_data[symbol]
             holding_seconds = time.time() - entry.get("entry_time", 0)
             if holding_seconds < MIN_HOLDING_MINUTES * 60:
                 log(f"[HOLDING][FAST] {symbol}: attendo ancora {MIN_HOLDING_MINUTES - holding_seconds/60:.1f} min prima di attivare SL/TSL")
                 continue
+
             current_price = get_last_price(symbol)
             if not current_price:
                 continue
-            # Calcola MFE/MAE per SHORT
+
+            # MFE/MAE tracking (SHORT)
             if "mfe" not in entry:
                 entry["mfe"] = 0.0
                 entry["mae"] = 0.0
-            
             entry_price = entry.get("entry_price", current_price)
-            # Per SHORT: MFE = quanto in basso è andato (profitto), MAE = quanto in alto (perdita)
             profit_pct = ((entry_price - current_price) / entry_price) * 100
             if profit_pct > entry["mfe"]:
                 entry["mfe"] = profit_pct
             if profit_pct < entry["mae"]:
                 entry["mae"] = profit_pct
-                
-            entry_price = entry.get("entry_price", current_price)
+
             entry_cost = entry.get("entry_cost", ORDER_USDT)
             qty = get_open_short_qty(symbol)
-            # PATCH MAX LOSS SHORT
+
+            # Cut perdita massima
             if qty > 0 and entry_price and current_price:
                 pnl_pct = ((entry_price - current_price) / entry_price) * 100
                 if pnl_pct < MAX_LOSS_PCT:
@@ -1032,43 +1038,63 @@ def trailing_stop_worker():
                     resp = market_cover(symbol, qty)
                     if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                         exit_value = current_price * qty
-                        delta = exit_value - entry_cost
                         log_trade_to_google(
-                            symbol, 
-                            entry_price, 
-                            current_price, 
-                            pnl_pct, 
-                            "MAX LOSS", 
-                            "Forced Exit", 
-                            usdt_entry=entry_cost,
-                            usdt_exit=exit_value,
+                            symbol, entry_price, current_price, pnl_pct,
+                            "MAX LOSS", "Forced Exit",
+                            usdt_entry=entry_cost, usdt_exit=exit_value,
                             holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
-                            mfe_r=entry.get('mfe', 0),
-                            mae_r=entry.get('mae', 0),
-                            r_multiple=None,
-                            market_condition="max_loss"
+                            mfe_r=entry.get('mfe', 0), mae_r=entry.get('mae', 0),
+                            r_multiple=None, market_condition="max_loss"
                         )
                         open_positions.discard(symbol)
                         last_exit_time[symbol] = time.time()
                         position_data.pop(symbol, None)
                     continue
+
+            # TP1 a 1R (SHORT): chiudi 50% e porta SL a breakeven
+            if ENABLE_TP1 and qty and qty > 0 and "pt1_done" not in entry:
+                risk_per_unit = max(0.0, entry.get("sl", entry_price * 1.01) - entry_price)
+                if risk_per_unit > 0:
+                    target_1r = entry_price - (risk_per_unit * TP1_R_MULT)
+                    if current_price <= target_1r:
+                        # chiudi metà posizione
+                        info_p = get_instrument_info(symbol)
+                        step_p = info_p.get("qty_step", 0.01)
+                        half_qty = qty * TP1_CLOSE_PCT
+                        half_dec = Decimal(str(half_qty))
+                        step_dec = Decimal(str(step_p))
+                        half_aligned = float((half_dec // step_dec) * step_dec)
+                        if half_aligned >= step_p:
+                            resp = market_cover(symbol, half_aligned)
+                            if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
+                                entry["pt1_done"] = True
+                                entry["sl"] = entry_price  # breakeven
+                                entry["qty"] = max(0.0, qty - half_aligned)
+                                entry["entry_cost"] = entry_price * entry["qty"]
+                                notify_telegram(f"✅ TP1 (1R) su {symbol}: chiuso {TP1_CLOSE_PCT*100:.0f}% e SL a BE.")
+                                log(f"[TP1][{symbol}] Parziale {TP1_CLOSE_PCT*100:.0f}% a 1R eseguito. Nuovo SL=BE {entry['sl']:.6f}, qty residua={entry['qty']:.6f}")
+
+            # Trailing attivazione
             if symbol in VOLATILE_ASSETS:
                 trailing_threshold = max(TRAILING_ACTIVATION_THRESHOLD, 0.02)
             else:
                 trailing_threshold = max(TRAILING_ACTIVATION_THRESHOLD / 2, 0.008)
             soglia_attivazione = entry["entry_price"] * (1 - trailing_threshold)
             log(f"[TRAILING CHECK][SHORT] {symbol} | entry_price={entry['entry_price']:.4f} | current_price={current_price:.4f} | soglia={soglia_attivazione:.4f} | trailing_active={entry['trailing_active']} | threshold={trailing_threshold}")
+
             if not entry["trailing_active"] and current_price <= soglia_attivazione:
                 entry["trailing_active"] = True
                 log(f"🔛 Trailing Stop SHORT attivato per {symbol} sotto soglia → Prezzo: {current_price:.4f}")
                 notify_telegram(f"🔛🔻 Trailing Stop SHORT attivato su {symbol}\nPrezzo: {current_price:.4f}")
+
             if entry["trailing_active"]:
-                # Aggiorna il minimo raggiunto
+                # Aggiorna minimo
                 if current_price < entry.get("p_min", entry["entry_price"]):
                     entry["p_min"] = current_price
                     log(f"⬇️ Nuovo minimo raggiunto per {symbol}: {entry['p_min']:.4f}")
-                # Trailing Take Profit SHORT: se il prezzo risale di X% dal minimo, chiudi la posizione
-                tp_trailing_buffer = 0.008 if symbol in VOLATILE_ASSETS else 0.005  # Più tight
+
+                # Trailing TP (chiusura quando rimbalza dal minimo)
+                tp_trailing_buffer = 0.008 if symbol in VOLATILE_ASSETS else 0.005
                 trailing_tp_price = entry["p_min"] * (1 + tp_trailing_buffer)
                 log(f"[DEBUG][TRAILING_TP] {symbol} | current_price={current_price:.4f} | trailing_tp_price={trailing_tp_price:.4f} | p_min={entry['p_min']:.4f}")
                 if current_price >= trailing_tp_price:
@@ -1080,35 +1106,30 @@ def trailing_stop_worker():
                             entry_cost = entry.get("entry_cost", ORDER_USDT)
                             qty = entry.get("qty", qty)
                             exit_value = current_price * qty
-                            delta = exit_value - entry_cost
                             pnl = ((entry_price - current_price) / entry_price) * 100
                             log(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} → Prezzo: {current_price:.4f} | PnL: {pnl:.2f}%")
                             notify_telegram(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
                             log_trade_to_google(
-                                symbol, 
-                                entry_price, 
-                                current_price, 
-                                pnl, 
-                                "Trailing TP SHORT", 
-                                "TP Triggered", 
-                                usdt_entry=entry_cost,
-                                usdt_exit=exit_value,
+                                symbol, entry_price, current_price, pnl,
+                                "Trailing TP SHORT", "TP Triggered",
+                                usdt_entry=entry_cost, usdt_exit=exit_value,
                                 holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
-                                mfe_r=entry.get('mfe', 0),
-                                mae_r=entry.get('mae', 0),
-                                r_multiple=None,
-                                market_condition="trailing_tp"
+                                mfe_r=entry.get('mfe', 0), mae_r=entry.get('mae', 0),
+                                r_multiple=None, market_condition="trailing_tp"
                             )
                             open_positions.discard(symbol)
                             last_exit_time[symbol] = time.time()
                             position_data.pop(symbol, None)
                     continue
-                # Continua ad aggiornare lo SL trailing come prima
+
+                # Aggiorna SL trailing (SHORT)
                 new_sl = current_price * (1 + TRAILING_SL_BUFFER)
                 log(f"[DEBUG][TRAILING_SL] {symbol} | current_price={current_price:.4f} | new_sl={new_sl:.4f} | old_sl={entry['sl']:.4f}")
                 if new_sl < entry["sl"]:
                     log(f"📉 SL SHORT aggiornato per {symbol}: da {entry['sl']:.4f} a {new_sl:.4f}")
                     entry["sl"] = new_sl
+
+            # Trigger SL
             sl_triggered = False
             sl_type = None
             if entry["trailing_active"] and current_price >= entry["sl"]:
@@ -1117,6 +1138,7 @@ def trailing_stop_worker():
             elif not entry["trailing_active"] and current_price >= entry["sl"]:
                 sl_triggered = True
                 sl_type = "Stop Loss SHORT"
+
             if sl_triggered:
                 qty = get_open_short_qty(symbol)
                 log(f"[TEST][SL_TRIGGER] {symbol} | SL type: {sl_type} | qty: {qty} | current_price: {current_price} | SL: {entry['sl']}")
@@ -1129,38 +1151,27 @@ def trailing_stop_worker():
                     position_data.pop(symbol, None)
                     continue
                 if qty > 0:
-                    usdt_before = get_usdt_balance()
                     resp = market_cover(symbol, qty)
                     if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                         entry_price = entry["entry_price"]
                         entry_cost = entry.get("entry_cost", ORDER_USDT)
                         qty = entry.get("qty", qty)
                         exit_value = current_price * qty
-                        delta = exit_value - entry_cost
                         pnl = ((entry_price - current_price) / entry_price) * 100
                         log(f"[TEST][SL_OK] {symbol} | {sl_type} attivato → Prezzo: {current_price:.4f} | PnL: {pnl:.2f}%")
                         icon = "🛑" if "Stop Loss" in sl_type else "🔃"
                         notify_telegram(f"{icon} {sl_type} ricoperto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
                         log_trade_to_google(
-                            symbol, 
-                            entry_price, 
-                            current_price, 
-                            pnl, 
-                            sl_type,
-                            "SL Triggered", 
-                            usdt_entry=entry_cost,
-                            usdt_exit=exit_value,
+                            symbol, entry_price, current_price, pnl,
+                            sl_type, "SL Triggered",
+                            usdt_entry=entry_cost, usdt_exit=exit_value,
                             holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
-                            mfe_r=entry.get('mfe', 0),
-                            mae_r=entry.get('mae', 0),
-                            r_multiple=None,
-                            market_condition="sl_triggered"
+                            mfe_r=entry.get('mfe', 0), mae_r=entry.get('mae', 0),
+                            r_multiple=None, market_condition="sl_triggered"
                         )
                         open_positions.discard(symbol)
                         last_exit_time[symbol] = time.time()
                         position_data.pop(symbol, None)
-                    else:
-                        log(f"[TEST][SL_FAIL] Ricopertura fallita con {sl_type} per {symbol}")
                 else:
                     log(f"[TEST][SL_FAIL] Quantità nulla o troppo piccola per ricopertura {sl_type} su {symbol}")
         time.sleep(15)
