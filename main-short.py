@@ -126,6 +126,50 @@ def is_trending_down_1h(symbol: str, tf: str = "60"):
     except Exception:
         return False
 
+def is_trending_up(symbol: str, tf: str = "240"):
+    """
+    True se l'asset è in uptrend su 4h: prezzo sopra EMA200 e EMA200 crescente.
+    """
+    endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
+    params = {"category": "linear", "symbol": symbol, "interval": tf, "limit": 220}
+    try:
+        resp = requests.get(endpoint, params=params, timeout=10)
+        data = resp.json()
+        if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
+            return False
+        raw = data["result"]["list"]
+        df = pd.DataFrame(raw, columns=["timestamp","Open","High","Low","Close","Volume","turnover"])
+        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+        df.dropna(subset=["Close"], inplace=True)
+        if len(df) < 200:
+            return False
+        ema200 = EMAIndicator(close=df["Close"], window=200).ema_indicator()
+        return df["Close"].iloc[-1] > ema200.iloc[-1] and ema200.iloc[-1] > ema200.iloc[-10]
+    except Exception:
+        return False
+
+def is_trending_up_1h(symbol: str, tf: str = "60"):
+    """
+    True se l'asset è in uptrend su 1h: prezzo sopra EMA100 e EMA100 crescente.
+    """
+    endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
+    params = {"category": "linear", "symbol": symbol, "interval": tf, "limit": 120}
+    try:
+        resp = requests.get(endpoint, params=params, timeout=10)
+        data = resp.json()
+        if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
+            return False
+        raw = data["result"]["list"]
+        df = pd.DataFrame(raw, columns=["timestamp","Open","High","Low","Close","Volume","turnover"])
+        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+        df.dropna(subset=["Close"], inplace=True)
+        if len(df) < 100:
+            return False
+        ema100 = EMAIndicator(close=df["Close"], window=100).ema_indicator()
+        return df["Close"].iloc[-1] > ema100.iloc[-1] and ema100.iloc[-1] > ema100.iloc[-10]
+    except Exception:
+        return False
+
 def is_breaking_weekly_low(symbol: str):
     """
     True se il prezzo attuale è sotto il minimo delle ultime 6 ore.
