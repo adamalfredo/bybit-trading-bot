@@ -22,6 +22,11 @@ BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
 BYBIT_BASE_URL = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
+# --- Sizing per trade (notional) ---
+DEFAULT_LEVERAGE = int(os.getenv("BYBIT_LEVERAGE", "20"))          # leva usata sul conto (Cross/Isolated)
+MARGIN_USE_PCT = float(os.getenv("MARGIN_USE_PCT", "0.7"))         # quota saldo USDT da impegnare come margine max (50%)
+TARGET_NOTIONAL_PER_TRADE = float(os.getenv("TARGET_NOTIONAL_PER_TRADE", "300"))  # obiettivo notional per trade (USDT)
+
 INTERVAL_MINUTES = 60  # era 15
 ATR_WINDOW = 14
 TP_FACTOR = 2.0
@@ -1255,9 +1260,15 @@ while True:
                     strength *= 0.75
                     log(f"[VOLATILITÀ] {symbol}: ATR/Prezzo elevato ({atr_ratio:.2%}), size ordine ridotta del 25%.")
 
-            max_invest = min(group_available, usdt_balance) * strength
-            order_amount = min(max_invest, group_available, usdt_balance, 250)
-            log(f"[FORZA] {symbol} - Strategia: {strategy}, Strength: {strength}, Investo: {order_amount:.2f} USDT (Saldo: {usdt_balance:.2f})")
+            # Notional massimo consentito dal margine disponibile con leva
+            max_notional_by_margin = usdt_balance * DEFAULT_LEVERAGE * MARGIN_USE_PCT
+            # Target di base: obiettivo per trade, limitato da budget e margine
+            base_target = min(TARGET_NOTIONAL_PER_TRADE, group_available, max_notional_by_margin)
+            # Adatta al "peso" del segnale
+            order_amount = max(0.0, base_target * strength)
+            # Cap opzionale più ampio (se vuoi): 1000 USDT
+            order_amount = min(order_amount, group_available, max_notional_by_margin, 1000)
+            log(f"[FORZA] {symbol} - Strategia: {strategy}, Strength: {strength:.2f}, Notional: {order_amount:.2f} USDT (Saldo: {usdt_balance:.2f}, Leva: x{DEFAULT_LEVERAGE})")
 
             # BLOCCO: non tentare short se order_amount < min_order_amt
             min_order_amt = get_instrument_info(symbol).get("min_order_amt", 5)
