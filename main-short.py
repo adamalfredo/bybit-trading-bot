@@ -798,9 +798,33 @@ position_data = {}
 last_exit_time = {}
 
 def sync_positions_from_wallet():
-    log("[SYNC] Avvio scansione posizioni short dal wallet...")
+    log("[SYNC] Avvio scansione posizioni short DAL CONTO (tutti i simboli linear)...")
     trovate = 0
-    for symbol in ASSETS:
+    # Legge l'elenco completo posizioni aperte
+    endpoint = f"{BYBIT_BASE_URL}/v5/position/list"
+    params = {"category": "linear"}
+    from urllib.parse import urlencode
+    query_string = urlencode(sorted(params.items()))
+    ts = str(int(time.time() * 1000))
+    recv_window = "5000"
+    sign_payload = f"{ts}{KEY}{recv_window}{query_string}"
+    sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": recv_window
+    }
+    try:
+        resp = requests.get(endpoint, headers=headers, params=params, timeout=10)
+        data = resp.json()
+        pos_list = data.get("result", {}).get("list", []) if data.get("retCode") == 0 else []
+    except Exception:
+        pos_list = []
+
+    # Per ciascuna posizione short aperta
+    symbols = {p["symbol"] for p in pos_list if p.get("side") == "Sell" and float(p.get("size", 0) or 0) > 0} or set(ASSETS)
+    for symbol in symbols:
         if symbol == "USDT":
             continue
         # PATCH: log dettagliato per ogni asset
