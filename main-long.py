@@ -660,22 +660,27 @@ def is_symbol_linear(symbol):
     except Exception:
         return False
     
-# 4. Inverti la logica di ingresso/uscita in analyze_asset
 def analyze_asset(symbol: str):
-    # Trend rialzista su 4h o 1h
-    # if not (is_trending_up(symbol, tf="240") or is_trending_up_1h(symbol, tf="60")):
-    #     log(f"[TREND-FILTER][{symbol}] Non in uptrend su 4h né su 1h, salto analisi.")
-    #     return None, None, None
-    if not (is_trending_up(symbol, "240") and is_trending_up_1h(symbol, "60")):
-        log(f"[TREND-FILTER][{symbol}] No alignment 4h & 1h uptrend, skip LONG.")
+    # Filtro permissivo ma accurato per LONG
+    up_4h = is_trending_up(symbol, "240")
+    up_1h = is_trending_up_1h(symbol, "60")
+    down_4h = is_trending_down(symbol, "240")
+    down_1h = is_trending_down_1h(symbol, "60")
+    
+    # LONG: 4h in uptrend OR (1h in uptrend AND 4h non in forte downtrend)
+    can_long = up_4h or (up_1h and not down_4h)
+    
+    # Blocco: se downtrend troppo forte (4h+1h entrambi down), non entrare LONG
+    if down_4h and down_1h:
+        log(f"[TREND-FILTER][{symbol}] Forte downtrend 4h+1h, skip LONG.")
         return None, None, None
     
-    if is_trending_down(symbol, "240") or is_trending_down_1h(symbol, "60"):
-        log(f"[TREND-FILTER][{symbol}] Downtrend su 4h/1h rilevato, skip LONG.")
+    if not can_long:
+        log(f"[TREND-FILTER][{symbol}] Condizioni trend insufficienti per LONG.")
         return None, None, None
-    
+
     if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_low(symbol):
-        # per LONG puoi anche usare un filtro “breakout 6h al rialzo” se lo implementi
+        # per LONG puoi anche usare un filtro "breakout 6h al rialzo" se lo implementi
         pass
 
     try:
@@ -715,15 +720,10 @@ def analyze_asset(symbol: str):
         prev = df.iloc[-2]
         price = float(last["Close"])
 
-        # Evita entrare LONG contro bear forte
-        trend_ratio = last["ema50"] / last["ema200"] if last["ema200"] else 1.0
-        if trend_ratio < 0.98:
-            log(f"[STRATEGY][{symbol}] Bear troppo forte, skip LONG (ratio={trend_ratio:.4f})")
-            return None, None, None
-
         # --- ENTRY LONG: condizioni rialziste su 15m ---
         entry_conditions = []
         entry_strategies = []
+        
         if prev["ema20"] <= prev["ema50"] and last["ema20"] > last["ema50"]:
             entry_conditions.append(True); entry_strategies.append("Incrocio EMA 20/50 (15m)")
         if (last["macd"] - last["macd_signal"]) > 0 and (prev["macd"] - prev["macd_signal"]) <= 0:

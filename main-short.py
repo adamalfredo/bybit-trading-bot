@@ -709,30 +709,33 @@ def is_symbol_linear(symbol):
     except Exception:
         return False
     
-# 4. Inverti la logica di ingresso/uscita in analyze_asset
 def analyze_asset(symbol: str):
-    # PATCH: Filtro trend su 4h OPPURE trend forte su 1h
-    # if not (is_trending_down(symbol, tf="240") or is_trending_down_1h(symbol, tf="60")):
-    #     log(f"[TREND-FILTER][{symbol}] Non in downtrend su 4h né su 1h, salto analisi.")
-    #     return None, None, None
-
-    if not (is_trending_down(symbol, "240") and is_trending_down_1h(symbol, "60")):
-        log(f"[TREND-FILTER][{symbol}] No alignment 4h & 1h downtrend, skip SHORT.")
+    # Filtro permissivo ma accurato per SHORT
+    down_4h = is_trending_down(symbol, "240")
+    down_1h = is_trending_down_1h(symbol, "60")
+    up_4h = is_trending_up(symbol, "240")
+    up_1h = is_trending_up_1h(symbol, "60")
+    
+    # SHORT: 4h in downtrend OR (1h in downtrend AND 4h non in forte uptrend)
+    can_short = down_4h or (down_1h and not up_4h)
+    
+    # Blocco: se uptrend troppo forte (4h+1h entrambi up), non entrare SHORT
+    if up_4h and up_1h:
+        log(f"[TREND-FILTER][{symbol}] Forte uptrend 4h+1h, skip SHORT.")
         return None, None, None
     
-    if is_trending_up(symbol, "240") or is_trending_up_1h(symbol, "60"):
-        log(f"[TREND-FILTER][{symbol}] Uptrend su 4h/1h rilevato, skip SHORT.")
+    if not can_short:
+        log(f"[TREND-FILTER][{symbol}] Condizioni trend insufficienti per SHORT.")
         return None, None, None
     
-    # PATCH: Filtro breakout 6h (opzionale)
     if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_low(symbol):
         log(f"[BREAKOUT-FILTER][{symbol}] Non in breakout 6h, salto analisi.")
         return None, None, None
+        
     try:
-        # Segnali di timing su 15m per anticipare l'ingresso
         df = fetch_history(symbol, interval=ENTRY_TF_MINUTES if USE_MTF_ENTRY else INTERVAL_MINUTES)
         if df is None or len(df) < 3:
-            log(f"[ANALYZE] Dati storici insufficienti per {symbol} (df is None o len < 3)")
+            log(f"[ANALYZE] Dati storici insufficienti per {symbol}")
             return None, None, None
         close = find_close_column(df)
         if close is None:
@@ -759,10 +762,9 @@ def analyze_asset(symbol: str):
             "bb_upper", "bb_lower", "rsi", "sma20", "sma50", "ema20", "ema50", "ema200",
             "macd", "macd_signal", "adx", "atr"
         ], inplace=True)
-        log(f"[ANALYZE-DF] {symbol} | Dopo dropna, len={len(df)}")
 
         if len(df) < 3:
-            log(f"[ANALYZE] Dati storici insufficienti dopo dropna per {symbol} (len < 3)")
+            log(f"[ANALYZE] Dati storici insufficienti dopo dropna per {symbol}")
             return None, None, None
 
         is_volatile = symbol in VOLATILE_ASSETS
@@ -772,15 +774,10 @@ def analyze_asset(symbol: str):
         prev = df.iloc[-2]
         price = float(last["Close"])
 
-        # Filtro iper-bull per evitare entrare short contro trend forte (calcolato sul TF di entry)
-        trend_ratio = last["ema50"] / last["ema200"] if last["ema200"] else 1.0
-        if trend_ratio > 1.02:  # Solo se EMA50 > 2% sopra EMA200
-            log(f"[STRATEGY][{symbol}] Bull market troppo forte, skip SHORT (ratio={trend_ratio:.4f})")
-            return None, None, None
-
         # --- SHORT: condizioni ribassiste ---
         entry_conditions = []
         entry_strategies = []
+        
         # Trigger anticipato: incrocio EMA20/EMA50 o MACD cross su 15m
         if prev["ema20"] >= prev["ema50"] and last["ema20"] < last["ema50"]:
             entry_conditions.append(True); entry_strategies.append("Incrocio EMA 20/50 (15m)")
@@ -788,62 +785,40 @@ def analyze_asset(symbol: str):
             entry_conditions.append(True); entry_strategies.append("MACD cross down (15m)")
 
         if is_volatile:
-            # SHORT: breakdown BB, incrocio SMA ribassista, MACD bearish
+            # SHORT: breakdown BB, RSI bearish, MACD bearish
             cond1 = last["Close"] < last["bb_lower"]
-            cond2 = last["rsi"] < 45  # PATCH: RSI sotto 45, più selettivo
+            cond2 = last["rsi"] < 45
             if cond1 and cond2:
-                entry_conditions.append(True)
-                entry_strategies.append("Breakdown Bollinger")
-            cond3 = prev["sma20"] > prev["sma50"]
-            cond4 = last["sma20"] < last["sma50"]
-            if cond3 and cond4:
-                entry_conditions.append(True)
-                entry_strategies.append("Incrocio SMA 20/50 (bearish)")
+                entry_conditions.append(True); entry_strategies.append("Breakdown BB (15m)")
             cond5 = last["macd"] < last["macd_signal"]
             cond6 = last["adx"] > adx_threshold
             if cond5 and cond6:
-                entry_conditions.append(True)
-                entry_strategies.append("MACD bearish + ADX")
-            # PATCH: almeno 3 condizioni ribassiste vere per entrare short su volatili
+                entry_conditions.append(True); entry_strategies.append("MACD bearish + ADX (15m)")
             if len(entry_conditions) >= 2:
-                log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT generato: strategie attive: {entry_strategies}")
+                log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
-            else:
-                log(f"[STRATEGY][{symbol}] Nessun segnale ENTRY SHORT: condizioni soddisfatte = {len(entry_conditions)}")
         else:
-            # SHORT: incrocio EMA ribassista, MACD bearish, trend EMA+RSI ribassista
-            # Se EMA20 < EMA50 su 15m, considera già valido
+            # Condizioni per asset stabili
             if last["ema20"] < last["ema50"]:
                 entry_conditions.append(True); entry_strategies.append("EMA20<EMA50 (15m)")
             cond3 = last["macd"] < last["macd_signal"]
             cond4 = last["adx"] > adx_threshold
             if cond3 and cond4:
-                entry_conditions.append(True)
-                entry_strategies.append("MACD bearish (15m)")
-            cond5 = last["rsi"] < 45  # meno restrittivo su 15m
-            cond6 = last["ema20"] < last["ema50"]
-            if cond5 and cond6:
-                entry_conditions.append(True)
-                entry_strategies.append("Trend EMA+RSI (15m)")
+                entry_conditions.append(True); entry_strategies.append("MACD bearish (15m)")
+            cond5 = last["rsi"] < 45 and last["ema20"] < last["ema50"]
+            if cond5:
+                entry_conditions.append(True); entry_strategies.append("Trend EMA+RSI (15m)")
             if len(entry_conditions) >= 1:
-                log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT generato: strategie attive: {entry_strategies}")
+                log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
-            else:
-                log(f"[STRATEGY][{symbol}] Nessun segnale ENTRY SHORT: condizioni soddisfatte = {len(entry_conditions)}")
 
-        # --- EXIT SHORT: almeno una condizione bullish ---
-        cond_exit1 = last["Close"] > last["bb_upper"]
-        cond_exit2 = last["rsi"] > 60
-        if cond_exit1 and cond_exit2:
-            log(f"[STRATEGY][{symbol}] Segnale EXIT SHORT: Rimbalzo RSI + BB (bullish)")
-            return "exit", "Rimbalzo RSI + BB (bullish)", price
-        cond_exit3 = last["macd"] > last["macd_signal"]
-        cond_exit4 = last["adx"] > adx_threshold
-        if cond_exit3 and cond_exit4:
-            log(f"[STRATEGY][{symbol}] Segnale EXIT SHORT: MACD bullish + ADX")
+        # --- EXIT SHORT: segnali bullish ---
+        cond_exit1 = last["Close"] > last["bb_upper"] and last["rsi"] > 60
+        if cond_exit1:
+            return "exit", "Rimbalzo BB + RSI (bullish)", price
+        if last["macd"] > last["macd_signal"] and last["adx"] > adx_threshold:
             return "exit", "MACD bullish + ADX", price
 
-        log(f"[STRATEGY][{symbol}] Nessun segnale EXIT SHORT generato")
         return None, None, None
     except Exception as e:
         log(f"Errore analisi {symbol}: {e}")
