@@ -1067,11 +1067,12 @@ def trailing_stop_worker():
                     notify_telegram(f"🛑 MAX LOSS: ricopertura SHORT su {symbol} per perdita > {abs(MAX_LOSS_PCT)}%\nPnL: {pnl_pct:.2f}%")
                     resp = market_cover(symbol, qty)
                     if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
-                        exit_value = current_price * qty
+                        exit_cost = current_price * qty  # Quello che paghi per ricoprire
                         log_trade_to_google(
                             symbol, entry_price, current_price, pnl_pct,
                             "MAX LOSS", "Forced Exit",
-                            usdt_entry=entry_cost, usdt_exit=exit_value,
+                            usdt_entry=entry_cost, 
+                            usdt_exit=exit_cost,
                             holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
                             mfe_r=entry.get('mfe', 0), mae_r=entry.get('mae', 0),
                             r_multiple=None, market_condition="max_loss"
@@ -1135,14 +1136,15 @@ def trailing_stop_worker():
                             entry_price = entry["entry_price"]
                             entry_cost = entry.get("entry_cost", ORDER_USDT)
                             qty = entry.get("qty", qty)
-                            exit_value = current_price * qty
                             pnl = ((entry_price - current_price) / entry_price) * 100
+                            exit_cost = current_price * qty  # Quello che paghi per ricoprire
                             log(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} → Prezzo: {current_price:.4f} | PnL: {pnl:.2f}%")
                             notify_telegram(f"🟢⬆️ Trailing TP SHORT ricoperto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
                             log_trade_to_google(
                                 symbol, entry_price, current_price, pnl,
                                 "Trailing TP SHORT", "TP Triggered",
-                                usdt_entry=entry_cost, usdt_exit=exit_value,
+                                usdt_entry=entry_cost, 
+                                usdt_exit=exit_cost,
                                 holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
                                 mfe_r=entry.get('mfe', 0), mae_r=entry.get('mae', 0),
                                 r_multiple=None, market_condition="trailing_tp"
@@ -1186,15 +1188,16 @@ def trailing_stop_worker():
                         entry_price = entry["entry_price"]
                         entry_cost = entry.get("entry_cost", ORDER_USDT)
                         qty = entry.get("qty", qty)
-                        exit_value = current_price * qty
                         pnl = ((entry_price - current_price) / entry_price) * 100
+                        exit_cost = current_price * qty  # Quello che paghi per ricoprire
                         log(f"[TEST][SL_OK] {symbol} | {sl_type} attivato → Prezzo: {current_price:.4f} | PnL: {pnl:.2f}%")
                         icon = "🛑" if "Stop Loss" in sl_type else "🔃"
                         notify_telegram(f"{icon} {sl_type} ricoperto per {symbol} a {current_price:.4f}\nPnL: {pnl:.2f}%")
                         log_trade_to_google(
                             symbol, entry_price, current_price, pnl,
                             sl_type, "SL Triggered",
-                            usdt_entry=entry_cost, usdt_exit=exit_value,
+                            usdt_entry=entry_cost, 
+                            usdt_exit=exit_cost,
                             holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
                             mfe_r=entry.get('mfe', 0), mae_r=entry.get('mae', 0),
                             r_multiple=None, market_condition="sl_triggered"
@@ -1410,9 +1413,10 @@ while True:
             resp = market_cover(symbol, qty)
             if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                 current_price = get_last_price(symbol)
-                exit_value = current_price * qty
-                delta = exit_value - entry_cost
                 pnl = ((entry_price - current_price) / entry_price) * 100  # PnL SHORT corretto
+                # SHORT: entry_cost è quello CHE HAI RICEVUTO vendendo, exit_value è quello CHE PAGHI comprando
+                exit_cost = current_price * qty  # Quello che paghi per ricoprire
+                profit_usd = entry_cost - exit_cost  # Guadagno = ricevuto - pagato
                 
                 log(f"[EXIT-OK] Ricopertura completata per {symbol} | PnL: {pnl:.2f}%")
                 notify_telegram(f"✅ Exit Signal: ricopertura SHORT per {symbol} a {current_price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}%")
@@ -1425,7 +1429,7 @@ while True:
                     strategy, 
                     "Exit Signal",
                     usdt_entry=entry_cost,
-                    usdt_exit=exit_value,
+                    usdt_exit=exit_cost,
                     holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
                     mfe_r=entry.get('mfe', 0),
                     mae_r=entry.get('mae', 0),
