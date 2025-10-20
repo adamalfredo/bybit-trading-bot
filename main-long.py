@@ -234,10 +234,12 @@ def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] 
         if '.' in s:
             return len(s.split('.')[-1].rstrip('0'))
         return 0
-    if hasattr(qty_step, '__precision_override__'):
-        precision = qty_step.__precision_override__
-    if precision is None:
-        precision = get_decimals(qty_step)
+    
+    # Usa sempre i decimali del qty_step, ignora precision se incompatibile
+    step_decimals = get_decimals(qty_step)
+    if precision is None or precision < step_decimals:
+        precision = step_decimals
+    
     step_dec = Decimal(str(qty_step))
     qty_dec = Decimal(str(qty))
     # Tronca la quantità al multiplo più basso di qty_step
