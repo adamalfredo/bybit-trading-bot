@@ -1532,7 +1532,7 @@ from google.oauth2.service_account import Credentials
 
 # Config
 SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"  # copia da URL: https://docs.google.com/spreadsheets/d/<QUESTO>/edit
-SHEET_NAME = "Foglio1"  # o quello che hai scelto
+SHEET_NAME = "Assets"  # o quello che hai scelto
 
 # Setup una sola volta
 def setup_gspread():
@@ -1554,7 +1554,7 @@ def log_trade_to_google(symbol, entry_price, exit_price, pnl_pct, strategy, resu
         import base64
 
         SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"
-        SHEET_NAME = "Foglio1"
+        SHEET_NAME = "Assets"
 
         encoded = os.getenv("GSPREAD_CREDS_B64")
         if not encoded:
