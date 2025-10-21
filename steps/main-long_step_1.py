@@ -41,7 +41,7 @@ TRAILING_MAX = 0.05   # era 0.03, trailing più largo
 TRAILING_ACTIVATION_THRESHOLD = 0.02  # trailing parte dopo -2%
 TRAILING_SL_BUFFER = 0.015            # era 0.007, trailing SL più largo
 TRAILING_DISTANCE = 0.04              # era 0.02, trailing SL più largo
-ENABLE_TP1 = False       # abilita TP parziale a 1R
+ENABLE_TP1 = True       # abilita TP parziale a 1R
 TP1_R_MULT = 1.0        # target TP1 a 1R
 TP1_CLOSE_PCT = 0.5     # chiudi il 50% a TP1
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
@@ -52,7 +52,7 @@ ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
 # --- MTF entry: segnali su 15m, trend su 4h/1h ---
 USE_MTF_ENTRY = True
-ENTRY_TF_MINUTES = 30
+ENTRY_TF_MINUTES = 15
 ENTRY_ADX_VOLATILE = 12   # soglia ADX più bassa su 15m per non arrivare tardi
 ENTRY_ADX_STABLE = 10
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
@@ -753,7 +753,7 @@ def analyze_asset(symbol: str):
             cond5 = last["rsi"] > 50 and last["ema20"] > last["ema50"]
             if cond5:
                 entry_conditions.append(True); entry_strategies.append("Trend EMA+RSI (15m)")
-            if len(entry_conditions) >= 2:
+            if len(entry_conditions) >= 1:
                 log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
 
@@ -774,7 +774,7 @@ notify_telegram("🤖 BOT [LONG] AVVIATO - In ascolto per segnali di ingresso/us
 
 TEST_MODE = False  # Acquisti e vendite normali abilitati
 
-MIN_HOLDING_MINUTES = 15  # Tempo minimo in minuti da attendere dopo l'acquisto prima di poter attivare uno stop loss
+MIN_HOLDING_MINUTES = 1  # Tempo minimo in minuti da attendere dopo l'acquisto prima di poter attivare uno stop loss
 # --- SYNC POSIZIONI APERTE DA WALLET ALL'AVVIO ---
 open_positions = set()
 position_data = {}
@@ -831,6 +831,9 @@ def sync_positions_from_wallet():
 
             tp = price + (atr_val * TP_FACTOR)
             sl = price - (atr_val * SL_FACTOR)
+            max_sl = price * 0.99  # SL massimo 1% sotto entry
+            if sl > max_sl:
+                sl = max_sl
 
             position_data[symbol] = {
                 "entry_price": entry_price,
@@ -1043,7 +1046,7 @@ def trailing_stop_worker():
                     entry["p_max"] = current_price
 
                 # Trailing TP: chiudi se ritraccia sotto p_max*(1 - buffer)
-                tp_trailing_buffer = 0.015 if symbol in VOLATILE_ASSETS else 0.010
+                tp_trailing_buffer = 0.008 if symbol in VOLATILE_ASSETS else 0.005
                 trailing_tp_price = entry.get("p_max", entry["entry_price"]) * (1 - tp_trailing_buffer)
                 if current_price <= trailing_tp_price:
                     qty = get_open_long_qty(symbol)
@@ -1191,7 +1194,10 @@ while True:
 
             tp = price_now + (atr_val * tp_factor)
             sl = price_now - (atr_val * sl_factor)
-            
+            max_sl = price_now * 0.99  # SL massimo 1% sotto entry
+            if sl > max_sl:
+                sl = max_sl
+
             position_data[symbol] = {
                 "entry_price": price_now,
                 "tp": tp,

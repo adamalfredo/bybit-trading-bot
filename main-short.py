@@ -41,7 +41,7 @@ TRAILING_MAX = 0.05   # era 0.03, trailing più largo
 TRAILING_ACTIVATION_THRESHOLD = 0.02  # trailing parte dopo -2%
 TRAILING_SL_BUFFER = 0.015            # era 0.007, trailing SL più largo
 TRAILING_DISTANCE = 0.04              # era 0.02, trailing SL più largo
-ENABLE_TP1 = True       # abilita TP parziale a 1R
+ENABLE_TP1 = False       # abilita TP parziale a 1R
 TP1_R_MULT = 1.0        # target TP1 a 1R
 TP1_CLOSE_PCT = 0.5     # chiudi il 50% a TP1
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
@@ -52,7 +52,7 @@ ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
 # --- MTF entry: segnali su 15m, trend su 4h/1h ---
 USE_MTF_ENTRY = True
-ENTRY_TF_MINUTES = 15
+ENTRY_TF_MINUTES = 30
 ENTRY_ADX_VOLATILE = 12   # soglia ADX più bassa su 15m per non arrivare tardi
 ENTRY_ADX_STABLE = 10
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
@@ -808,7 +808,7 @@ def analyze_asset(symbol: str):
             cond5 = last["rsi"] < 45 and last["ema20"] < last["ema50"]
             if cond5:
                 entry_conditions.append(True); entry_strategies.append("Trend EMA+RSI (15m)")
-            if len(entry_conditions) >= 1:
+            if len(entry_conditions) >= 2:
                 log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
 
@@ -829,7 +829,7 @@ notify_telegram("🤖 BOT [SHORT] AVVIATO - In ascolto per segnali di ingresso/u
 
 TEST_MODE = False  # Acquisti e vendite normali abilitati
 
-MIN_HOLDING_MINUTES = 1  # Tempo minimo in minuti da attendere dopo l'acquisto prima di poter attivare uno stop loss
+MIN_HOLDING_MINUTES = 15  # Tempo minimo in minuti da attendere dopo l'acquisto prima di poter attivare uno stop loss
 # --- SYNC POSIZIONI APERTE DA WALLET ALL'AVVIO ---
 open_positions = set()
 position_data = {}
@@ -888,9 +888,7 @@ def sync_positions_from_wallet():
                 atr_val = price * 0.02
             tp = price - (atr_val * TP_FACTOR)
             sl = price + (atr_val * SL_FACTOR)
-            min_sl = price * 1.01
-            if sl < min_sl:
-                sl = min_sl
+            
             position_data[symbol] = {
                 "entry_price": entry_price,
                 "tp": tp,
@@ -957,7 +955,6 @@ def log_trade_to_google(symbol, entry_price, exit_price, pnl_pct, strategy, resu
             log("❌ Variabile GSPREAD_CREDS_B64 non trovata")
             return
 
-        # Path portabile anche su Windows
         creds_path = os.path.join(os.getcwd(), "gspread-creds-runtime.json")
         with open(creds_path, "wb") as f:
             f.write(base64.b64decode(encoded))
@@ -967,14 +964,14 @@ def log_trade_to_google(symbol, entry_price, exit_price, pnl_pct, strategy, resu
         client = gspread.authorize(creds)
         sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
 
-        # Se non forniti li calcoliamo come fallback
         if usdt_entry is None:
             usdt_entry = entry_price
         if usdt_exit is None:
             usdt_exit = exit_price
-        delta_usd = usdt_exit - usdt_entry
 
-        # Append row (15 colonne ora)
+        # SHORT: Delta = ricevuto (entry) - pagato (exit)
+        delta_usd = usdt_entry - usdt_exit
+
         sheet.append_row([
             time.strftime("%Y-%m-%d %H:%M:%S"),
             symbol,
@@ -994,8 +991,6 @@ def log_trade_to_google(symbol, entry_price, exit_price, pnl_pct, strategy, resu
         ])
     except Exception as e:
         log(f"❌ Errore log su Google Sheets: {e}")
-
-
 
 # --- LOGICA 70/30 SU VALORE TOTALE PORTAFOGLIO (USDT + coin) ---
 def get_portfolio_value():
@@ -1124,7 +1119,7 @@ def trailing_stop_worker():
                     log(f"⬇️ Nuovo minimo raggiunto per {symbol}: {entry['p_min']:.4f}")
 
                 # Trailing TP (chiusura quando rimbalza dal minimo)
-                tp_trailing_buffer = 0.008 if symbol in VOLATILE_ASSETS else 0.005
+                tp_trailing_buffer = 0.015 if symbol in VOLATILE_ASSETS else 0.010
                 trailing_tp_price = entry["p_min"] * (1 + tp_trailing_buffer)
                 log(f"[DEBUG][TRAILING_TP] {symbol} | current_price={current_price:.4f} | trailing_tp_price={trailing_tp_price:.4f} | p_min={entry['p_min']:.4f}")
                 if current_price >= trailing_tp_price:
@@ -1354,10 +1349,6 @@ while True:
             sl_factor = min(SL_MAX, max(SL_MIN, SL_FACTOR + atr_ratio * 3))
             tp = get_last_price(symbol) - (atr_val * tp_factor)  # PATCH: TP SOTTO ENTRY
             sl = get_last_price(symbol) + (atr_val * sl_factor)  # PATCH: SL SOPRA ENTRY
-            min_sl = get_last_price(symbol) * 1.01  # PATCH: SL almeno 1% SOPRA entry
-            if sl < min_sl:
-                log(f"[SL PATCH] SL troppo vicino al prezzo di ingresso ({sl:.4f} < {min_sl:.4f}), imposto SL a {min_sl:.4f}")
-                sl = min_sl
 
             log(f"[ENTRY-DETAIL] {symbol} | Entry: {get_last_price(symbol):.4f} | SL: {sl:.4f} | TP: {tp:.4f} | ATR: {atr_val:.4f}")
 
@@ -1411,7 +1402,6 @@ while True:
             if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                 current_price = get_last_price(symbol)
                 exit_value = current_price * qty
-                delta = exit_value - entry_cost
                 pnl = ((entry_price - current_price) / entry_price) * 100  # PnL SHORT corretto
                 
                 log(f"[EXIT-OK] Ricopertura completata per {symbol} | PnL: {pnl:.2f}%")
