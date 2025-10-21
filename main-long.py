@@ -60,6 +60,13 @@ ASSETS = []
 LESS_VOLATILE_ASSETS = []
 VOLATILE_ASSETS = []
 LIQUIDITY_MIN_VOLUME = 1_000_000  # Soglia minima volume 24h USDT (consigliato)
+# ---- Logging flags (accensione selettiva via env/Variables di Railway) ----
+LOG_DEBUG_ASSETS     = os.getenv("LOG_DEBUG_ASSETS", "0") == "1"
+LOG_DEBUG_DECIMALS   = os.getenv("LOG_DEBUG_DECIMALS", "0") == "1"
+LOG_DEBUG_SYNC       = os.getenv("LOG_DEBUG_SYNC", "0") == "1"
+LOG_DEBUG_STRATEGY   = os.getenv("LOG_DEBUG_STRATEGY", "0") == "1"
+LOG_DEBUG_TRAILING   = os.getenv("LOG_DEBUG_TRAILING", "0") == "1"
+LOG_DEBUG_PORTFOLIO  = os.getenv("LOG_DEBUG_PORTFOLIO", "0") == "1"
 
 # --- BLACKLIST STABLECOIN ---
 STABLECOIN_BLACKLIST = [
@@ -224,16 +231,34 @@ def update_assets(top_n=18, n_stable=7):
         }
 
         # Intersezione + esclusioni
+        prev = set(ASSETS)
         filtered = [s for s in pre if s in linear_liquid and s not in EXCLUSION_LIST]
         ASSETS = filtered
         LESS_VOLATILE_ASSETS = filtered[:n_stable]
         VOLATILE_ASSETS = [s for s in filtered if s not in LESS_VOLATILE_ASSETS]
-        log(f"[ASSETS] Aggiornati: {ASSETS}\nMeno volatili: {LESS_VOLATILE_ASSETS}\nVolatili: {VOLATILE_ASSETS}")
+        
+        changed = set(ASSETS) != prev
+        if changed or LOG_DEBUG_ASSETS:
+            added = list(set(ASSETS) - prev)
+            removed = list(prev - set(ASSETS))
+            if LOG_DEBUG_ASSETS:
+                log(f"[ASSETS] Aggiornati: {ASSETS}\nMeno volatili: {LESS_VOLATILE_ASSETS}\nVolatili: {VOLATILE_ASSETS}")
+            else:
+                log(f"[ASSETS] Totali={len(ASSETS)} (+{len(added)}/-{len(removed)}) | Added={added[:5]} Removed={removed[:5]}")
     except Exception as e:
         log(f"[ASSETS] Errore aggiornamento lista asset: {e}")
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
+
+# Throttling semplice per log ripetitivi
+_last_log_times = {}
+def tlog(key: str, msg: str, interval_sec: int = 60):
+    now = time.time()
+    last = _last_log_times.get(key, 0)
+    if now - last >= interval_sec:
+        _last_log_times[key] = now
+        log(msg)
 
 def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] = None) -> str:
     """
@@ -265,7 +290,9 @@ def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] 
         floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
     fmt = f"{{0:.{precision}f}}"
     # LOG DIAGNOSTICO
-    log(f"[DECIMALI][FORMAT_QTY] qty={qty} | qty_step={qty_step} | precision={precision} | floored_qty={floored_qty} | quantize_str={quantize_str}")
+    # LOG DIAGNOSTICO (solo se abilitato)
+    if LOG_DEBUG_DECIMALS:
+        log(f"[DECIMALI][FORMAT_QTY] qty={qty} | qty_step={qty_step} | precision={precision} | floored_qty={floored_qty} | quantize_str={quantize_str}")
     return fmt.format(floored_qty)
 
 def get_open_long_qty(symbol):
@@ -480,16 +507,19 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         return None
     try:
         raw_qty = Decimal(str(usdt_amount)) / Decimal(str(price))
-        log(f"[DECIMALI][CALC_QTY] {symbol} | usdt_amount={usdt_amount} | price={price} | raw_qty={raw_qty} | qty_step={qty_step} | precision={precision}")
+        if LOG_DEBUG_DECIMALS:
+            log(f"[DECIMALI][CALC_QTY] {symbol} | usdt_amount={usdt_amount} | price={price} | raw_qty={raw_qty} | qty_step={qty_step} | precision={precision}")
         qty_str = format_quantity_bybit(float(raw_qty), float(qty_step), precision=precision)
         qty_dec = Decimal(qty_str)
         min_qty_dec = Decimal(str(min_qty))
         if qty_dec < min_qty_dec:
-            log(f"[DECIMALI][CALC_QTY] {symbol} | qty_dec < min_qty_dec: {qty_dec} < {min_qty_dec}")
+            if LOG_DEBUG_DECIMALS:
+                log(f"[DECIMALI][CALC_QTY] {symbol} | qty_dec < min_qty_dec: {qty_dec} < {min_qty_dec}")
             qty_dec = min_qty_dec
             qty_str = format_quantity_bybit(float(qty_dec), float(qty_step), precision=precision)
         order_value = qty_dec * Decimal(str(price))
-        log(f"[DECIMALI][CALC_QTY] {symbol} | qty_dec={qty_dec} | order_value={order_value}")
+        if LOG_DEBUG_DECIMALS:
+            log(f"[DECIMALI][CALC_QTY] {symbol} | qty_dec={qty_dec} | order_value={order_value}")
         if order_value < Decimal(str(min_order_amt)):
             log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
             return None
@@ -499,7 +529,8 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         investito_effettivo = float(qty_dec) * float(price)
         if investito_effettivo < 0.95 * usdt_amount:
             log(f"⚠️ Attenzione: valore effettivo investito ({investito_effettivo:.2f} USDT) molto inferiore a quello richiesto ({usdt_amount:.2f} USDT)")
-        log(f"[DECIMALI][CALC_QTY][RETURN] {symbol} | qty_str={qty_str}")
+        if LOG_DEBUG_DECIMALS:
+            log(f"[DECIMALI][CALC_QTY][RETURN] {symbol} | qty_str={qty_str}")
         return qty_str
     except Exception as e:
         log(f"❌ Errore calcolo quantità per {symbol}: {e}")
@@ -708,11 +739,13 @@ def analyze_asset(symbol: str):
     
     # Blocco: se downtrend troppo forte (4h+1h entrambi down), non entrare LONG
     if down_4h and down_1h:
-        log(f"[TREND-FILTER][{symbol}] Forte downtrend 4h+1h, skip LONG.")
+        if LOG_DEBUG_STRATEGY:
+            log(f"[TREND-FILTER][{symbol}] Forte downtrend 4h+1h, skip LONG.")
         return None, None, None
     
     if not can_long:
-        log(f"[TREND-FILTER][{symbol}] Condizioni trend insufficienti per LONG.")
+        if LOG_DEBUG_STRATEGY:
+            log(f"[TREND-FILTER][{symbol}] Condizioni trend insufficienti per LONG.")
         return None, None, None
 
     if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_low(symbol):
@@ -844,7 +877,8 @@ def sync_positions_from_wallet():
         if symbol == "USDT":
             continue
         qty = get_open_long_qty(symbol)
-        log(f"[SYNC-DEBUG] {symbol}: qty long trovata = {qty}")
+        if LOG_DEBUG_SYNC:
+            log(f"[SYNC-DEBUG] {symbol}: qty long trovata = {qty}")
         if qty and qty > 0:
             price = get_last_price(symbol)
             if not price:
@@ -1007,6 +1041,8 @@ def trailing_stop_worker():
 
             entry = position_data[symbol]
             if time.time() - entry.get("entry_time", 0) < MIN_HOLDING_MINUTES * 60:
+                if LOG_DEBUG_TRAILING:
+                    tlog(f"holding_fast:{symbol}", f"[HOLDING][FAST] {symbol}: attendo ancora {max(0, MIN_HOLDING_MINUTES - (time.time()-entry.get('entry_time',0))/60):.1f} min prima di attivare SL/TSL", 60)
                 continue
 
             current_price = get_last_price(symbol)
@@ -1067,6 +1103,12 @@ def trailing_stop_worker():
             # Trailing attivazione (LONG)
             trailing_threshold = max(TRAILING_ACTIVATION_THRESHOLD, 0.02) if symbol in VOLATILE_ASSETS else max(TRAILING_ACTIVATION_THRESHOLD / 2, 0.008)
             soglia_attivazione = entry["entry_price"] * (1 + trailing_threshold)
+            if LOG_DEBUG_TRAILING:
+                tlog(
+                    f"trail_check:{symbol}",
+                    f"[TRAILING CHECK][LONG] {symbol} | entry_price={entry.get('entry_price',0):.4f} | current_price={current_price:.4f} | soglia={soglia_attivazione:.4f} | trailing_active={entry.get('trailing_active', False)}",
+                    30
+                )
             if not entry["trailing_active"] and current_price >= soglia_attivazione:
                 entry["trailing_active"] = True
                 notify_telegram(f"🔛🔺 Trailing Stop LONG attivato su {symbol} a {current_price:.4f}")
@@ -1131,12 +1173,12 @@ trailing_thread.start()
 while True:
     update_assets()
     portfolio_value, usdt_balance, coin_values = get_portfolio_value()
-
     volatile_budget = portfolio_value * 0.4
     stable_budget = portfolio_value * 0.6
     volatile_invested = sum(coin_values.get(s, 0) for s in open_positions if s in VOLATILE_ASSETS)
     stable_invested = sum(coin_values.get(s, 0) for s in open_positions if s in LESS_VOLATILE_ASSETS)
-    log(f"[PORTAFOGLIO] Totale: {portfolio_value:.2f} | Volatili: {volatile_invested:.2f} | Meno volatili: {stable_invested:.2f} | USDT: {usdt_balance:.2f}")
+    if LOG_DEBUG_PORTFOLIO:
+        tlog("portfolio", f"[PORTAFOGLIO] Totale: {portfolio_value:.2f} | Volatili: {volatile_invested:.2f} | Meno volatili: {stable_invested:.2f} | USDT: {usdt_balance:.2f}", 120)
 
     for symbol in ASSETS:
         if symbol in STABLECOIN_BLACKLIST:
@@ -1145,7 +1187,8 @@ while True:
             continue
 
         signal, strategy, price = analyze_asset(symbol)
-        log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
+        if LOG_DEBUG_STRATEGY or (signal is not None and strategy is not None and price is not None):
+            log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
         if signal is None or strategy is None or price is None:
             continue
 
@@ -1169,11 +1212,11 @@ while True:
                 continue
 
             strategy_strength = {
-                "Breakout BB (15m)": 1.0,
-                "MACD bullish + ADX (15m)": 0.9,
-                "Incrocio EMA 20/50 (15m)": 0.75,
-                "MACD bullish (15m)": 0.65,
-                "Trend EMA+RSI (15m)": 0.6
+                "Breakout BB (30m)": 1.0,
+                "MACD bullish + ADX (30m)": 0.9,
+                "Incrocio EMA 20/50 (30m)": 0.75,
+                "MACD bullish (30m)": 0.65,
+                "Trend EMA+RSI (30m)": 0.6
             }
             strength = strategy_strength.get(strategy, 0.5)
 
@@ -1250,6 +1293,7 @@ while True:
             entry_price = entry.get("entry_price", price)
             entry_cost = entry.get("entry_cost", ORDER_USDT)
             if time.time() - entry.get("entry_time", 0) < MIN_HOLDING_MINUTES * 60:
+                tlog(f"holding_exit:{symbol}", f"[HOLDING][EXIT] {symbol}: attendo ancora {max(0, MIN_HOLDING_MINUTES - (time.time()-entry.get('entry_time',0))/60):.1f} min prima di poter vendere", 60)
                 continue
 
             qty = get_open_long_qty(symbol)
