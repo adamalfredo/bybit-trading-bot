@@ -473,8 +473,10 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
     min_order_amt = info.get("min_order_amt", 5)
     min_qty = info.get("min_qty", 0.0)
     precision = info.get("precision", 4)
-    if usdt_amount < min_order_amt:
-        log(f"❌ Budget troppo basso per {symbol}: {usdt_amount:.2f} < min_order_amt {min_order_amt}")
+    
+    min_notional = max(float(min_order_amt), float(min_qty) * float(price))
+    if usdt_amount < min_notional:
+        log(f"❌ Budget {usdt_amount:.2f} USDT insufficiente per notional minimo {min_notional:.2f} su {symbol}")
         return None
     try:
         raw_qty = Decimal(str(usdt_amount)) / Decimal(str(price))
@@ -1192,9 +1194,13 @@ while True:
             max_notional_by_margin = usdt_balance * DEFAULT_LEVERAGE * MARGIN_USE_PCT
             base_target = min(TARGET_NOTIONAL_PER_TRADE, group_available, max_notional_by_margin)
             order_amount = min(max(0.0, base_target * strength), group_available, max_notional_by_margin, 1000.0)
-            min_order_amt = get_instrument_info(symbol).get("min_order_amt", 5)
-            if order_amount < min_order_amt:
-                log(f"❌ Notional troppo basso {order_amount:.2f} < {min_order_amt}")
+            info_i = get_instrument_info(symbol)
+            min_order_amt = float(info_i.get("min_order_amt", 5))
+            min_qty = float(info_i.get("min_qty", 0.0))
+            price_now_chk = get_last_price(symbol) or 0.0
+            min_notional = max(min_order_amt, (min_qty or 0.0) * price_now_chk)
+            if order_amount < min_notional:
+                log(f"❌ Notional richiesto {order_amount:.2f} < minimo richiesto {min_notional:.2f} per {symbol} (min_qty={min_qty}, price={price_now_chk})")
                 continue
 
             qty_str = calculate_quantity(symbol, order_amount)
