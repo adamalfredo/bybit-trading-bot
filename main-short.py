@@ -4,7 +4,7 @@ import time
 import hmac
 import json
 import hashlib
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 import requests
 import pandas as pd
 from ta.volatility import BollingerBands, AverageTrueRange
@@ -65,6 +65,8 @@ LIQUIDITY_MIN_VOLUME = 1_000_000  # Soglia minima volume 24h USDT (consigliato)
 STABLECOIN_BLACKLIST = [
     "USDCUSDT", "USDEUSDT", "TUSDUSDT", "USDPUSDT", "BUSDUSDT", "FDUSDUSDT", "DAIUSDT", "EURUSDT", "USDTUSDT"
 ]
+EXCLUSION_LIST = ["FUSDT", "YBUSDT", "ZBTUSDT", "RECALLUSDT", "XPLUSDT", "BRETTUSDT"]
+LINEAR_MIN_TURNOVER = 5_000_000
 
 def is_trending_down(symbol: str, tf: str = "240"):
     """
@@ -185,37 +187,44 @@ def is_breaking_weekly_low(symbol: str):
 def update_assets(top_n=18, n_stable=7):
     """
     Aggiorna ASSETS, LESS_VOLATILE_ASSETS e VOLATILE_ASSETS:
-    - Prende i top N asset spot per volume 24h USDT
-    - I primi n_stable per market cap (BTC, ETH, ... se presenti) sono i meno volatili
-    - Gli altri sono considerati volatili
+    - Top N per volume 24h su spot (USDT)
+    - Intersezione con futures linear con turnover24h >= LINEAR_MIN_TURNOVER
+    - Esclude STABLECOIN_BLACKLIST e EXCLUSION_LIST
     """
     global ASSETS, LESS_VOLATILE_ASSETS, VOLATILE_ASSETS
     try:
-        endpoint = f"{BYBIT_BASE_URL}/v5/market/tickers"
-        params = {"category": "spot"}
-        resp = requests.get(endpoint, params=params, timeout=10)
-        data = resp.json()
-        if data.get("retCode") != 0:
-            log(f"[ASSETS] Errore API tickers: {data}")
+        resp_spot = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category": "spot"}, timeout=10)
+        data_spot = resp_spot.json()
+        if data_spot.get("retCode") != 0:
+            log(f"[ASSETS] Errore API spot: {data_spot}")
             return
-        tickers = data["result"]["list"]
-        # Filtra solo coppie USDT, con volume sufficiente, ed esclude le stablecoin
-        usdt_tickers = [
-            t for t in tickers
+        spot = data_spot["result"]["list"]
+        spot_usdt = [
+            t for t in spot
             if t["symbol"].endswith("USDT")
             and float(t.get("turnover24h", 0)) >= LIQUIDITY_MIN_VOLUME
             and t["symbol"] not in STABLECOIN_BLACKLIST
+            and t["symbol"] not in EXCLUSION_LIST
         ]
-        # Ordina per volume 24h (turnover24h)
-        usdt_tickers.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
-        # Prendi i top N
-        top = usdt_tickers[:top_n]
-        ASSETS = [t["symbol"] for t in top]
-        # --- PATCH: filtra solo simboli disponibili su futures linear ---
-        ASSETS = [s for s in ASSETS if is_symbol_linear(s)]
-        # Usa direttamente i top per volume 24h
-        LESS_VOLATILE_ASSETS = [t["symbol"] for t in top[:n_stable] if t["symbol"] in ASSETS]
-        VOLATILE_ASSETS = [s for s in ASSETS if s not in LESS_VOLATILE_ASSETS]
+        spot_usdt.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
+        top = spot_usdt[:top_n]
+        pre = [t["symbol"] for t in top]
+
+        resp_lin = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category": "linear"}, timeout=10)
+        data_lin = resp_lin.json()
+        if data_lin.get("retCode") != 0:
+            log(f"[ASSETS] Errore API linear: {data_lin}")
+            return
+        linear = data_lin["result"]["list"]
+        linear_liquid = {
+            t["symbol"] for t in linear
+            if float(t.get("turnover24h", 0)) >= LINEAR_MIN_TURNOVER
+        }
+
+        filtered = [s for s in pre if s in linear_liquid and s not in EXCLUSION_LIST]
+        ASSETS = filtered
+        LESS_VOLATILE_ASSETS = filtered[:n_stable]
+        VOLATILE_ASSETS = [s for s in filtered if s not in LESS_VOLATILE_ASSETS]
         log(f"[ASSETS] Aggiornati: {ASSETS}\nMeno volatili: {LESS_VOLATILE_ASSETS}\nVolatili: {VOLATILE_ASSETS}")
     except Exception as e:
         log(f"[ASSETS] Errore aggiornamento lista asset: {e}")
@@ -502,29 +511,43 @@ def market_short(symbol: str, usdt_amount: float):
         log(f"❌ Prezzo non disponibile per {symbol}")
         return None
     
-    safe_usdt_amount = usdt_amount * 0.98
     info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.01)  # Fallback conservativo
-    
-    # Calcola quantità iniziale
-    raw_qty = safe_usdt_amount / price
+    qty_step = float(info.get("qty_step", 0.01))
+    min_qty = float(info.get("min_qty", qty_step))
+    min_order_amt = float(info.get("min_order_amt", 10.0))
+
+    safe_usdt_amount = usdt_amount * 0.98
+    raw_qty = Decimal(str(safe_usdt_amount)) / Decimal(str(price))
     step_dec = Decimal(str(qty_step))
-    qty_aligned = (Decimal(str(raw_qty)) // step_dec) * step_dec
-    
+    qty_aligned = (raw_qty // step_dec) * step_dec
+
+    # Guardie: evita qty 0 e rispetta minimi exchange
+    if float(qty_aligned) <= 0 or float(qty_aligned) < min_qty:
+        qty_aligned = Decimal(str(min_qty))
+        log(f"[QTY-GUARD][{symbol}] qty riallineata a min_qty={float(qty_aligned)}")
+
+    needed = Decimal(str(min_order_amt)) / Decimal(str(price))
+    multiples = (needed / step_dec).quantize(Decimal('1'), rounding=ROUND_UP)
+    min_notional_qty = multiples * step_dec
+    if qty_aligned * Decimal(str(price)) < Decimal(str(min_order_amt)):
+        qty_aligned = max(qty_aligned, min_notional_qty)
+        log(f"[NOTIONAL-GUARD][{symbol}] qty alzata per min_order_amt → {float(qty_aligned)}")
+
     max_retries = 3
     for attempt in range(1, max_retries + 1):
         qty_str = _format_qty_with_step(float(qty_aligned), qty_step)
-        
+        if float(qty_str) <= 0:
+            log(f"❌ qty_str=0 per {symbol}, skip ordine")
+            return None
+
         body = {
             "category": "linear",
             "symbol": symbol,
             "side": "Sell",
             "orderType": "Market",
             "qty": qty_str,
-            "positionIdx": 2  # SHORT
+            "positionIdx": 2
         }
-        
-        # Invio ordine (mantieni la logica esistente)
         ts = str(int(time.time() * 1000))
         body_json = json.dumps(body, separators=(",", ":"))
         payload = f"{ts}{KEY}5000{body_json}"
@@ -537,46 +560,39 @@ def market_short(symbol: str, usdt_amount: float):
             "X-BAPI-SIGN-TYPE": "2",
             "Content-Type": "application/json"
         }
-        
+
         response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
         log(f"[SHORT][{symbol}] attempt {attempt}/{max_retries} BODY={body_json}")
-        
+
         try:
             resp_json = response.json()
         except:
             resp_json = {}
-        
         log(f"[SHORT][{symbol}] RESP {response.status_code} {resp_json}")
-        
+
         if resp_json.get("retCode") == 0:
             return float(qty_str)
-            
-        # Gestione errori con escalation
+
         ret_code = resp_json.get("retCode")
-        if ret_code == 170137:  # Too many decimals
-            log(f"[RETRY][{symbol}] 170137 → escalation passo")
-            # Escalation passo: 0.01 → 0.1 → 1.0
-            if qty_step < 0.1:
-                qty_step = 0.1
-            elif qty_step < 1.0:
-                qty_step = 1.0
-            else:
-                qty_step = 10.0
-            
+        if ret_code == 170137:
+            log(f"[RETRY][{symbol}] 170137 → refresh instrument e rifloor")
+            try: _instrument_cache.pop(symbol, None)
+            except Exception: pass
+            info = get_instrument_info(symbol)
+            qty_step = float(info.get("qty_step", qty_step))
             step_dec = Decimal(str(qty_step))
             qty_aligned = (qty_aligned // step_dec) * step_dec
-            log(f"[RETRY][{symbol}] nuovo passo {qty_step}, qty→{qty_aligned}")
             continue
-            
-        elif ret_code == 170131:  # Insufficient balance
+        elif ret_code == 170131:
             log(f"[RETRY][{symbol}] 170131 → riduco qty del 10%")
-            qty_aligned *= Decimal("0.9")
+            qty_aligned = (qty_aligned * Decimal("0.9")) // step_dec * step_dec
+            if qty_aligned <= 0:
+                return None
             continue
-            
         else:
             log(f"[ERROR][{symbol}] Errore non gestito: {ret_code}")
             break
-    
+
     return None
 
 def market_cover(symbol: str, qty: float):
@@ -780,34 +796,34 @@ def analyze_asset(symbol: str):
         
         # Trigger anticipato: incrocio EMA20/EMA50 o MACD cross su 15m
         if prev["ema20"] >= prev["ema50"] and last["ema20"] < last["ema50"]:
-            entry_conditions.append(True); entry_strategies.append("Incrocio EMA 20/50 (15m)")
+            entry_conditions.append(True); entry_strategies.append("Incrocio EMA 20/50 (30m)")
         if (last["macd"] - last["macd_signal"]) < 0 and (prev["macd"] - prev["macd_signal"]) >= 0:
-            entry_conditions.append(True); entry_strategies.append("MACD cross down (15m)")
+            entry_conditions.append(True); entry_strategies.append("MACD cross down (30m)")
 
         if is_volatile:
             # SHORT: breakdown BB, RSI bearish, MACD bearish
             cond1 = last["Close"] < last["bb_lower"]
             cond2 = last["rsi"] < 45
             if cond1 and cond2:
-                entry_conditions.append(True); entry_strategies.append("Breakdown BB (15m)")
+                entry_conditions.append(True); entry_strategies.append("Breakdown BB (30m)")
             cond5 = last["macd"] < last["macd_signal"]
             cond6 = last["adx"] > adx_threshold
             if cond5 and cond6:
-                entry_conditions.append(True); entry_strategies.append("MACD bearish + ADX (15m)")
+                entry_conditions.append(True); entry_strategies.append("MACD bearish + ADX (30m)")
             if len(entry_conditions) >= 2:
                 log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
         else:
             # Condizioni per asset stabili
             if last["ema20"] < last["ema50"]:
-                entry_conditions.append(True); entry_strategies.append("EMA20<EMA50 (15m)")
+                entry_conditions.append(True); entry_strategies.append("EMA20<EMA50 (30m)")
             cond3 = last["macd"] < last["macd_signal"]
             cond4 = last["adx"] > adx_threshold
             if cond3 and cond4:
-                entry_conditions.append(True); entry_strategies.append("MACD bearish (15m)")
+                entry_conditions.append(True); entry_strategies.append("MACD bearish (30m)")
             cond5 = last["rsi"] < 45 and last["ema20"] < last["ema50"]
             if cond5:
-                entry_conditions.append(True); entry_strategies.append("Trend EMA+RSI (15m)")
+                entry_conditions.append(True); entry_strategies.append("Trend EMA+RSI (30m)")
             if len(entry_conditions) >= 2:
                 log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
