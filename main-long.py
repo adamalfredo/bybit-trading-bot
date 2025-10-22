@@ -945,6 +945,8 @@ def sync_positions_from_wallet():
             }
             trovate += 1
             log(f"[SYNC] Posizione LONG trovata: {symbol} qty={qty} entry={entry_price:.4f} SL={sl:.4f} TP={tp:.4f}")
+            # Marca come già in posizione per evitare nuovi entry
+            open_positions.add(symbol)
     log(f"[SYNC] Totale posizioni LONG recuperate dal wallet: {trovate}")
 
 # --- Esegui sync all'avvio ---
