@@ -902,7 +902,6 @@ notify_telegram("🤖 BOT [SHORT] AVVIATO - In ascolto per segnali di ingresso/u
 
 TEST_MODE = False  # Acquisti e vendite normali abilitati
 
-MIN_HOLDING_MINUTES = 15  # Tempo minimo in minuti da attendere dopo l'acquisto prima di poter attivare uno stop loss
 # --- SYNC POSIZIONI APERTE DA WALLET ALL'AVVIO ---
 open_positions = set()
 position_data = {}
@@ -1109,14 +1108,7 @@ def trailing_stop_worker():
 
             entry = position_data[symbol]
             holding_seconds = time.time() - entry.get("entry_time", 0)
-            if holding_seconds < MIN_HOLDING_MINUTES * 60:
-                tlog(
-                    f"holding_fast:{symbol}",
-                    f"[HOLDING][FAST] {symbol}: attendo ancora {max(0, MIN_HOLDING_MINUTES - holding_seconds/60):.1f} min prima di attivare SL/TSL",
-                    60
-                )
-                continue
-
+            
             current_price = get_last_price(symbol)
             if not current_price:
                 continue
@@ -1465,14 +1457,6 @@ while True:
             entry_cost = entry.get("entry_cost", ORDER_USDT)
             
             # Verifica holding time minimo
-            holding_seconds = time.time() - entry.get("entry_time", 0)
-            if holding_seconds < MIN_HOLDING_MINUTES * 60:
-                tlog(
-                    f"holding_exit:{symbol}",
-                    f"[HOLDING][EXIT] {symbol}: attendo ancora {max(0, MIN_HOLDING_MINUTES - holding_seconds/60):.1f} min prima di poter ricoprire",
-                    60
-                )
-                continue
             
             qty = get_open_short_qty(symbol)
             log(f"[EXIT-SIGNAL][{symbol}] qty effettiva: {qty} | entry_price: {entry_price} | current_price: {price}")
@@ -1538,16 +1522,6 @@ while True:
             log(f"[CLEANUP] {symbol}: saldo troppo basso ({saldo}), rimuovo da open_positions e position_data (polvere, min_qty={min_qty})")
             open_positions.discard(symbol)
             position_data.pop(symbol, None)
-            continue
-
-        entry = position_data.get(symbol, {})
-        holding_seconds = time.time() - entry.get("entry_time", 0)
-        if holding_seconds < MIN_HOLDING_MINUTES * 60:
-            tlog(
-                f"holding_exit:{symbol}",
-                f"[HOLDING][EXIT] {symbol}: attendo ancora {max(0, MIN_HOLDING_MINUTES - holding_seconds/60):.1f} min prima di poter ricoprire",
-                60
-            )
             continue
 
     # Sicurezza: attesa tra i cicli principali

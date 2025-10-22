@@ -886,7 +886,6 @@ notify_telegram("🤖 BOT [LONG] AVVIATO - In ascolto per segnali di ingresso/us
 
 TEST_MODE = False  # Acquisti e vendite normali abilitati
 
-MIN_HOLDING_MINUTES = 15  # Tempo minimo in minuti da attendere dopo l'acquisto prima di poter attivare uno stop loss
 # --- SYNC POSIZIONI APERTE DA WALLET ALL'AVVIO ---
 open_positions = set()
 position_data = {}
@@ -1090,11 +1089,7 @@ def trailing_stop_worker():
                 continue
 
             entry = position_data[symbol]
-            if time.time() - entry.get("entry_time", 0) < MIN_HOLDING_MINUTES * 60:
-                if LOG_DEBUG_TRAILING:
-                    tlog(f"holding_fast:{symbol}", f"[HOLDING][FAST] {symbol}: attendo ancora {max(0, MIN_HOLDING_MINUTES - (time.time()-entry.get('entry_time',0))/60):.1f} min prima di attivare SL/TSL", 60)
-                continue
-
+            
             current_price = get_last_price(symbol)
             if not current_price:
                 continue
@@ -1361,10 +1356,7 @@ while True:
             entry = position_data.get(symbol, {})
             entry_price = entry.get("entry_price", price)
             entry_cost = entry.get("entry_cost", ORDER_USDT)
-            if time.time() - entry.get("entry_time", 0) < MIN_HOLDING_MINUTES * 60:
-                tlog(f"holding_exit:{symbol}", f"[HOLDING][EXIT] {symbol}: attendo ancora {max(0, MIN_HOLDING_MINUTES - (time.time()-entry.get('entry_time',0))/60):.1f} min prima di poter vendere", 60)
-                continue
-
+            
             qty = get_open_long_qty(symbol)
             log(f"[EXIT-SIGNAL LONG][{symbol}] qty={qty} | entry={entry_price} | now={price}")
             if not qty or qty <= 0:
