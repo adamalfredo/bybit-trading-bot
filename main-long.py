@@ -1324,7 +1324,8 @@ while True:
             qty = market_long(symbol, order_amount)
 
             if not qty or qty == 0:
-                log(f"❌ LONG non aperto per {symbol}")
+                if LOG_DEBUG_STRATEGY:
+                    log(f"❌ LONG non aperto per {symbol}")
                 continue
 
             price_now = get_last_price(symbol)
