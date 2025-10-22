@@ -1324,8 +1324,6 @@ while True:
         # Log analisi: verboso solo in debug, altrimenti throttling 10min per combinazione
         if LOG_DEBUG_STRATEGY:
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
-        else:
-            tlog(f"analysis:{symbol}:{signal}:{strategy}", f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}", 1800)
 
         # ✅ ENTRATA SHORT
         if signal == "entry":
