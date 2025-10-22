@@ -470,7 +470,7 @@ def get_free_qty(symbol):
                     qty = float(raw) if raw else 0.0
                     # Log SOLO per USDT e con throttling
                     if coin == "USDT":
-                        tlog("balance_usdt", f"📦 Saldo USDT: {qty}", 600)  # max 1 riga/10min
+                        tlog("balance_usdt", f"📦 Saldo USDT: {qty}", 1800)  # max 1 riga/10min
                     else:
                         if LOG_DEBUG_PORTFOLIO:
                             log(f"[BALANCE] {coin}: {qty}")
@@ -1306,7 +1306,7 @@ while True:
     tot_invested = volatile_invested + stable_invested
     perc_volatile = (volatile_invested / portfolio_value * 100) if portfolio_value > 0 else 0
     perc_stable = (stable_invested / portfolio_value * 100) if portfolio_value > 0 else 0
-    tlog("portfolio", f"[PORTAFOGLIO] Totale: {portfolio_value:.2f} USDT | Volatili: {volatile_invested:.2f} ({perc_volatile:.1f}%) | Meno volatili: {stable_invested:.2f} ({perc_stable:.1f}%) | USDT: {usdt_balance:.2f}", 120)
+    tlog("portfolio", f"[PORTAFOGLIO] Totale: {portfolio_value:.2f} USDT | Volatili: {volatile_invested:.2f} ({perc_volatile:.1f}%) | Meno volatili: {stable_invested:.2f} ({perc_stable:.1f}%) | USDT: {usdt_balance:.2f}", 900)
 
     # --- Avviso saldo basso: invia solo una volta finché non torna sopra soglia ---
     # low_balance_alerted ora è globale rispetto al ciclo
@@ -1325,7 +1325,7 @@ while True:
         if LOG_DEBUG_STRATEGY:
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
         else:
-            tlog(f"analysis:{symbol}:{signal}:{strategy}", f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}", 600)
+            tlog(f"analysis:{symbol}:{signal}:{strategy}", f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}", 1800)
 
         # ✅ ENTRATA SHORT
         if signal == "entry":
