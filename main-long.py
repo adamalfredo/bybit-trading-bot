@@ -1213,9 +1213,6 @@ while True:
         if signal is not None and strategy is not None and price is not None:
             if LOG_DEBUG_STRATEGY:
                 log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
-            else:
-                # dedupe per 10 minuti per stessa combinazione
-                tlog(f"analysis:{symbol}:{signal}:{strategy}", f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}", 600)
         else:
             # nessun segnale → skip
             continue
@@ -1225,10 +1222,12 @@ while True:
             if symbol in last_exit_time:
                 elapsed = time.time() - last_exit_time[symbol]
                 if elapsed < COOLDOWN_MINUTES * 60:
-                    log(f"⏳ Cooldown attivo per {symbol}, salto ingresso")
+                    if LOG_DEBUG_STRATEGY:
+                        tlog(f"cooldown:{symbol}", f"⏳ Cooldown attivo per {symbol}, salto ingresso", 300)
                     continue
             if symbol in open_positions:
-                tlog(f"inpos:{symbol}", f"⏩ Ignoro apertura LONG: già in posizione su {symbol}", 1800)
+                if LOG_DEBUG_STRATEGY:
+                    tlog(f"inpos:{symbol}", f"⏩ Ignoro apertura LONG: già in posizione su {symbol}", 1800)
                 continue
 
             is_volatile = symbol in VOLATILE_ASSETS
