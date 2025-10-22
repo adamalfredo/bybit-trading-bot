@@ -576,6 +576,16 @@ def market_long(symbol: str, usdt_amount: float):
         qty_aligned = max(qty_aligned, min_notional_qty)
         log(f"[NOTIONAL-GUARD][{symbol}] qty alzata per min_order_amt → {float(qty_aligned)}")
 
+    # NEW: limita il notional all'effettivo margine disponibile adesso
+    avail_now = get_usdt_balance() or 0.0
+    max_notional_now = avail_now * DEFAULT_LEVERAGE * MARGIN_USE_PCT
+    desired_notional = float(qty_aligned) * float(price)
+    if desired_notional > max_notional_now:
+        # scala qty al tetto consentito dal margine corrente
+        qty_aligned = (Decimal(str(max_notional_now)) / Decimal(str(price))) // step_dec * step_dec
+        if qty_aligned <= 0:
+            return None
+
     max_retries = 3
     for attempt in range(1, max_retries + 1):
         qty_str = _format_qty_with_step(float(qty_aligned), qty_step)
@@ -638,7 +648,12 @@ def market_long(symbol: str, usdt_amount: float):
                 return None
             continue
         if ret_code == 110007:
-            # Insufficient available balance (Unified) → log essenziale con throttling
+            # Insufficient available balance → riduci qty del 20% e ritenta
+            scaled = (qty_aligned * Decimal("0.8")) // step_dec * step_dec
+            if scaled > 0:
+                qty_aligned = scaled
+                continue
+            # se troppo piccola, log essenziale (throttled) e termina
             tlog(f"err_110007:{symbol}", f"[ERROR][{symbol}] 110007: saldo disponibile insufficiente per aprire LONG", 300)
             break
         # Altri errori non gestiti → throttling per evitare spam
