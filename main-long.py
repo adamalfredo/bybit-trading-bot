@@ -67,7 +67,8 @@ LOG_DEBUG_SYNC       = os.getenv("LOG_DEBUG_SYNC", "0") == "1"
 LOG_DEBUG_STRATEGY   = os.getenv("LOG_DEBUG_STRATEGY", "0") == "1"
 LOG_DEBUG_TRAILING   = os.getenv("LOG_DEBUG_TRAILING", "0") == "1"
 LOG_DEBUG_PORTFOLIO  = os.getenv("LOG_DEBUG_PORTFOLIO", "0") == "1"
-
+# Large-cap con minQty elevata: abilita auto-bump del notional al minimo
+LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 # --- BLACKLIST STABLECOIN ---
 STABLECOIN_BLACKLIST = [
     "USDCUSDT", "USDEUSDT", "TUSDUSDT", "USDPUSDT", "BUSDUSDT", "FDUSDUSDT", "DAIUSDT", "EURUSDT", "USDTUSDT"
@@ -426,6 +427,7 @@ def _format_qty_with_step(qty: float, step: float) -> str:
     return f"{int(floored)}"
 
 def get_free_qty(symbol):
+    # Normalizza coin
     if symbol.endswith("USDT") and len(symbol) > 4:
         coin = symbol.replace("USDT", "")
     elif symbol == "USDT":
@@ -450,11 +452,11 @@ def get_free_qty(symbol):
     }
 
     try:
-        resp = requests.get(url, headers=headers, params=params)
+        resp = requests.get(url, headers=headers, params=params, timeout=10)
         data = resp.json()
-
         if "result" not in data or "list" not in data["result"]:
-            log(f"❗ Struttura inattesa da Bybit per {symbol}: {resp.text}")
+            if LOG_DEBUG_PORTFOLIO:
+                log(f"❗ Struttura inattesa da Bybit per {symbol}: {resp.text}")
             return 0.0
 
         coin_list = data["result"]["list"][0].get("coin", [])
@@ -463,20 +465,22 @@ def get_free_qty(symbol):
                 raw = c.get("walletBalance", "0")
                 try:
                     qty = float(raw) if raw else 0.0
-                    if qty > 0:
-                        log(f"📦 Saldo trovato per {coin}: {qty}")
-                    else:
-                        log(f"🟡 Nessun saldo disponibile per {coin}")
+                    # Log SOLO per USDT e con throttling, così non spamma
+                    if coin == "USDT":
+                        tlog("balance_usdt", f"📦 Saldo USDT: {qty}", 600)
                     return qty
                 except Exception as e:
-                    log(f"⚠️ Errore conversione quantità {coin}: {e}")
+                    if LOG_DEBUG_PORTFOLIO:
+                        log(f"⚠️ Errore conversione quantità {coin}: {e}")
                     return 0.0
 
-        log(f"🔍 Coin {coin} non trovata nel saldo.")
+        if LOG_DEBUG_PORTFOLIO:
+            log(f"🔍 Coin {coin} non trovata nel saldo.")
         return 0.0
 
     except Exception as e:
-        log(f"❌ Errore nel recupero saldo per {symbol}: {e}")
+        if LOG_DEBUG_PORTFOLIO:
+            log(f"❌ Errore nel recupero saldo per {symbol}: {e}")
         return 0.0
 
 def notify_telegram(msg):
@@ -588,13 +592,15 @@ def market_long(symbol: str, usdt_amount: float):
         headers = {"X-BAPI-API-KEY": KEY, "X-BAPI-SIGN": sign, "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": "5000", "X-BAPI-SIGN-TYPE": "2", "Content-Type": "application/json"}
 
         response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"[LONG][{symbol}] attempt {attempt}/{max_retries} BODY={body_json}")
+        if LOG_DEBUG_STRATEGY:
+            log(f"[LONG][{symbol}] attempt {attempt}/{max_retries} BODY={body_json}")
 
         try:
             resp_json = response.json()
         except:
             resp_json = {}
-        log(f"[LONG][{symbol}] RESP {response.status_code} {resp_json}")
+        if LOG_DEBUG_STRATEGY:
+            log(f"[LONG][{symbol}] RESP {response.status_code} {resp_json}")
 
         if resp_json.get("retCode") == 0:
             return float(qty_str)
@@ -608,6 +614,16 @@ def market_long(symbol: str, usdt_amount: float):
             qty_step = float(info.get("qty_step", qty_step))
             step_dec = Decimal(str(qty_step))
             qty_aligned = (qty_aligned // step_dec) * step_dec
+            continue
+        if ret_code == 170140:
+            # Order value exceeded lower limit → riallinea alla qty minima per notional
+            info = get_instrument_info(symbol)
+            min_qty = float(info.get("min_qty", 0.0))
+            min_order_amt = float(info.get("min_order_amt", 10.0))
+            needed_qty = max(Decimal(str(min_qty)), Decimal(str(min_order_amt)) / Decimal(str(price)))
+            multiples = (needed_qty / step_dec).quantize(Decimal('1'), rounding=ROUND_UP)
+            qty_aligned = multiples * step_dec
+            log(f"[RETRY][{symbol}] 170140 → qty bump a {float(qty_aligned)} (min_notional)")
             continue
         if ret_code == 170131:
             log(f"[RETRY][{symbol}] 170131 → riduco qty del 10%")
@@ -650,13 +666,15 @@ def market_close_long(symbol: str, qty: float):
         headers = {"X-BAPI-API-KEY": KEY, "X-BAPI-SIGN": sign, "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": "5000", "X-BAPI-SIGN-TYPE": "2", "Content-Type": "application/json"}
 
         response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
-        log(f"[CLOSE-LONG][{symbol}] attempt {attempt}/{max_retries} BODY={body_json}")
+        if LOG_DEBUG_STRATEGY:
+            log(f"[CLOSE-LONG][{symbol}] attempt {attempt}/{max_retries} BODY={body_json}")
 
         try:
             resp_json = response.json()
         except:
             resp_json = {}
-        log(f"[CLOSE-LONG][{symbol}] RESP {response.status_code} {resp_json}")
+        if LOG_DEBUG_STRATEGY:
+            log(f"[CLOSE-LONG][{symbol}] RESP {response.status_code} {resp_json}")
 
         if resp_json.get("retCode") == 0:
             return response
@@ -808,7 +826,8 @@ def analyze_asset(symbol: str):
             if cond5 and cond6:
                 entry_conditions.append(True); entry_strategies.append("MACD bullish + ADX (30m)")
             if len(entry_conditions) >= 2:
-                log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
+                if LOG_DEBUG_STRATEGY:
+                    log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
         else:
             if last["ema20"] > last["ema50"]:
@@ -821,7 +840,8 @@ def analyze_asset(symbol: str):
             if cond5:
                 entry_conditions.append(True); entry_strategies.append("Trend EMA+RSI (30m)")
             if len(entry_conditions) >= 2:
-                log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
+                if LOG_DEBUG_STRATEGY:
+                    log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
 
         # --- EXIT LONG: segnali ribassisti ---
@@ -883,9 +903,12 @@ def sync_positions_from_wallet():
             price = get_last_price(symbol)
             if not price:
                 continue
-            open_positions.add(symbol)
-            entry_price = price
-            entry_cost = qty * price
+            try:
+                pos = next(p for p in pos_list if p.get("symbol") == symbol and p.get("side") == "Buy")
+                entry_price = float(pos.get("avgPrice") or price)
+            except StopIteration:
+                entry_price = price
+            entry_cost = qty * entry_price
             # Calcola ATR e SL/TP corretti per LONG
             df = fetch_history(symbol)
             if df is not None and "Close" in df.columns:
@@ -1187,9 +1210,14 @@ while True:
             continue
 
         signal, strategy, price = analyze_asset(symbol)
-        if LOG_DEBUG_STRATEGY or (signal is not None and strategy is not None and price is not None):
-            log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
-        if signal is None or strategy is None or price is None:
+        if signal is not None and strategy is not None and price is not None:
+            if LOG_DEBUG_STRATEGY:
+                log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
+            else:
+                # dedupe per 10 minuti per stessa combinazione
+                tlog(f"analysis:{symbol}:{signal}:{strategy}", f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}", 600)
+        else:
+            # nessun segnale → skip
             continue
 
         # ENTRY LONG
@@ -1200,7 +1228,7 @@ while True:
                     log(f"⏳ Cooldown attivo per {symbol}, salto ingresso")
                     continue
             if symbol in open_positions:
-                log(f"⏩ Ignoro apertura LONG: già in posizione su {symbol}")
+                tlog(f"inpos:{symbol}", f"⏩ Ignoro apertura LONG: già in posizione su {symbol}", 1800)
                 continue
 
             is_volatile = symbol in VOLATILE_ASSETS
@@ -1208,17 +1236,25 @@ while True:
             group_invested = volatile_invested if is_volatile else stable_invested
             group_available = max(0.0, group_budget - group_invested)
             if group_available < ORDER_USDT:
-                log(f"💸 Budget insufficiente per {symbol} (disp: {group_available:.2f})")
+                tlog(f"budget:{symbol}", f"💸 Budget insufficiente per {symbol} (disp: {group_available:.2f})", 300)
                 continue
 
-            strategy_strength = {
+            weights = {
                 "Breakout BB (30m)": 1.0,
                 "MACD bullish + ADX (30m)": 0.9,
                 "Incrocio EMA 20/50 (30m)": 0.75,
+                "EMA20>EMA50 (30m)": 0.75,       # usata nel ramo non-volatile
+                "MACD cross up (30m)": 0.65,     # usata nel ramo volatile
                 "MACD bullish (30m)": 0.65,
                 "Trend EMA+RSI (30m)": 0.6
             }
-            strength = strategy_strength.get(strategy, 0.5)
+            parts = [p.strip() for p in (strategy or "").split(",") if p.strip()]
+            if parts:
+                base = max(weights.get(p, 0.5) for p in parts)
+                bonus = min(0.1 * (len(parts) - 1), 0.3)  # +0.1 per conferma, max +0.3
+                strength = min(1.0, base + bonus)
+            else:
+                strength = 0.5
 
             df_hist = fetch_history(symbol)
             if df_hist is not None and "Close" in df_hist.columns:
@@ -1242,19 +1278,25 @@ while True:
             min_qty = float(info_i.get("min_qty", 0.0))
             price_now_chk = get_last_price(symbol) or 0.0
             min_notional = max(min_order_amt, (min_qty or 0.0) * price_now_chk)
+            # PATCH: se order_amount < min_notional, prova ad alzarlo al minimo richiesto
             if order_amount < min_notional:
-                log(f"❌ Notional richiesto {order_amount:.2f} < minimo richiesto {min_notional:.2f} per {symbol} (min_qty={min_qty}, price={price_now_chk})")
-                continue
+                bump = min_notional * 1.01  # +1% cuscinetto
+                max_by_margin = max_notional_by_margin
+                if symbol in LARGE_CAPS and max_by_margin >= bump:
+                    # Consenti override del budget di gruppo per rispettare minQty/minNotional
+                    old = order_amount
+                    order_amount = min(bump, max_by_margin, 1000.0)
+                    log(f"[BUMP-NOTIONAL][{symbol}] alzato notional da {old:.2f} a {order_amount:.2f} per rispettare min_qty/min_notional")
+                else:
+                    tlog(f"min_notional:{symbol}", f"❌ Notional richiesto {order_amount:.2f} < minimo {min_notional:.2f} per {symbol} (min_qty={min_qty}, price={price_now_chk})", 300)
+                    continue
 
-            qty_str = calculate_quantity(symbol, order_amount)
-            log(f"[DEBUG-ENTRY LONG] {symbol}: notional={order_amount:.2f} → qty_str={qty_str}")
-            if not qty_str:
-                continue
             if TEST_MODE:
                 log(f"[TEST_MODE] LONG inibiti per {symbol}")
                 continue
 
             qty = market_long(symbol, order_amount)
+
             if not qty or qty == 0:
                 log(f"❌ LONG non aperto per {symbol}")
                 continue
