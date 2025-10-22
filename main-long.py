@@ -456,31 +456,37 @@ def get_free_qty(symbol):
         data = resp.json()
         if "result" not in data or "list" not in data["result"]:
             if LOG_DEBUG_PORTFOLIO:
-                log(f"❗ Struttura inattesa da Bybit per {symbol}: {resp.text}")
+                log(f"❗ Struttura inattesa da Bybit: {resp.text}")
             return 0.0
 
-        coin_list = data["result"]["list"][0].get("coin", [])
-        for c in coin_list:
-            if c["coin"] == coin:
-                raw = c.get("walletBalance", "0")
-                try:
-                    qty = float(raw) if raw else 0.0
-                    # Log SOLO per USDT e con throttling, così non spamma
-                    if coin == "USDT":
-                        tlog("balance_usdt", f"📦 Saldo USDT: {qty}", 600)
-                    return qty
-                except Exception as e:
-                    if LOG_DEBUG_PORTFOLIO:
-                        log(f"⚠️ Errore conversione quantità {coin}: {e}")
-                    return 0.0
+        acct = data["result"]["list"][0]
+        # Saldo disponibile complessivo (Unified)
+        total_avail = float(acct.get("totalAvailableBalance") or 0.0)
 
-        if LOG_DEBUG_PORTFOLIO:
-            log(f"🔍 Coin {coin} non trovata nel saldo.")
+        # Per USDT prova a prendere il disponibile della coin; fallback al totale disponibile
+        coin_list = acct.get("coin", [])
+        if coin == "USDT":
+            for c in coin_list:
+                if c.get("coin") == "USDT":
+                    avail = c.get("availableToWithdraw") or c.get("availableBalance") or c.get("walletBalance") or "0"
+                    qty = float(avail) if avail else 0.0
+                    # Log minimale e con throttling
+                    tlog("balance_usdt", f"📦 Saldo USDT disponibile: {qty}", 600)
+                    return qty if qty > 0 else float(total_avail)  # fallback
+            # Se non trovata la coin, usa il totale disponibile
+            tlog("balance_usdt", f"📦 Saldo USDT disponibile: {total_avail}", 600)
+            return float(total_avail)
+
+        # Per altre coin usa quanto disponibile nella coin, altrimenti 0
+        for c in coin_list:
+            if c.get("coin") == coin:
+                avail = c.get("availableToWithdraw") or c.get("availableBalance") or c.get("walletBalance") or "0"
+                return float(avail) if avail else 0.0
         return 0.0
 
     except Exception as e:
         if LOG_DEBUG_PORTFOLIO:
-            log(f"❌ Errore nel recupero saldo per {symbol}: {e}")
+            log(f"❌ Errore nel recupero saldo: {e}")
         return 0.0
 
 def notify_telegram(msg):
@@ -631,8 +637,12 @@ def market_long(symbol: str, usdt_amount: float):
             if qty_aligned <= 0:
                 return None
             continue
-
-        log(f"[ERROR][{symbol}] Errore non gestito: {ret_code}")
+        if ret_code == 110007:
+            # Insufficient available balance (Unified) → log essenziale con throttling
+            tlog(f"err_110007:{symbol}", f"[ERROR][{symbol}] 110007: saldo disponibile insufficiente per aprire LONG", 300)
+            break
+        # Altri errori non gestiti → throttling per evitare spam
+        tlog(f"long_err:{symbol}:{ret_code}", f"[ERROR][{symbol}] Errore non gestito: {ret_code}", 300)
         break
     return None
 
