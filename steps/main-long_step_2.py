@@ -28,20 +28,19 @@ MARGIN_USE_PCT = float(os.getenv("MARGIN_USE_PCT", "0.35"))         # quota sald
 TARGET_NOTIONAL_PER_TRADE = float(os.getenv("TARGET_NOTIONAL_PER_TRADE", "200"))  # obiettivo notional per trade (USDT)
 
 INTERVAL_MINUTES = 60  # era 15
-ENTRY_TF_MINUTES = 60  # era 30
 ATR_WINDOW = 14
-TRAILING_MIN = 0.015  # trailing più largo
-TRAILING_MAX = 0.05   # trailing più largo
-TRAILING_ACTIVATION_THRESHOLD = 0.015  # trailing parte dopo +1.5%
-TRAILING_SL_BUFFER = 0.015             # trailing SL più largo
-TRAILING_DISTANCE = 0.04               # trailing SL più largo
-TP_FACTOR = 2.5                        # TP più ambizioso
-SL_FACTOR = 1.2                        # SL più stretto
-TP_MIN = 2.0
+TP_FACTOR = 2.0
+SL_FACTOR = 1.5
+# Soglie dinamiche consigliate
+TP_MIN = 1.5
 TP_MAX = 3.0
 SL_MIN = 1.0
-SL_MAX = 2.0
-
+SL_MAX = 2.5
+TRAILING_MIN = 0.015  # era 0.005, trailing più largo
+TRAILING_MAX = 0.05   # era 0.03, trailing più largo
+TRAILING_ACTIVATION_THRESHOLD = 0.02  # trailing parte dopo -2%
+TRAILING_SL_BUFFER = 0.015            # era 0.007, trailing SL più largo
+TRAILING_DISTANCE = 0.04              # era 0.02, trailing SL più largo
 ENABLE_TP1 = False       # abilita TP parziale a 1R
 TP1_R_MULT = 1.0        # target TP1 a 1R
 TP1_CLOSE_PCT = 0.5     # chiudi il 50% a TP1
@@ -53,6 +52,7 @@ ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
 # --- MTF entry: segnali su 15m, trend su 4h/1h ---
 USE_MTF_ENTRY = True
+ENTRY_TF_MINUTES = 30
 ENTRY_ADX_VOLATILE = 12   # soglia ADX più bassa su 15m per non arrivare tardi
 ENTRY_ADX_STABLE = 10
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
@@ -850,7 +850,7 @@ def analyze_asset(symbol: str):
             cond6 = last["adx"] > adx_threshold
             if cond5 and cond6:
                 entry_conditions.append(True); entry_strategies.append("MACD bullish + ADX (30m)")
-            if len(entry_conditions) >= 3:
+            if len(entry_conditions) >= 2:
                 if LOG_DEBUG_STRATEGY:
                     log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
@@ -864,40 +864,17 @@ def analyze_asset(symbol: str):
             cond5 = last["rsi"] > 50 and last["ema20"] > last["ema50"]
             if cond5:
                 entry_conditions.append(True); entry_strategies.append("Trend EMA+RSI (30m)")
-            if len(entry_conditions) >= 3:
+            if len(entry_conditions) >= 2:
                 if LOG_DEBUG_STRATEGY:
                     log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
 
-            # --- EXIT LONG: segnali ribassisti ---
-            cond_exit1 = last["Close"] < last["bb_lower"] and last["rsi"] < 45
-            def can_exit(symbol):
-                entry = position_data.get(symbol, {})
-                entry_price = entry.get("entry_price")
-                entry_time = entry.get("entry_time")
-                if not entry_price or not entry_time:
-                    return True  # fallback: consenti sempre
-                r = abs(price - entry_price) / (entry_price * INITIAL_STOP_LOSS_PCT)
-                holding_min = (time.time() - entry_time) / 60
-                return (price > entry_price and r > 0.5) or holding_min > 60
-            if cond_exit1 and can_exit(symbol):
-                return "exit", "Breakdown BB + RSI (bearish)", price
-            exit_1h = False
-            try:
-                df_1h = fetch_history(symbol, interval=60)
-                if df_1h is not None and len(df_1h) > 2:
-                    macd_1h = MACD(close=df_1h["Close"])
-                    df_1h["macd"] = macd_1h.macd()
-                    df_1h["macd_signal"] = macd_1h.macd_signal()
-                    df_1h["adx"] = ADXIndicator(high=df_1h["High"], low=df_1h["Low"], close=df_1h["Close"]).adx()
-                    last_1h = df_1h.iloc[-1]
-                    adx_threshold_1h = adx_threshold  # puoi usare la stessa soglia
-                    if last_1h["macd"] < last_1h["macd_signal"] and last_1h["adx"] > adx_threshold_1h:
-                        exit_1h = True
-            except Exception:
-                exit_1h = False
-            if last["macd"] < last["macd_signal"] and last["adx"] > adx_threshold and exit_1h and can_exit(symbol):
-                return "exit", "MACD bearish + ADX", price
+        # --- EXIT LONG: segnali ribassisti ---
+        cond_exit1 = last["Close"] < last["bb_lower"] and last["rsi"] < 45
+        if cond_exit1:
+            return "exit", "Breakdown BB + RSI (bearish)", price
+        if last["macd"] < last["macd_signal"] and last["adx"] > adx_threshold:
+            return "exit", "MACD bearish + ADX", price
 
         return None, None, None
     except Exception as e:
