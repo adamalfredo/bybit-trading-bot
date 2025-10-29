@@ -29,16 +29,16 @@ TARGET_NOTIONAL_PER_TRADE = float(os.getenv("TARGET_NOTIONAL_PER_TRADE", "200"))
 
 INTERVAL_MINUTES = 60  # era 15
 ATR_WINDOW = 14
-TP_FACTOR = 2.0
-SL_FACTOR = 1.5
+TP_FACTOR = 2.5
+SL_FACTOR = 1.2
 # Soglie dinamiche consigliate
-TP_MIN = 1.5
+TP_MIN = 2.0
 TP_MAX = 3.0
 SL_MIN = 1.0
 SL_MAX = 2.5
 TRAILING_MIN = 0.015  # era 0.005, trailing più largo
 TRAILING_MAX = 0.05   # era 0.03, trailing più largo
-TRAILING_ACTIVATION_THRESHOLD = 0.02  # trailing parte dopo -2%
+TRAILING_ACTIVATION_THRESHOLD = 0.015  # trailing parte dopo -2%
 TRAILING_SL_BUFFER = 0.015            # era 0.007, trailing SL più largo
 TRAILING_DISTANCE = 0.04              # era 0.02, trailing SL più largo
 ENABLE_TP1 = False       # abilita TP parziale a 1R
@@ -52,7 +52,7 @@ ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
 # --- MTF entry: segnali su 15m, trend su 4h/1h ---
 USE_MTF_ENTRY = True
-ENTRY_TF_MINUTES = 30
+ENTRY_TF_MINUTES = 60
 ENTRY_ADX_VOLATILE = 12   # soglia ADX più bassa su 15m per non arrivare tardi
 ENTRY_ADX_STABLE = 10
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
@@ -805,6 +805,19 @@ def analyze_asset(symbol: str):
         
     try:
         df = fetch_history(symbol, interval=ENTRY_TF_MINUTES if USE_MTF_ENTRY else INTERVAL_MINUTES)
+
+        # PATCH: Funzione per rendere meno reattiva l'uscita
+        def can_exit(symbol):
+            entry = position_data.get(symbol, {})
+            entry_price = entry.get("entry_price")
+            entry_time = entry.get("entry_time")
+            if not entry_price or not entry_time:
+                return True  # fallback: consenti sempre
+            r = abs(price - entry_price) / (entry_price * INITIAL_STOP_LOSS_PCT)
+            holding_min = (time.time() - entry_time) / 60
+            # SHORT: esci solo se profitto > 0.5R o holding > 60min
+            return (price < entry_price and r > 0.5) or holding_min > 60
+        
         if df is None or len(df) < 3:
             log(f"[ANALYZE] Dati storici insufficienti per {symbol}")
             return None, None, None
@@ -865,7 +878,7 @@ def analyze_asset(symbol: str):
             cond6 = last["adx"] > adx_threshold
             if cond5 and cond6:
                 entry_conditions.append(True); entry_strategies.append("MACD bearish + ADX (30m)")
-            if len(entry_conditions) >= 2:
+            if len(entry_conditions) >= 3:
                 if LOG_DEBUG_STRATEGY:
                     log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
@@ -880,16 +893,31 @@ def analyze_asset(symbol: str):
             cond5 = last["rsi"] < 45 and last["ema20"] < last["ema50"]
             if cond5:
                 entry_conditions.append(True); entry_strategies.append("Trend EMA+RSI (30m)")
-            if len(entry_conditions) >= 2:
+            if len(entry_conditions) >= 3:
                 if LOG_DEBUG_STRATEGY:
                     log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
 
         # --- EXIT SHORT: segnali bullish ---
         cond_exit1 = last["Close"] > last["bb_upper"] and last["rsi"] > 60
-        if cond_exit1:
+        if cond_exit1 and can_exit(symbol):
             return "exit", "Rimbalzo BB + RSI (bullish)", price
-        if last["macd"] > last["macd_signal"] and last["adx"] > adx_threshold:
+        # PATCH 6: Conferma exit anche su 1h
+        exit_1h = False
+        try:
+            df_1h = fetch_history(symbol, interval=60)
+            if df_1h is not None and len(df_1h) > 2:
+                macd_1h = MACD(close=df_1h["Close"])
+                df_1h["macd"] = macd_1h.macd()
+                df_1h["macd_signal"] = macd_1h.macd_signal()
+                df_1h["adx"] = ADXIndicator(high=df_1h["High"], low=df_1h["Low"], close=df_1h["Close"]).adx()
+                last_1h = df_1h.iloc[-1]
+                adx_threshold_1h = adx_threshold
+                if last_1h["macd"] > last_1h["macd_signal"] and last_1h["adx"] > adx_threshold_1h:
+                    exit_1h = True
+        except Exception:
+            exit_1h = False
+        if last["macd"] > last["macd_signal"] and last["adx"] > adx_threshold and exit_1h and can_exit(symbol):
             return "exit", "MACD bullish + ADX", price
 
         return None, None, None
@@ -1191,10 +1219,19 @@ def trailing_stop_worker():
                 if current_price < entry.get("p_min", entry["entry_price"]):
                     entry["p_min"] = current_price
                     tlog(f"pmin:{symbol}", f"⬇️ Nuovo minimo {symbol}: {entry['p_min']:.4f}", 30)
-
-                # Trailing TP (chiusura quando rimbalza dal minimo)
-                tp_trailing_buffer = 0.015 if symbol in VOLATILE_ASSETS else 0.010
-                trailing_tp_price = entry["p_min"] * (1 + tp_trailing_buffer)
+            
+                # Trailing dinamico a scaglioni
+                profit_pct = ((entry["entry_price"] - entry["p_min"]) / entry["entry_price"]) * 100.0
+                if profit_pct >= 20:
+                    trailing_buffer = 0.005  # 0.5%
+                elif profit_pct >= 10:
+                    trailing_buffer = 0.01   # 1%
+                elif profit_pct >= 5:
+                    trailing_buffer = 0.015  # 1.5%
+                else:
+                    trailing_buffer = 0.02   # 2%
+            
+                trailing_tp_price = entry["p_min"] * (1 + trailing_buffer)
                 if LOG_DEBUG_TRAILING:
                     tlog(f"trail_tp:{symbol}", f"[DEBUG][TRAILING_TP] {symbol} | current_price={current_price:.4f} | trailing_tp_price={trailing_tp_price:.4f} | p_min={entry['p_min']:.4f}", 30)
                 if current_price >= trailing_tp_price:
@@ -1221,14 +1258,12 @@ def trailing_stop_worker():
                             last_exit_time[symbol] = time.time()
                             position_data.pop(symbol, None)
                     continue
-
-                # Aggiorna SL trailing (SHORT)
-                new_sl = current_price * (1 + TRAILING_SL_BUFFER)
-                if LOG_DEBUG_TRAILING:
-                    tlog(f"trail_sl:{symbol}", f"[DEBUG][TRAILING_SL] {symbol} | current_price={current_price:.4f} | new_sl={new_sl:.4f} | old_sl={entry['sl']:.4f}", 30)
-                if new_sl < entry["sl"]:
-                    tlog(f"sl_update:{symbol}", f"📉 SL SHORT aggiornato {symbol}: {entry['sl']:.4f} → {new_sl:.4f}", 30)
-                    entry["sl"] = new_sl
+            
+                # Aggiorna SL a breakeven o profitto intermedio
+                if profit_pct >= 10 and entry.get("sl", entry["entry_price"] * 1.01) > entry["entry_price"] * 0.95:
+                    entry["sl"] = entry["entry_price"] * 0.95  # blocca almeno +5%
+                elif profit_pct >= 5 and entry.get("sl", entry["entry_price"] * 1.01) > entry["entry_price"]:
+                    entry["sl"] = entry["entry_price"]  # breakeven
 
             # Trigger SL
             sl_triggered = False
