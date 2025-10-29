@@ -837,33 +837,33 @@ def analyze_asset(symbol: str):
         entry_strategies = []
         
         if prev["ema20"] <= prev["ema50"] and last["ema20"] > last["ema50"]:
-            entry_conditions.append(True); entry_strategies.append("Incrocio EMA 20/50 (30m)")
+            entry_strategies.append(f"Incrocio EMA 20/50 ({ENTRY_TF_MINUTES}m)")
         if (last["macd"] - last["macd_signal"]) > 0 and (prev["macd"] - prev["macd_signal"]) <= 0:
-            entry_conditions.append(True); entry_strategies.append("MACD cross up (30m)")
+            entry_conditions.append(True); entry_strategies.append(f"MACD cross up ({ENTRY_TF_MINUTES}m)")
 
         if is_volatile:
             cond1 = last["Close"] > last["bb_upper"]
             cond2 = last["rsi"] > 55
             if cond1 and cond2:
-                entry_conditions.append(True); entry_strategies.append("Breakout BB (30m)")
+                entry_conditions.append(True); entry_strategies.append(f"Breakout BB ({ENTRY_TF_MINUTES}m)")
             cond5 = last["macd"] > last["macd_signal"]
             cond6 = last["adx"] > adx_threshold
             if cond5 and cond6:
-                entry_conditions.append(True); entry_strategies.append("MACD bullish + ADX (30m)")
+                entry_conditions.append(True); entry_strategies.append(f"MACD bullish + ADX ({ENTRY_TF_MINUTES}m)")
             if len(entry_conditions) >= 3:
                 if LOG_DEBUG_STRATEGY:
                     log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
         else:
             if last["ema20"] > last["ema50"]:
-                entry_conditions.append(True); entry_strategies.append("EMA20>EMA50 (30m)")
+                entry_conditions.append(True); entry_strategies.append(f"EMA20>EMA50 ({ENTRY_TF_MINUTES}m)")
             cond3 = last["macd"] > last["macd_signal"]
             cond4 = last["adx"] > adx_threshold
             if cond3 and cond4:
-                entry_conditions.append(True); entry_strategies.append("MACD bullish (30m)")
+                entry_conditions.append(True); entry_strategies.append(f"MACD bullish ({ENTRY_TF_MINUTES}m)")
             cond5 = last["rsi"] > 50 and last["ema20"] > last["ema50"]
             if cond5:
-                entry_conditions.append(True); entry_strategies.append("Trend EMA+RSI (30m)")
+                entry_conditions.append(True); entry_strategies.append(f"Trend EMA+RSI ({ENTRY_TF_MINUTES}m)")
             if len(entry_conditions) >= 3:
                 if LOG_DEBUG_STRATEGY:
                     log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
@@ -1185,10 +1185,19 @@ def trailing_stop_worker():
                 # Aggiorna massimo
                 if current_price > entry.get("p_max", entry["entry_price"]):
                     entry["p_max"] = current_price
-
-                # Trailing TP: chiudi se ritraccia sotto p_max*(1 - buffer)
-                tp_trailing_buffer = 0.015 if symbol in VOLATILE_ASSETS else 0.010
-                trailing_tp_price = entry.get("p_max", entry["entry_price"]) * (1 - tp_trailing_buffer)
+            
+                # Trailing dinamico a scaglioni
+                profit_pct = ((entry["p_max"] - entry["entry_price"]) / entry["entry_price"]) * 100.0
+                if profit_pct >= 20:
+                    trailing_buffer = 0.005  # 0.5%
+                elif profit_pct >= 10:
+                    trailing_buffer = 0.01   # 1%
+                elif profit_pct >= 5:
+                    trailing_buffer = 0.015  # 1.5%
+                else:
+                    trailing_buffer = 0.02   # 2%
+            
+                trailing_tp_price = entry["p_max"] * (1 - trailing_buffer)
                 if current_price <= trailing_tp_price:
                     qty = get_open_long_qty(symbol)
                     if qty > 0:
@@ -1208,11 +1217,12 @@ def trailing_stop_worker():
                             last_exit_time[symbol] = time.time()
                             position_data.pop(symbol, None)
                     continue
-
-                # Aggiorna SL trailing (LONG): alza lo SL
-                new_sl = current_price * (1 - TRAILING_SL_BUFFER)
-                if new_sl > entry.get("sl", entry_price * 0.99):
-                    entry["sl"] = new_sl
+            
+                # Aggiorna SL a breakeven o profitto intermedio
+                if profit_pct >= 10 and entry.get("sl", entry["entry_price"] * 0.99) < entry["entry_price"] * 1.05:
+                    entry["sl"] = entry["entry_price"] * 1.05  # blocca almeno +5%
+                elif profit_pct >= 5 and entry.get("sl", entry["entry_price"] * 0.99) < entry["entry_price"]:
+                    entry["sl"] = entry["entry_price"]  # breakeven
 
             # Trigger SL (LONG)
             if current_price <= entry.get("sl", entry_price * 0.99):
