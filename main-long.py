@@ -41,6 +41,16 @@ TP_MIN = 2.0
 TP_MAX = 3.0
 SL_MIN = 1.0
 SL_MAX = 2.0
+# Nuovi parametri per protezione guadagni (stop_floor)
+MIN_PROTECT_PCT = 2.0       # soglia minima protezione (2%)
+TRAILING_PROTECT_TIERS = [  # (p_max_pct_threshold, margin_pct)
+    (2, 2.0),   # se p_max_pct <5 e >=2 -> margin 2%
+    (5, 3.0),   # se p_max_pct <10 -> margin 3%
+    (10, 4.0),  # se p_max_pct <20 -> margin 4%
+    (20, 5.0)   # >=20 -> margin 5%
+]
+TRIGGER_BY = "LastPrice"    # "LastPrice" o "MarkPrice" per trigger degli stop exchange
+TRAILING_POLL_SEC = 5       # frequenza worker trailing in secondi (default 5s)
 
 ENABLE_TP1 = False       # abilita TP parziale a 1R
 TP1_R_MULT = 1.0        # target TP1 a 1R
@@ -719,6 +729,54 @@ def market_close_long(symbol: str, qty: float):
         break
     return None
 
+def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigger_by: str = TRIGGER_BY) -> bool:
+    """
+    Piazza/aggiorna uno stop-market reduceOnly per proteggere la posizione LONG.
+    ReduceOnly=True, orderType=Market, triggerPrice = stop_price, triggerBy = trigger_by.
+    Restituisce True se la chiamata API ha retCode==0.
+    """
+    try:
+        info = get_instrument_info(symbol)
+        qty_step = info.get("qty_step", 0.01)
+        qty_str = _format_qty_with_step(float(qty), qty_step)
+        body = {
+            "category": "linear",
+            "symbol": symbol,
+            "side": "Sell",
+            "orderType": "Market",
+            "qty": qty_str,
+            "reduceOnly": "true",
+            "positionIdx": 1,
+            "price": None,
+            "triggerBy": trigger_by,
+            "triggerPrice": f"{stop_price:.8f}"
+        }
+        ts = str(int(time.time() * 1000))
+        recv_window = "5000"
+        body_json = json.dumps(body, separators=(",", ":"))
+        payload = f"{ts}{KEY}{recv_window}{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": recv_window,
+            "X-BAPI-SIGN-TYPE": "2",
+            "Content-Type": "application/json"
+        }
+        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json, timeout=10)
+        try:
+            data = resp.json()
+        except:
+            data = {}
+        if data.get("retCode") == 0:
+            return True
+        tlog(f"sl_create_err:{symbol}", f"[SL-PLACE][LONG] retCode={data.get('retCode')} msg={data.get('retMsg')}", 300)
+        return False
+    except Exception as e:
+        tlog(f"sl_create_exc:{symbol}", f"[SL-PLACE][LONG] eccezione: {e}", 300)
+        return False
+
 def fetch_history(symbol: str, interval=INTERVAL_MINUTES, limit=400):
     """
     Scarica la cronologia dei prezzi per il simbolo dato da Bybit (linear/futures).
@@ -1182,47 +1240,88 @@ def trailing_stop_worker():
                 notify_telegram(f"🔛🔺 Trailing Stop LONG attivato su {symbol} a {current_price:.4f}")
 
             if entry["trailing_active"]:
-                # Aggiorna massimo
-                if current_price > entry.get("p_max", entry["entry_price"]):
-                    entry["p_max"] = current_price
-            
-                # Trailing dinamico a scaglioni
+                # Aggiorna p_max in modo robusto
+                entry["p_max"] = max(entry.get("p_max", entry["entry_price"]), current_price)
+
+                # Calcola profit % sul p_max
                 profit_pct = ((entry["p_max"] - entry["entry_price"]) / entry["entry_price"]) * 100.0
-                if profit_pct >= 20:
-                    trailing_buffer = 0.005  # 0.5%
-                elif profit_pct >= 10:
-                    trailing_buffer = 0.01   # 1%
-                elif profit_pct >= 5:
-                    trailing_buffer = 0.015  # 1.5%
+
+                # Determina margin (tier) da applicare per lo stop_floor
+                tier_margin = None
+                if profit_pct < TRAILING_PROTECT_TIERS[0][0]:
+                    tier_margin = None
                 else:
-                    trailing_buffer = 0.02   # 2%
-            
+                    # itera i tiers (assume ordinati asc)
+                    for th, m in TRAILING_PROTECT_TIERS:
+                        if profit_pct >= th:
+                            tier_margin = m
+                    # se non assegnato fallback all'ultimo
+                    if tier_margin is None and len(TRAILING_PROTECT_TIERS):
+                        tier_margin = TRAILING_PROTECT_TIERS[0][1]
+
+                # Calcola stop_floor candidate (basato su p_max) e garanzia min_protect
+                if tier_margin is not None:
+                    stop_floor_candidate = entry["p_max"] * (1.0 - (tier_margin / 100.0))
+                    min_floor = entry["entry_price"] * (1.0 + (MIN_PROTECT_PCT / 100.0))
+                    new_stop_floor = max(stop_floor_candidate, min_floor)
+                    # Non abbassare mai lo stop_floor esistente
+                    if entry.get("stop_floor") is None or new_stop_floor > entry.get("stop_floor", 0):
+                        entry["stop_floor"] = new_stop_floor
+                        # Prova a piazzare stop-market sul book per proteggere i guadagni
+                        try:
+                            qty_for_sl = entry.get("qty", get_open_long_qty(symbol))
+                            if qty_for_sl and qty_for_sl > 0:
+                                ok = place_conditional_sl_long(symbol, entry["stop_floor"], qty_for_sl)
+                                if LOG_DEBUG_TRAILING:
+                                    tlog(f"sl_place:{symbol}", f"[TRAILING][SL-PLACE] {symbol} stop_floor={entry['stop_floor']:.6f} qty={qty_for_sl} ok={ok}", 30)
+                        except Exception as e:
+                            tlog(f"sl_err:{symbol}", f"[TRAILING][SL-ERR] impossibile piazzare SL exchange: {e}", 300)
+
+                # Trailing dinamico (fallback su p_max*buffer)
+                if profit_pct >= 20:
+                    trailing_buffer = 0.005
+                elif profit_pct >= 10:
+                    trailing_buffer = 0.01
+                elif profit_pct >= 5:
+                    trailing_buffer = 0.015
+                else:
+                    trailing_buffer = 0.02
+
                 trailing_tp_price = entry["p_max"] * (1 - trailing_buffer)
+                if LOG_DEBUG_TRAILING:
+                    tlog(f"trail_tp:{symbol}", f"[DEBUG][TRAILING] {symbol} current={current_price:.6f} p_max={entry['p_max']:.6f} profit_pct={profit_pct:.2f}% trailing_tp_price={trailing_tp_price:.6f} stop_floor={entry.get('stop_floor')}", 10)
+
+                # Se il prezzo scende sotto trailing TP fallback, chiudi (market close)
                 if current_price <= trailing_tp_price:
-                    qty = get_open_long_qty(symbol)
-                    if qty > 0:
-                        resp = market_close_long(symbol, qty)
-                        if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
-                            pnl = ((current_price - entry["entry_price"]) / entry["entry_price"]) * 100.0
-                            log(f"🟢⬇️ Trailing TP LONG chiuso {symbol} PnL {pnl:.2f}%")
-                            notify_telegram(f"🟢⬇️ Trailing TP LONG chiuso {symbol} a {current_price:.4f} | PnL {pnl:.2f}%")
-                            log_trade_to_google(symbol, entry["entry_price"], current_price, pnl,
-                                                "Trailing TP LONG", "TP Triggered",
-                                                usdt_entry=entry.get("entry_cost", 0),
-                                                usdt_exit=current_price * qty,
-                                                holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
-                                                mfe_r=entry.get('mfe', 0), mae_r=entry.get('mae', 0),
-                                                r_multiple=None, market_condition="trailing_tp_long")
-                            open_positions.discard(symbol)
-                            last_exit_time[symbol] = time.time()
-                            position_data.pop(symbol, None)
+                    qty_live = get_open_long_qty(symbol)
+                    if qty_live and qty_live > 0:
+                        resp = market_close_long(symbol, qty_live)
+                        if resp and getattr(resp, "status_code", 0) == 200:
+                            try:
+                                data = resp.json()
+                            except:
+                                data = {}
+                            if data.get("retCode") == 0:
+                                pnl = ((current_price - entry["entry_price"]) / entry["entry_price"]) * 100.0
+                                log(f"🟢⬇️ Trailing TP LONG chiuso {symbol} PnL {pnl:.2f}%")
+                                notify_telegram(f"🟢⬇️ Trailing TP LONG chiuso {symbol} a {current_price:.4f} | PnL {pnl:.2f}%")
+                                log_trade_to_google(symbol, entry["entry_price"], current_price, pnl,
+                                                    "Trailing TP LONG", "TP Triggered",
+                                                    usdt_entry=entry.get("entry_cost", 0),
+                                                    usdt_exit=current_price * qty_live,
+                                                    holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
+                                                    mfe_r=entry.get('mfe', 0), mae_r=entry.get('mae', 0),
+                                                    r_multiple=None, market_condition="trailing_tp_long")
+                                open_positions.discard(symbol)
+                                last_exit_time[symbol] = time.time()
+                                position_data.pop(symbol, None)
                     continue
-            
-                # Aggiorna SL a breakeven o profitto intermedio
+
+                # Aggiorna SL locale (breakeven/profit intermediate) solo come riferimento
                 if profit_pct >= 10 and entry.get("sl", entry["entry_price"] * 0.99) < entry["entry_price"] * 1.05:
-                    entry["sl"] = entry["entry_price"] * 1.05  # blocca almeno +5%
+                    entry["sl"] = entry["entry_price"] * 1.05
                 elif profit_pct >= 5 and entry.get("sl", entry["entry_price"] * 0.99) < entry["entry_price"]:
-                    entry["sl"] = entry["entry_price"]  # breakeven
+                    entry["sl"] = entry["entry_price"]
 
             # Trigger SL (LONG)
             if current_price <= entry.get("sl", entry_price * 0.99):
@@ -1243,7 +1342,7 @@ def trailing_stop_worker():
                     open_positions.discard(symbol)
                     last_exit_time[symbol] = time.time()
                     position_data.pop(symbol, None)
-        time.sleep(15)
+        time.sleep(TRAILING_POLL_SEC)
 
 trailing_thread = threading.Thread(target=trailing_stop_worker, daemon=True)
 trailing_thread.start()
