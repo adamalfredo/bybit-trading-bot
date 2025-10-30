@@ -1295,7 +1295,7 @@ def trailing_stop_worker():
                     new_stop_floor = min(stop_floor_candidate, min_floor) if False else max(stop_floor_candidate, min_floor)
                     # For SHORT stop_floor is the price level where we will COVER to protect gains (must be <= p_min)
                     # Non abbassare mai lo stop_floor esistente (salvi sempre il livello più protettivo)
-                    if entry.get("stop_floor") is None or new_stop_floor < entry.get("stop_floor", float("inf")):
+                    if entry.get("stop_floor") is None or new_stop_floor > entry.get("stop_floor", 0):
                         entry["stop_floor"] = new_stop_floor
                         try:
                             qty_for_sl = entry.get("qty", get_open_short_qty(symbol))
