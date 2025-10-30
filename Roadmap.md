@@ -18,11 +18,11 @@ Esci solo se anche su 1h c’è inversione.
 
 - (Opzionale) Log di sintesi periodico.
 
-## 2. Segnali di ingresso più severi
+## 🚦 Segnali di ingresso più severi
 
 Richiedi almeno 3 condizioni su 4 per l’entry, sia per asset volatili che non volatili. 
 Cerca i blocchi tipo: 
- 
+
 if len(entry_conditions) >= 2: 
 e sostituisci con: 
 if len(entry_conditions) >= 3:
