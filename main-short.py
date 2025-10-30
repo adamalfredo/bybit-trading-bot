@@ -47,7 +47,7 @@ TP1_CLOSE_PCT = 0.5     # chiudi il 50% a TP1
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
 COOLDOWN_MINUTES = 60
 # Nuovi parametri protezione guadagni (SHORT)
-MIN_PROTECT_PCT = 2.0
+MIN_PROTECT_PCT = 1.0
 TRAILING_PROTECT_TIERS = [
     (2, 2.0),
     (5, 3.0),

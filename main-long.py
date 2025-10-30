@@ -42,7 +42,7 @@ TP_MAX = 3.0
 SL_MIN = 1.0
 SL_MAX = 2.0
 # Nuovi parametri per protezione guadagni (stop_floor)
-MIN_PROTECT_PCT = 2.0       # soglia minima protezione (2%)
+MIN_PROTECT_PCT = 1.0       # soglia minima protezione (2%)
 TRAILING_PROTECT_TIERS = [  # (p_max_pct_threshold, margin_pct)
     (2, 2.0),   # se p_max_pct <5 e >=2 -> margin 2%
     (5, 3.0),   # se p_max_pct <10 -> margin 3%
