@@ -777,6 +777,53 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
         tlog(f"sl_create_exc:{symbol}", f"[SL-PLACE][LONG] eccezione: {e}", 300)
         return False
 
+def place_takeprofit_long(symbol: str, tp_price: float, qty: float) -> (bool, str):
+    """
+    Piazza un TAKE-PROFIT limit reduceOnly (Sell Limit reduceOnly) all'exchange.
+    Restituisce (ok, orderId_or_empty)
+    """
+    try:
+        info = get_instrument_info(symbol)
+        qty_step = info.get("qty_step", 0.01)
+        qty_str = _format_qty_with_step(float(qty), qty_step)
+        body = {
+            "category": "linear",
+            "symbol": symbol,
+            "side": "Sell",
+            "orderType": "Limit",
+            "qty": qty_str,
+            "price": f"{tp_price:.8f}",
+            "timeInForce": "GTC",
+            "reduceOnly": "true",
+            "positionIdx": 1
+        }
+        ts = str(int(time.time() * 1000))
+        body_json = json.dumps(body, separators=(",", ":"))
+        payload = f"{ts}{KEY}5000{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-SIGN-TYPE": "2",
+            "Content-Type": "application/json"
+        }
+        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json, timeout=10)
+        try:
+            data = resp.json()
+        except:
+            data = {}
+        if data.get("retCode") == 0:
+            oid = data.get("result", {}).get("orderId", "") or ""
+            tlog(f"tp_place:{symbol}", f"[TP-PLACE] {symbol} tp={tp_price:.6f} qty={qty_str} orderId={oid}", 30)
+            return True, oid
+        tlog(f"tp_create_err:{symbol}", f"[TP-PLACE][LONG] retCode={data.get('retCode')} msg={data.get('retMsg')}", 300)
+        return False, ""
+    except Exception as e:
+        tlog(f"tp_create_exc:{symbol}", f"[TP-PLACE][LONG] exc: {e}", 300)
+        return False, ""
+
 def fetch_history(symbol: str, interval=INTERVAL_MINUTES, limit=400):
     """
     Scarica la cronologia dei prezzi per il simbolo dato da Bybit (linear/futures).
@@ -1307,6 +1354,19 @@ def trailing_stop_worker():
 
                 # Se il prezzo scende sotto trailing TP fallback, chiudi (market close)
                 if current_price <= trailing_tp_price:
+
+                    if trailing_tp_price < entry["entry_price"]:
+                        tlog(f"trail_skip_close:{symbol}", f"[TRAILING][SKIP-CLOSE] {symbol} trailing_tp_price ({trailing_tp_price:.6f}) < entry ({entry['entry_price']:.6f}) -> assicuro stop BE e skip market_close", 10)
+                        # se non abbiamo stop_floor piazzato, piazzalo a BE
+                        if entry.get("stop_floor") is None or entry.get("stop_floor") < entry["entry_price"]:
+                            entry["stop_floor"] = entry["entry_price"]
+                            qty_for_sl = entry.get("qty", get_open_long_qty(symbol))
+                            if qty_for_sl and qty_for_sl > 0:
+                                ok = place_conditional_sl_long(symbol, entry["stop_floor"], qty_for_sl)
+                                tlog(f"sl_place_init:{symbol}", f"[TRAILING][SL-PLACE-INIT] {symbol} stop_floor={entry['stop_floor']:.6f} qty={qty_for_sl} ok={ok}", 30)
+                        # non eseguire market_close qui: attendi trigger dello stop exchange o prossima iterazione
+                        continue
+
                     qty_live = get_open_long_qty(symbol)
                     if qty_live and qty_live > 0:
                         resp = market_close_long(symbol, qty_live)
@@ -1468,6 +1528,24 @@ while True:
                 if LOG_DEBUG_STRATEGY:
                     log(f"❌ LONG non aperto per {symbol}")
                 continue
+
+            tp_price = None
+            try:
+                price_now = get_last_price(symbol)
+                df = fetch_history(symbol)
+                if df is not None and "Close" in df.columns:
+                    atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
+                    atr_val = atr.iloc[-1]
+                else:
+                    atr_val = price_now * 0.02
+                tp_price = price_now + (atr_val * TP_FACTOR)
+                ok_tp, tp_oid = place_takeprofit_long(symbol, tp_price, qty)
+                if ok_tp:
+                    tlog(f"tp_init_ok:{symbol}", f"[TP-PLACE-INIT] {symbol} tp={tp_price:.6f} orderId={tp_oid}", 30)
+                else:
+                    tlog(f"tp_init_fail:{symbol}", f"[TP-PLACE-INIT] {symbol} tp={tp_price:.6f} ok=False", 30)
+            except Exception as _:
+                tp_price = None
 
             price_now = get_last_price(symbol)
             actual_cost = qty * price_now
