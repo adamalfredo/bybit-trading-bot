@@ -1271,6 +1271,20 @@ def trailing_stop_worker():
                 log(f"🔛 Trailing Stop SHORT attivato per {symbol} sotto soglia → Prezzo: {current_price:.4f}")
                 notify_telegram(f"🔛🔻 Trailing Stop SHORT attivato su {symbol}\nPrezzo: {current_price:.4f}")
 
+                # >>> PROTEZIONE IMMEDIATA: piazza uno stop-market reduceOnly a breakeven subito all'attivazione (SHORT)
+                try:
+                    # aggiorna p_min iniziale
+                    entry["p_min"] = min(entry.get("p_min", entry["entry_price"]), current_price)
+                    # se non esiste ancora uno stop_floor, proteggi a breakeven (non perdere)
+                    if entry.get("stop_floor") is None:
+                        entry["stop_floor"] = entry["entry_price"]
+                        qty_for_sl = entry.get("qty", get_open_short_qty(symbol))
+                        if qty_for_sl and qty_for_sl > 0:
+                            ok = place_conditional_sl_short(symbol, entry["stop_floor"], qty_for_sl)
+                            tlog(f"sl_place_init:{symbol}", f"[TRAILING][SL-PLACE-INIT-SHORT] {symbol} stop_floor={entry['stop_floor']:.6f} qty={qty_for_sl} ok={ok}", 30)
+                except Exception as e:
+                    tlog(f"sl_place_init_err:{symbol}", f"[TRAILING][SL-ERR-INIT-SHORT] {e}", 300)
+
             if entry["trailing_active"]:
                 # Aggiorna p_min in modo robusto
                 entry["p_min"] = min(entry.get("p_min", entry["entry_price"]), current_price)

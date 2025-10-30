@@ -1239,6 +1239,20 @@ def trailing_stop_worker():
                 entry["trailing_active"] = True
                 notify_telegram(f"🔛🔺 Trailing Stop LONG attivato su {symbol} a {current_price:.4f}")
 
+                # >>> PROTEZIONE IMMEDIATA: piazza uno stop-market reduceOnly a breakeven subito all'attivazione
+                try:
+                    # aggiorna p_max iniziale
+                    entry["p_max"] = max(entry.get("p_max", entry["entry_price"]), current_price)
+                    # se non esiste ancora uno stop_floor, proteggi a breakeven (non perdere)
+                    if entry.get("stop_floor") is None:
+                        entry["stop_floor"] = entry["entry_price"]
+                        qty_for_sl = entry.get("qty", get_open_long_qty(symbol))
+                        if qty_for_sl and qty_for_sl > 0:
+                            ok = place_conditional_sl_long(symbol, entry["stop_floor"], qty_for_sl)
+                            tlog(f"sl_place_init:{symbol}", f"[TRAILING][SL-PLACE-INIT] {symbol} stop_floor={entry['stop_floor']:.6f} qty={qty_for_sl} ok={ok}", 30)
+                except Exception as e:
+                    tlog(f"sl_place_init_err:{symbol}", f"[TRAILING][SL-ERR-INIT] {e}", 300)
+
             if entry["trailing_active"]:
                 # Aggiorna p_max in modo robusto
                 entry["p_max"] = max(entry.get("p_max", entry["entry_price"]), current_price)
