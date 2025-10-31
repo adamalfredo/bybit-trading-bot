@@ -749,7 +749,8 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
             "positionIdx": 1,
             "triggerBy": trigger_by,
             "triggerPrice": f"{stop_price:.8f}",
-            "triggerDirection": "Fall"
+            "triggerDirection": "Fall",
+            "closeOnTrigger": True
         }
         ts = str(int(time.time() * 1000))
         recv_window = "5000"

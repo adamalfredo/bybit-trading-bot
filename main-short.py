@@ -755,7 +755,8 @@ def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigg
             "positionIdx": 2,
             "triggerBy": trigger_by,
             "triggerPrice": f"{stop_price:.8f}",
-            "triggerDirection": "Rise"
+            "triggerDirection": "Rise",
+            "closeOnTrigger": True
         }
         ts = str(int(time.time() * 1000))
         recv_window = "5000"
