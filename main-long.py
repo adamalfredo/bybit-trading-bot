@@ -747,9 +747,9 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
             "qty": qty_str,
             "reduceOnly": "true",
             "positionIdx": 1,
-            "price": None,
             "triggerBy": trigger_by,
-            "triggerPrice": f"{stop_price:.8f}"
+            "triggerPrice": f"{stop_price:.8f}",
+            "triggerDirection": "Fall"
         }
         ts = str(int(time.time() * 1000))
         recv_window = "5000"
@@ -771,7 +771,8 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
             data = {}
         if data.get("retCode") == 0:
             return True
-        tlog(f"sl_create_err:{symbol}", f"[SL-PLACE][LONG] retCode={data.get('retCode')} msg={data.get('retMsg')}", 300)
+        # Log completo per debug (throttled)
+        tlog(f"sl_create_err:{symbol}", f"[SL-PLACE][LONG] retCode={data.get('retCode')} msg={data.get('retMsg')} body={body}", 300)
         return False
     except Exception as e:
         tlog(f"sl_create_exc:{symbol}", f"[SL-PLACE][LONG] eccezione: {e}", 300)
