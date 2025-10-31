@@ -955,7 +955,7 @@ def analyze_asset(symbol: str):
             cond6 = last["adx"] > adx_threshold
             if cond5 and cond6:
                 entry_conditions.append(True); entry_strategies.append(f"MACD bullish + ADX ({ENTRY_TF_MINUTES}m)")
-            if len(entry_conditions) >= 3:
+            if len(entry_conditions) >= 2:
                 if LOG_DEBUG_STRATEGY:
                     log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
@@ -969,7 +969,7 @@ def analyze_asset(symbol: str):
             cond5 = last["rsi"] > 50 and last["ema20"] > last["ema50"]
             if cond5:
                 entry_conditions.append(True); entry_strategies.append(f"Trend EMA+RSI ({ENTRY_TF_MINUTES}m)")
-            if len(entry_conditions) >= 3:
+            if len(entry_conditions) >= 2:
                 if LOG_DEBUG_STRATEGY:
                     log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
@@ -1561,9 +1561,29 @@ while True:
             tp = price_now + (atr_val * tp_factor)
             sl = price_now - (atr_val * sl_factor)
             
+            # >>> PIAZZA SUBITO LO STOP LOSS CONDITIONAL (reduceOnly) ALL'APERTURA
+            sl_order_id = None
+            try:
+                qty_for_sl = qty
+                # prima prova con MarkPrice (più robusto), fallback su LastPrice se retCode==10001
+                ok_sl = place_conditional_sl_long(symbol, sl, qty_for_sl, trigger_by="MarkPrice")
+                if ok_sl:
+                    sl_order_id = "placed_mark"
+                else:
+                    # retry con LastPrice
+                    ok_sl2 = place_conditional_sl_long(symbol, sl, qty_for_sl, trigger_by="LastPrice")
+                    if ok_sl2:
+                        sl_order_id = "placed_last"
+                    else:
+                        tlog(f"sl_init_fail:{symbol}", f"[SL-INIT-FAIL] {symbol} sl={sl:.6f} qty={qty_for_sl} (Mark/Last failed)", 30)
+            except Exception as e:
+                tlog(f"sl_init_exc:{symbol}", f"[SL-INIT-EXC] {symbol} exc: {e}", 300)
+
             position_data[symbol] = {
                 "entry_price": price_now,
                 "tp": tp,
+                "tp_order_id": tp_oid if 'tp_oid' in locals() else None,
+                "sl_order_id": sl_order_id,
                 "sl": sl,
                 "entry_cost": actual_cost,
                 "qty": qty,
