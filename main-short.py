@@ -745,6 +745,7 @@ def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigg
         info = get_instrument_info(symbol)
         qty_step = info.get("qty_step", 0.01)
         qty_str = _format_qty_with_step(float(qty), qty_step)
+        base_price = get_last_price(symbol) or stop_price
         body = {
             "category": "linear",
             "symbol": symbol,
@@ -756,7 +757,8 @@ def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigg
             "triggerBy": trigger_by,
             "triggerPrice": f"{stop_price:.8f}",
             "triggerDirection": "Rise",
-            "closeOnTrigger": True
+            "basePrice": f"{base_price:.8f}",
+            "closeOnTrigger": "true"
         }
         ts = str(int(time.time() * 1000))
         recv_window = "5000"
@@ -778,7 +780,7 @@ def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigg
             data = {}
         if data.get("retCode") == 0:
             return True
-        tlog(f"sl_create_err:{symbol}", f"[SL-PLACE][SHORT] retCode={data.get('retCode')} msg={data.get('retMsg')} body={body}", 300)
+        tlog(f"sl_create_err:{symbol}", f"[SL-PLACE][SHORT] retCode={data.get('retCode')} msg={data.get('retMsg')} resp={json.dumps(data)} body={body}", 300)
         return False
     except Exception as e:
         tlog(f"sl_create_exc:{symbol}", f"[SL-PLACE][SHORT] eccezione: {e}", 300)
