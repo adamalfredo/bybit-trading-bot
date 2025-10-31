@@ -752,14 +752,18 @@ def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigg
             "side": "Buy",
             "orderType": "Market",
             "qty": qty_str,
-            "reduceOnly": "true",
+            "reduceOnly": True,
             "positionIdx": 2,
             "triggerBy": trigger_by,
             "triggerPrice": f"{stop_price:.8f}",
             "triggerDirection": "Rise",
             "basePrice": f"{base_price:.8f}",
-            "closeOnTrigger": "true"
+            "closeOnTrigger": True,
+            "orderLinkId": ""
         }
+        # DEBUG: log body json (temporaneo)
+        if LOG_DEBUG_STRATEGY:
+            log(f"[SL-DEBUG-BODY][SHORT] {json.dumps(body)}")
         ts = str(int(time.time() * 1000))
         recv_window = "5000"
         body_json = json.dumps(body, separators=(",", ":"))
