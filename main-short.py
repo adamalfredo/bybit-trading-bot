@@ -1640,7 +1640,7 @@ while True:
             if order_amount < min_notional:
                 tlog(f"min_notional:{symbol}", f"❌ Notional richiesto {order_amount:.2f} < minimo {min_notional:.2f} per {symbol} (min_qty={min_qty}, price={price_now_chk})", 300)
                 if not low_balance_alerted:
-                    notify_telegram(f"❗️ Saldo/budget insufficiente per short su {symbol}: richiesti ≥ {min_notional:.2f} USDT.")
+                    # notify_telegram(f"❗️ Saldo/budget insufficiente per short su {symbol}: richiesti ≥ {min_notional:.2f} USDT.")
                     low_balance_alerted = True
                 continue
             else:
