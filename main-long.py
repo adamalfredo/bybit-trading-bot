@@ -1228,6 +1228,8 @@ def get_portfolio_value():
 low_balance_alerted = False  # Deve essere fuori dal ciclo per persistere tra i cicli
 
 def trailing_stop_worker():
+    log("[TRAILING] Worker disabilitato: usa solo trailing Bybit nativo")
+    return  # <-- DISABILITA IL WORKER
     log("[DEBUG] Avvio ciclo trailing_stop_worker (LONG)")
     while True:
         for symbol in list(open_positions):
