@@ -53,7 +53,7 @@ TRIGGER_BY = "LastPrice"    # "LastPrice" o "MarkPrice" per trigger degli stop e
 TRAILING_POLL_SEC = 5       # frequenza worker trailing in secondi (default 5s)
 
 # >>> PATCH: parametri breakeven lock (LONG)
-BREAKEVEN_LOCK_PCT = 0.02   # attiva BE al +2% di prezzo (~+20% PnL con leva 10x)
+BREAKEVEN_LOCK_PCT = 0.01   # attiva BE al +1% di prezzo (~+10% PnL con leva 10x)
 BREAKEVEN_BUFFER   = 0.0005 # stop a BE + 0.05% per evitare micro-slippage
 
 ENABLE_TP1 = False       # abilita TP parziale a 1R

@@ -57,7 +57,7 @@ TRAILING_PROTECT_TIERS = [
 TRIGGER_BY = "LastPrice"
 TRAILING_POLL_SEC = 5
 # >>> PATCH: parametri breakeven lock (SHORT)
-BREAKEVEN_LOCK_PCT = 0.02    # attiva BE al -2% di prezzo (~+20% PnL con leva 10x)
+BREAKEVEN_LOCK_PCT = 0.01    # attiva BE al -1% di prezzo (~+10% PnL con leva 10x)
 BREAKEVEN_BUFFER   = -0.0005 # stop a BE - 0.05% (chiude comunque in leggero profitto)
 cooldown = {}
 MAX_LOSS_PCT = -2.5  # perdita massima accettata su SHORT in %, più stretto
