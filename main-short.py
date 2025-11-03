@@ -1691,6 +1691,16 @@ while True:
             except Exception as e:
                 tlog(f"sl_init_exc:{symbol}", f"[SL-INIT-EXC-SHORT] {symbol} exc: {e}", 300)
 
+            try:
+                trailing_dist = atr_val * 0.5  # 0.5 ATR come distanza trailing
+                ok_trailing = place_trailing_stop_short(symbol, trailing_dist)
+                if ok_trailing:
+                    tlog(f"trailing_init_ok:{symbol}", f"[TRAILING-INIT-SHORT] {symbol} trailing={trailing_dist:.6f}", 30)
+                else:
+                    tlog(f"trailing_init_fail:{symbol}", f"[TRAILING-INIT-SHORT] {symbol} trailing={trailing_dist:.6f} FAILED", 30)
+            except Exception as e:
+                tlog(f"trailing_init_exc:{symbol}", f"[TRAILING-INIT-EXC-SHORT] {symbol} exc: {e}", 300)
+
             log(f"[ENTRY-DETAIL] {symbol} | Entry: {get_last_price(symbol):.4f} | SL: {sl:.4f} | TP: {tp:.4f} | ATR: {atr_val:.4f}")
 
             position_data[symbol] = {
