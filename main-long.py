@@ -671,6 +671,52 @@ def market_long(symbol: str, usdt_amount: float):
         break
     return None
 
+def place_takeprofit_long(symbol: str, tp_price: float, qty: float) -> (bool, str):
+    info = get_instrument_info(symbol)
+    qty_step = info.get("qty_step", 0.01)
+    qty_str = _format_qty_with_step(float(qty), qty_step)
+    body = {
+        "category": "linear",
+        "symbol": symbol,
+        "side": "Sell",
+        "orderType": "Limit",
+        "qty": qty_str,
+        "price": f"{tp_price:.8f}",
+        "timeInForce": "PostOnly",  # PATCH: PostOnly per Bybit v5
+        "reduceOnly": True,
+        "positionIdx": 1
+    }
+    # ...firma e invio come già presente...
+    # ...restituisci True/False e orderId...
+
+def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigger_by: str = TRIGGER_BY) -> bool:
+    info = get_instrument_info(symbol)
+    qty_step = info.get("qty_step", 0.01)
+    qty_str = _format_qty_with_step(float(qty), qty_step)
+    body = {
+        "category": "linear",
+        "symbol": symbol,
+        "side": "Sell",
+        "orderType": "Market",
+        "qty": qty_str,
+        "reduceOnly": True,
+        "positionIdx": 1,
+        "triggerBy": trigger_by,
+        "triggerPrice": f"{stop_price:.8f}",
+        "triggerDirection": 2,  # PATCH: 2 = Fall (LONG)
+        "closeOnTrigger": True
+    }
+    # ...firma e invio come già presente...
+
+def place_trailing_stop_long(symbol: str, trailing_dist: float):
+    body = {
+        "category": "linear",
+        "symbol": symbol,
+        "trailingStop": str(trailing_dist),
+        "positionIdx": 1
+    }
+    # ...firma e invio come già presente...
+
 def market_close_long(symbol: str, qty: float):
     price = get_last_price(symbol)
     if not price:

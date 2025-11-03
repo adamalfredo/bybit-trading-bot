@@ -2,3 +2,4 @@
 __pycache__/
 # steps/
 gspread-creds.json
+bybit_test_sl.py

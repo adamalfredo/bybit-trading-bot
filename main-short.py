@@ -652,6 +652,51 @@ def market_short(symbol: str, usdt_amount: float):
 
     return None
 
+def place_takeprofit_short(symbol: str, tp_price: float, qty: float) -> (bool, str):
+    info = get_instrument_info(symbol)
+    qty_step = info.get("qty_step", 0.01)
+    qty_str = _format_qty_with_step(float(qty), qty_step)
+    body = {
+        "category": "linear",
+        "symbol": symbol,
+        "side": "Buy",
+        "orderType": "Limit",
+        "qty": qty_str,
+        "price": f"{tp_price:.8f}",
+        "timeInForce": "PostOnly",  # PATCH: PostOnly per Bybit v5
+        "reduceOnly": True,
+        "positionIdx": 2
+    }
+    # ...firma e invio come già presente...
+
+def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigger_by: str = TRIGGER_BY) -> bool:
+    info = get_instrument_info(symbol)
+    qty_step = info.get("qty_step", 0.01)
+    qty_str = _format_qty_with_step(float(qty), qty_step)
+    body = {
+        "category": "linear",
+        "symbol": symbol,
+        "side": "Buy",
+        "orderType": "Market",
+        "qty": qty_str,
+        "reduceOnly": True,
+        "positionIdx": 2,
+        "triggerBy": trigger_by,
+        "triggerPrice": f"{stop_price:.8f}",
+        "triggerDirection": 1,  # PATCH: 1 = Rise (SHORT)
+        "closeOnTrigger": True
+    }
+    # ...firma e invio come già presente...
+
+def place_trailing_stop_short(symbol: str, trailing_dist: float):
+    body = {
+        "category": "linear",
+        "symbol": symbol,
+        "trailingStop": str(trailing_dist),
+        "positionIdx": 2
+    }
+    # ...firma e invio come già presente...
+
 def market_cover(symbol: str, qty: float):
     price = get_last_price(symbol)
     if not price:

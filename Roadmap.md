@@ -30,4 +30,6 @@ e sostituisci con:
 
 ```python
 if len(entry_conditions) >= 3:
-```
+``` 
+
+TP +3%, SL -1.5%, trailing -1% sopra +2%
