@@ -39,4 +39,6 @@ BREAKEVEN_LOCK_PCT = 0.01   # attiva BE al +1% di prezzo (~+10% PnL con leva 10x
 BREAKEVEN_BUFFER   = 0.0005 # stop a BE + 0.05% per evitare micro-slippage
 ```
 
-STRATEGIA: TP +3%, SL -1.5%, trailing -1% sopra +2%
+STRATEGIA: TP +3%, SL -1.5%, trailing -1% sopra +2% 
+
+- modificare leva

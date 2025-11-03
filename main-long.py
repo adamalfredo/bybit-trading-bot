@@ -1053,7 +1053,7 @@ def analyze_asset(symbol: str):
             cond6 = last["adx"] > adx_threshold
             if cond5 and cond6:
                 entry_conditions.append(True); entry_strategies.append(f"MACD bullish + ADX ({ENTRY_TF_MINUTES}m)")
-            if len(entry_conditions) >= 2:
+            if len(entry_conditions) >= 3:
                 if LOG_DEBUG_STRATEGY:
                     log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
@@ -1067,7 +1067,7 @@ def analyze_asset(symbol: str):
             cond5 = last["rsi"] > 50 and last["ema20"] > last["ema50"]
             if cond5:
                 entry_conditions.append(True); entry_strategies.append(f"Trend EMA+RSI ({ENTRY_TF_MINUTES}m)")
-            if len(entry_conditions) >= 2:
+            if len(entry_conditions) >= 3:
                 if LOG_DEBUG_STRATEGY:
                     log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
