@@ -721,8 +721,8 @@ def market_close_long(symbol: str, qty: float):
             "side": "Sell",
             "orderType": "Market",
             "qty": qty_str,
-            "reduceOnly": "true",
-            "positionIdx": 1  # Hedge: chiude il lato LONG
+            "reduceOnly": True,          # <--- FIX
+            "positionIdx": 1
         }
         ts = str(int(time.time() * 1000))
         body_json = json.dumps(body, separators=(",", ":"))
@@ -758,6 +758,32 @@ def market_close_long(symbol: str, qty: float):
         log(f"[ERROR-CLOSE][{symbol}] Errore non gestito: {ret_code}")
         break
     return None
+
+def cancel_all_orders(symbol: str, order_filter: Optional[str] = None) -> bool:
+    body = {"category": "linear", "symbol": symbol}
+    if order_filter:
+        body["orderFilter"] = order_filter  # es: "StopOrder"
+    ts = str(int(time.time() * 1000))
+    body_json = json.dumps(body, separators=(",", ":"))
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json"
+    }
+    try:
+        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/cancel-all", headers=headers, data=body_json, timeout=10)
+        ok = resp.json().get("retCode") == 0
+        if not ok:
+            tlog(f"cancel_all_err:{symbol}", f"[CANCEL-ALL] {symbol} resp={resp.text}", 300)
+        return ok
+    except Exception as e:
+        tlog(f"cancel_all_exc:{symbol}", f"[CANCEL-ALL] {symbol} exc: {e}", 300)
+        return False
 
 def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigger_by: str = TRIGGER_BY) -> bool:
     """
@@ -1609,7 +1635,7 @@ while True:
                 tlog(f"sl_init_exc:{symbol}", f"[SL-INIT-EXC] {symbol} exc: {e}", 300)
 
             try:
-                trailing_dist = atr_val * 0.5  # 0.5 ATR come distanza trailing
+                trailing_dist = atr_val * 1.5  # 0.5 ATR come distanza trailing
                 ok_trailing = place_trailing_stop_long(symbol, trailing_dist)
                 if ok_trailing:
                     tlog(f"trailing_init_ok:{symbol}", f"[TRAILING-INIT-LONG] {symbol} trailing={trailing_dist:.6f}", 30)
@@ -1661,6 +1687,7 @@ while True:
                 open_positions.discard(symbol)
                 last_exit_time[symbol] = time.time()
                 position_data.pop(symbol, None)
+                cancel_all_orders(symbol)
 
     # Cleanup posizioni con qty troppo bassa
     for symbol in list(open_positions):
@@ -1670,5 +1697,6 @@ while True:
         if saldo is None or saldo < min_qty:
             open_positions.discard(symbol)
             position_data.pop(symbol, None)
+            cancel_all_orders(symbol)
 
     time.sleep(120)

@@ -675,8 +675,8 @@ def market_cover(symbol: str, qty: float):
             "side": "Buy",  # Chiusura short = Buy
             "orderType": "Market",
             "qty": qty_str,
-            "reduceOnly": "true",
-            "positionIdx": 2  # SHORT
+            "reduceOnly": True,          # <--- FIX
+            "positionIdx": 2
         }
         
         ts = str(int(time.time() * 1000))
@@ -735,6 +735,32 @@ def market_cover(symbol: str, qty: float):
             break
     
     return None
+
+def cancel_all_orders(symbol: str, order_filter: Optional[str] = None) -> bool:
+    body = {"category": "linear", "symbol": symbol}
+    if order_filter:
+        body["orderFilter"] = order_filter  # es: "StopOrder"
+    ts = str(int(time.time() * 1000))
+    body_json = json.dumps(body, separators=(",", ":"))
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json"
+    }
+    try:
+        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/cancel-all", headers=headers, data=body_json, timeout=10)
+        ok = resp.json().get("retCode") == 0
+        if not ok:
+            tlog(f"cancel_all_err:{symbol}", f"[CANCEL-ALL] {symbol} resp={resp.text}", 300)
+        return ok
+    except Exception as e:
+        tlog(f"cancel_all_exc:{symbol}", f"[CANCEL-ALL] {symbol} exc: {e}", 300)
+        return False
 
 def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigger_by: str = TRIGGER_BY) -> bool:
     """
@@ -1694,7 +1720,7 @@ while True:
                 tlog(f"sl_init_exc:{symbol}", f"[SL-INIT-EXC-SHORT] {symbol} exc: {e}", 300)
 
             try:
-                trailing_dist = atr_val * 0.5  # 0.5 ATR come distanza trailing
+                trailing_dist = atr_val * 1.5  # 0.5 ATR come distanza trailing
                 ok_trailing = place_trailing_stop_short(symbol, trailing_dist)
                 if ok_trailing:
                     tlog(f"trailing_init_ok:{symbol}", f"[TRAILING-INIT-SHORT] {symbol} trailing={trailing_dist:.6f}", 30)
@@ -1777,6 +1803,7 @@ while True:
                 open_positions.discard(symbol)
                 last_exit_time[symbol] = time.time()
                 position_data.pop(symbol, None)
+                cancel_all_orders(symbol)
             else:
                 log(f"[EXIT-FAIL] Ricopertura fallita per {symbol}")
                 try:
@@ -1793,6 +1820,7 @@ while True:
             log(f"[CLEANUP] {symbol}: saldo troppo basso ({saldo}), rimuovo da open_positions e position_data (polvere, min_qty={min_qty})")
             open_positions.discard(symbol)
             position_data.pop(symbol, None)
+            cancel_all_orders(symbol)
             continue
 
     # Sicurezza: attesa tra i cicli principali
