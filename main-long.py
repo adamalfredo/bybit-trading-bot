@@ -703,7 +703,7 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
         "positionIdx": 1,
         "triggerBy": trigger_by,
         "triggerPrice": f"{stop_price:.8f}",
-        "triggerDirection": 2,  # PATCH: 2 = Fall (LONG)
+        "triggerDirection": 2,  # <-- INTERO, NON STRINGA!
         "closeOnTrigger": True
     }
     # ...firma e invio come già presente...

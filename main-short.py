@@ -683,7 +683,7 @@ def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigg
         "positionIdx": 2,
         "triggerBy": trigger_by,
         "triggerPrice": f"{stop_price:.8f}",
-        "triggerDirection": 1,  # PATCH: 1 = Rise (SHORT)
+        "triggerDirection": 1,  # <-- INTERO, NON STRINGA!
         "closeOnTrigger": True
     }
     # ...firma e invio come già presente...
