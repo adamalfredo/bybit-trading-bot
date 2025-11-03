@@ -652,51 +652,6 @@ def market_short(symbol: str, usdt_amount: float):
 
     return None
 
-def place_takeprofit_short(symbol: str, tp_price: float, qty: float) -> (bool, str):
-    info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.01)
-    qty_str = _format_qty_with_step(float(qty), qty_step)
-    body = {
-        "category": "linear",
-        "symbol": symbol,
-        "side": "Buy",
-        "orderType": "Limit",
-        "qty": qty_str,
-        "price": f"{tp_price:.8f}",
-        "timeInForce": "PostOnly",  # PATCH: PostOnly per Bybit v5
-        "reduceOnly": True,
-        "positionIdx": 2
-    }
-    # ...firma e invio come già presente...
-
-def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigger_by: str = TRIGGER_BY) -> bool:
-    info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.01)
-    qty_str = _format_qty_with_step(float(qty), qty_step)
-    body = {
-        "category": "linear",
-        "symbol": symbol,
-        "side": "Buy",
-        "orderType": "Market",
-        "qty": qty_str,
-        "reduceOnly": True,
-        "positionIdx": 2,
-        "triggerBy": trigger_by,
-        "triggerPrice": f"{stop_price:.8f}",
-        "triggerDirection": 1,  # <-- INTERO, NON STRINGA!
-        "closeOnTrigger": True
-    }
-    # ...firma e invio come già presente...
-
-def place_trailing_stop_short(symbol: str, trailing_dist: float):
-    body = {
-        "category": "linear",
-        "symbol": symbol,
-        "trailingStop": str(trailing_dist),
-        "positionIdx": 2
-    }
-    # ...firma e invio come già presente...
-
 def market_cover(symbol: str, qty: float):
     price = get_last_price(symbol)
     if not price:
@@ -790,7 +745,6 @@ def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigg
         info = get_instrument_info(symbol)
         qty_step = info.get("qty_step", 0.01)
         qty_str = _format_qty_with_step(float(qty), qty_step)
-        base_price = get_last_price(symbol) or stop_price
         body = {
             "category": "linear",
             "symbol": symbol,
@@ -801,10 +755,8 @@ def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigg
             "positionIdx": 2,
             "triggerBy": trigger_by,
             "triggerPrice": f"{stop_price:.8f}",
-            "triggerDirection": "Rise",
-            "basePrice": f"{base_price:.8f}",
-            "closeOnTrigger": True,
-            "orderLinkId": ""
+            "triggerDirection": 1,  # <-- INTERO!
+            "closeOnTrigger": True
         }
         # DEBUG: log body json (temporaneo)
         if LOG_DEBUG_STRATEGY:
@@ -836,10 +788,6 @@ def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigg
         return False
 
 def place_takeprofit_short(symbol: str, tp_price: float, qty: float) -> (bool, str):
-    """
-    Piazza un TAKE-PROFIT limit reduceOnly per SHORT (Buy Limit reduceOnly a prezzo TP).
-    Restituisce (ok, orderId_or_empty)
-    """
     try:
         info = get_instrument_info(symbol)
         qty_step = info.get("qty_step", 0.01)
@@ -851,8 +799,8 @@ def place_takeprofit_short(symbol: str, tp_price: float, qty: float) -> (bool, s
             "orderType": "Limit",
             "qty": qty_str,
             "price": f"{tp_price:.8f}",
-            "timeInForce": "GTC",
-            "reduceOnly": "true",
+            "timeInForce": "PostOnly",  # PATCH QUI!
+            "reduceOnly": True,         # PATCH QUI!
             "positionIdx": 2
         }
         ts = str(int(time.time() * 1000))
@@ -881,6 +829,36 @@ def place_takeprofit_short(symbol: str, tp_price: float, qty: float) -> (bool, s
     except Exception as e:
         tlog(f"tp_create_exc_short:{symbol}", f"[TP-PLACE][SHORT] exc: {e}", 300)
         return False, ""
+
+def place_trailing_stop_short(symbol: str, trailing_dist: float):
+    body = {
+        "category": "linear",
+        "symbol": symbol,
+        "trailingStop": str(trailing_dist),
+        "positionIdx": 2
+    }
+    ts = str(int(time.time() * 1000))
+    body_json = json.dumps(body, separators=(",", ":"))
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json"
+    }
+    resp = requests.post(f"{BYBIT_BASE_URL}/v5/position/trading-stop", headers=headers, data=body_json, timeout=10)
+    try:
+        data = resp.json()
+    except:
+        data = {}
+    if data.get("retCode") == 0:
+        tlog(f"trailing_short:{symbol}", f"[TRAILING-PLACE-SHORT] {symbol} trailing={trailing_dist}", 30)
+        return True
+    tlog(f"trailing_short_err:{symbol}", f"[TRAILING-PLACE-SHORT][ERR] retCode={data.get('retCode')} msg={data.get('retMsg')}", 300)
+    return False
 
 def fetch_history(symbol: str, interval=INTERVAL_MINUTES, limit=400):
     """

@@ -671,43 +671,6 @@ def market_long(symbol: str, usdt_amount: float):
         break
     return None
 
-def place_takeprofit_long(symbol: str, tp_price: float, qty: float) -> (bool, str):
-    info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.01)
-    qty_str = _format_qty_with_step(float(qty), qty_step)
-    body = {
-        "category": "linear",
-        "symbol": symbol,
-        "side": "Sell",
-        "orderType": "Limit",
-        "qty": qty_str,
-        "price": f"{tp_price:.8f}",
-        "timeInForce": "PostOnly",  # PATCH: PostOnly per Bybit v5
-        "reduceOnly": True,
-        "positionIdx": 1
-    }
-    # ...firma e invio come già presente...
-    # ...restituisci True/False e orderId...
-
-def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigger_by: str = TRIGGER_BY) -> bool:
-    info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.01)
-    qty_str = _format_qty_with_step(float(qty), qty_step)
-    body = {
-        "category": "linear",
-        "symbol": symbol,
-        "side": "Sell",
-        "orderType": "Market",
-        "qty": qty_str,
-        "reduceOnly": True,
-        "positionIdx": 1,
-        "triggerBy": trigger_by,
-        "triggerPrice": f"{stop_price:.8f}",
-        "triggerDirection": 2,  # <-- INTERO, NON STRINGA!
-        "closeOnTrigger": True
-    }
-    # ...firma e invio come già presente...
-
 def place_trailing_stop_long(symbol: str, trailing_dist: float):
     body = {
         "category": "linear",
@@ -715,7 +678,28 @@ def place_trailing_stop_long(symbol: str, trailing_dist: float):
         "trailingStop": str(trailing_dist),
         "positionIdx": 1
     }
-    # ...firma e invio come già presente...
+    ts = str(int(time.time() * 1000))
+    body_json = json.dumps(body, separators=(",", ":"))
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json"
+    }
+    resp = requests.post(f"{BYBIT_BASE_URL}/v5/position/trading-stop", headers=headers, data=body_json, timeout=10)
+    try:
+        data = resp.json()
+    except:
+        data = {}
+    if data.get("retCode") == 0:
+        tlog(f"trailing_long:{symbol}", f"[TRAILING-PLACE-LONG] {symbol} trailing={trailing_dist}", 30)
+        return True
+    tlog(f"trailing_long_err:{symbol}", f"[TRAILING-PLACE-LONG][ERR] retCode={data.get('retCode')} msg={data.get('retMsg')}", 300)
+    return False
 
 def market_close_long(symbol: str, qty: float):
     price = get_last_price(symbol)
@@ -785,7 +769,6 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
         info = get_instrument_info(symbol)
         qty_step = info.get("qty_step", 0.01)
         qty_str = _format_qty_with_step(float(qty), qty_step)
-        base_price = get_last_price(symbol) or stop_price
         body = {
             "category": "linear",
             "symbol": symbol,
@@ -796,10 +779,8 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
             "positionIdx": 1,
             "triggerBy": trigger_by,
             "triggerPrice": f"{stop_price:.8f}",
-            "triggerDirection": "Fall",
-            "basePrice": f"{base_price:.8f}",
-            "closeOnTrigger": True,
-            "orderLinkId": ""
+            "triggerDirection": 2,  # <-- INTERO!
+            "closeOnTrigger": True
         }
         # DEBUG: log body json (temporaneo)
         if LOG_DEBUG_STRATEGY:
@@ -832,51 +813,43 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
         return False
 
 def place_takeprofit_long(symbol: str, tp_price: float, qty: float) -> (bool, str):
-    """
-    Piazza un TAKE-PROFIT limit reduceOnly (Sell Limit reduceOnly) all'exchange.
-    Restituisce (ok, orderId_or_empty)
-    """
+    info = get_instrument_info(symbol)
+    qty_step = info.get("qty_step", 0.01)
+    qty_str = _format_qty_with_step(float(qty), qty_step)
+    body = {
+        "category": "linear",
+        "symbol": symbol,
+        "side": "Sell",
+        "orderType": "Limit",
+        "qty": qty_str,
+        "price": f"{tp_price:.8f}",
+        "timeInForce": "PostOnly",
+        "reduceOnly": True,
+        "positionIdx": 1
+    }
+    ts = str(int(time.time() * 1000))
+    body_json = json.dumps(body, separators=(",", ":"))
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY,
+        "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-SIGN-TYPE": "2",
+        "Content-Type": "application/json"
+    }
+    resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json, timeout=10)
     try:
-        info = get_instrument_info(symbol)
-        qty_step = info.get("qty_step", 0.01)
-        qty_str = _format_qty_with_step(float(qty), qty_step)
-        body = {
-            "category": "linear",
-            "symbol": symbol,
-            "side": "Sell",
-            "orderType": "Limit",
-            "qty": qty_str,
-            "price": f"{tp_price:.8f}",
-            "timeInForce": "GTC",
-            "reduceOnly": "true",
-            "positionIdx": 1
-        }
-        ts = str(int(time.time() * 1000))
-        body_json = json.dumps(body, separators=(",", ":"))
-        payload = f"{ts}{KEY}5000{body_json}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json"
-        }
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json, timeout=10)
-        try:
-            data = resp.json()
-        except:
-            data = {}
-        if data.get("retCode") == 0:
-            oid = data.get("result", {}).get("orderId", "") or ""
-            tlog(f"tp_place:{symbol}", f"[TP-PLACE] {symbol} tp={tp_price:.6f} qty={qty_str} orderId={oid}", 30)
-            return True, oid
-        tlog(f"tp_create_err:{symbol}", f"[TP-PLACE][LONG] retCode={data.get('retCode')} msg={data.get('retMsg')}", 300)
-        return False, ""
-    except Exception as e:
-        tlog(f"tp_create_exc:{symbol}", f"[TP-PLACE][LONG] exc: {e}", 300)
-        return False, ""
+        data = resp.json()
+    except:
+        data = {}
+    if data.get("retCode") == 0:
+        oid = data.get("result", {}).get("orderId", "") or ""
+        tlog(f"tp_place:{symbol}", f"[TP-PLACE] {symbol} tp={tp_price:.6f} qty={qty_str} orderId={oid}", 30)
+        return True, oid
+    tlog(f"tp_create_err:{symbol}", f"[TP-PLACE][LONG] retCode={data.get('retCode')} msg={data.get('retMsg')}", 300)
+    return False, ""
 
 def fetch_history(symbol: str, interval=INTERVAL_MINUTES, limit=400):
     """
