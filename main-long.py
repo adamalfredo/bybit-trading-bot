@@ -52,6 +52,10 @@ TRAILING_PROTECT_TIERS = [  # (p_max_pct_threshold, margin_pct)
 TRIGGER_BY = "LastPrice"    # "LastPrice" o "MarkPrice" per trigger degli stop exchange
 TRAILING_POLL_SEC = 5       # frequenza worker trailing in secondi (default 5s)
 
+# >>> PATCH: parametri breakeven lock (LONG)
+BREAKEVEN_LOCK_PCT = 0.02   # attiva BE al +2% di prezzo (~+20% PnL con leva 10x)
+BREAKEVEN_BUFFER   = 0.0005 # stop a BE + 0.05% per evitare micro-slippage
+
 ENABLE_TP1 = False       # abilita TP parziale a 1R
 TP1_R_MULT = 1.0        # target TP1 a 1R
 TP1_CLOSE_PCT = 0.5     # chiudi il 50% a TP1
@@ -785,6 +789,47 @@ def cancel_all_orders(symbol: str, order_filter: Optional[str] = None) -> bool:
         tlog(f"cancel_all_exc:{symbol}", f"[CANCEL-ALL] {symbol} exc: {e}", 300)
         return False
 
+# >>> PATCH: funzioni per impostare lo stopLoss sulla posizione (LONG) e worker BE
+def set_position_stoploss_long(symbol: str, sl_price: float) -> bool:
+    body = {"category": "linear", "symbol": symbol, "stopLoss": f"{sl_price:.8f}", "positionIdx": 1}
+    ts = str(int(time.time() * 1000))
+    body_json = json.dumps(body, separators=(",", ":"))
+    payload = f"{ts}{KEY}5000{body_json}"
+    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY, "X-BAPI-SIGN": sign, "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": "5000", "X-BAPI-SIGN-TYPE": "2", "Content-Type": "application/json"
+    }
+    try:
+        resp = requests.post(f"{BYBIT_BASE_URL}/v5/position/trading-stop", headers=headers, data=body_json, timeout=10)
+        data = resp.json()
+        ok = data.get("retCode") == 0
+        if not ok:
+            tlog(f"sl_pos_err:{symbol}", f"[POS-SL][LONG] retCode={data.get('retCode')} msg={data.get('retMsg')}", 300)
+        return ok
+    except Exception as e:
+        tlog(f"sl_pos_exc:{symbol}", f"[POS-SL][LONG] exc: {e}", 300)
+        return False
+
+def breakeven_lock_worker_long():
+    # Portiamo lo stop della POSIZIONE a breakeven quando il prezzo sale di almeno BREAKEVEN_LOCK_PCT
+    while True:
+        for symbol in list(open_positions):
+            entry = position_data.get(symbol)
+            if not entry or entry.get("be_locked"):
+                continue
+            price_now = get_last_price(symbol)
+            if not price_now:
+                continue
+            entry_price = entry.get("entry_price", price_now)
+            # LONG: attiva BE quando il prezzo >= entry * (1 + 2%)
+            if price_now >= entry_price * (1.0 + BREAKEVEN_LOCK_PCT):
+                be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
+                if set_position_stoploss_long(symbol, be_price):
+                    entry["be_locked"] = True
+                    tlog(f"be_lock:{symbol}", f"[BE-LOCK][LONG] {symbol} SL→BE {be_price:.6f}", 60)
+        time.sleep(5)
+
 def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigger_by: str = TRIGGER_BY) -> bool:
     """
     Piazza/aggiorna uno stop-market reduceOnly per proteggere la posizione LONG.
@@ -1475,6 +1520,9 @@ def trailing_stop_worker():
 
 trailing_thread = threading.Thread(target=trailing_stop_worker, daemon=True)
 trailing_thread.start()
+# >>> PATCH: avvio worker di breakeven lock (LONG)
+be_lock_thread_long = threading.Thread(target=breakeven_lock_worker_long, daemon=True)
+be_lock_thread_long.start()
 
 while True:
     update_assets()
