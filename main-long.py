@@ -310,6 +310,22 @@ def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] 
         log(f"[DECIMALI][FORMAT_QTY] qty={qty} | qty_step={qty_step} | precision={precision} | floored_qty={floored_qty} | quantize_str={quantize_str}")
     return fmt.format(floored_qty)
 
+def format_price_bybit(price: float, tick_size: float) -> str:
+    step = Decimal(str(tick_size))
+    p = Decimal(str(price))
+    floored = (p // step) * step  # tronca al tick
+    dec = -step.as_tuple().exponent if step.as_tuple().exponent < 0 else 0
+    return f"{floored:.{dec}f}"
+
+def compute_trailing_distance(symbol: str, atr_val: float) -> float:
+    price = get_last_price(symbol) or 0.0
+    if price <= 0:
+        return max(atr_val * 1.5, 0.0)
+    min_abs = price * TRAILING_MIN
+    max_abs = price * TRAILING_MAX
+    dist = atr_val * 1.5
+    return float(max(min_abs, min(max_abs, dist)))
+
 def get_open_long_qty(symbol):
     try:
         endpoint = f"{BYBIT_BASE_URL}/v5/position/list"
@@ -845,7 +861,9 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
     try:
         info = get_instrument_info(symbol)
         qty_step = info.get("qty_step", 0.01)
+        price_step = info.get("price_step", 0.01)  # <-- aggiungi
         qty_str = _format_qty_with_step(float(qty), qty_step)
+        stop_str = format_price_bybit(stop_price, price_step)  # <-- aggiungi
         body = {
             "category": "linear",
             "symbol": symbol,
@@ -855,8 +873,8 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
             "reduceOnly": True,
             "positionIdx": 1,
             "triggerBy": trigger_by,
-            "triggerPrice": f"{stop_price:.8f}",
-            "triggerDirection": 2,  # <-- INTERO!
+            "triggerPrice": stop_str,  # <-- sostituisci
+            "triggerDirection": 2,
             "closeOnTrigger": True
         }
         # DEBUG: log body json (temporaneo)
@@ -892,14 +910,16 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
 def place_takeprofit_long(symbol: str, tp_price: float, qty: float) -> (bool, str):
     info = get_instrument_info(symbol)
     qty_step = info.get("qty_step", 0.01)
+    price_step = info.get("price_step", 0.01)
     qty_str = _format_qty_with_step(float(qty), qty_step)
+    tp_str = format_price_bybit(tp_price, price_step)   # <<< allinea al tick
     body = {
         "category": "linear",
         "symbol": symbol,
         "side": "Sell",
         "orderType": "Limit",
         "qty": qty_str,
-        "price": f"{tp_price:.8f}",
+        "price": tp_str,                                  # <<< usa prezzo allineato
         "timeInForce": "PostOnly",
         "reduceOnly": True,
         "positionIdx": 1
@@ -1005,7 +1025,9 @@ def analyze_asset(symbol: str):
         pass
 
     try:
-        df = fetch_history(symbol, interval=ENTRY_TF_MINUTES if USE_MTF_ENTRY else INTERVAL_MINUTES)
+        is_volatile = symbol in VOLATILE_ASSETS
+        tf_minutes = 30 if (USE_MTF_ENTRY and is_volatile) else 60
+        df = fetch_history(symbol, interval=tf_minutes)
         if df is None or len(df) < 3:
             log(f"[ANALYZE] Dati storici insufficienti per {symbol}")
             return None, None, None
@@ -1040,39 +1062,72 @@ def analyze_asset(symbol: str):
         last = df.iloc[-1]
         prev = df.iloc[-2]
         price = float(last["Close"])
+        tf_tag = f"({tf_minutes}m)"
 
         # --- ENTRY LONG: condizioni rialziste su 15m ---
         entry_conditions = []
         entry_strategies = []
         
         if prev["ema20"] <= prev["ema50"] and last["ema20"] > last["ema50"]:
-            entry_strategies.append(f"Incrocio EMA 20/50 ({ENTRY_TF_MINUTES}m)")
+            entry_strategies.append(f"Incrocio EMA 20/50 {tf_tag}")
+            entry_conditions.append(True)
         if (last["macd"] - last["macd_signal"]) > 0 and (prev["macd"] - prev["macd_signal"]) <= 0:
-            entry_conditions.append(True); entry_strategies.append(f"MACD cross up ({ENTRY_TF_MINUTES}m)")
+            entry_conditions.append(True); entry_strategies.append(f"MACD cross up {tf_tag}")
 
         if is_volatile:
             cond1 = last["Close"] > last["bb_upper"]
             cond2 = last["rsi"] > 55
             if cond1 and cond2:
-                entry_conditions.append(True); entry_strategies.append(f"Breakout BB ({ENTRY_TF_MINUTES}m)")
+                entry_conditions.append(True); entry_strategies.append(f"Breakout BB {tf_tag}")
             cond5 = last["macd"] > last["macd_signal"]
             cond6 = last["adx"] > adx_threshold
             if cond5 and cond6:
-                entry_conditions.append(True); entry_strategies.append(f"MACD bullish + ADX ({ENTRY_TF_MINUTES}m)")
+                entry_conditions.append(True); entry_strategies.append(f"MACD bullish + ADX {tf_tag}")
             if len(entry_conditions) >= 3:
                 if LOG_DEBUG_STRATEGY:
                     log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
+        
+            # --- EXIT LONG anche per VOLATILI ---
+            cond_exit1 = last["Close"] < last["bb_lower"] and last["rsi"] < 45
+            def can_exit(symbol):
+                entry = position_data.get(symbol, {})
+                entry_price = entry.get("entry_price")
+                entry_time = entry.get("entry_time")
+                if not entry_price or not entry_time:
+                    return True
+                r = abs(price - entry_price) / (entry_price * INITIAL_STOP_LOSS_PCT)
+                holding_min = (time.time() - entry_time) / 60
+                return (price > entry_price and r > 0.5) or holding_min > 60
+            if cond_exit1 and can_exit(symbol):
+                return "exit", "Breakdown BB + RSI (bearish)", price
+            exit_1h = False
+            try:
+                df_1h = fetch_history(symbol, interval=60)
+                if df_1h is not None and len(df_1h) > 2:
+                    macd_1h = MACD(close=df_1h["Close"])
+                    df_1h["macd"] = macd_1h.macd()
+                    df_1h["macd_signal"] = macd_1h.macd_signal()
+                    df_1h["adx"] = ADXIndicator(high=df_1h["High"], low=df_1h["Low"], close=df_1h["Close"]).adx()
+                    last_1h = df_1h.iloc[-1]
+                    adx_threshold_1h = adx_threshold
+                    if last_1h["macd"] < last_1h["macd_signal"] and last_1h["adx"] > adx_threshold_1h:
+                        exit_1h = True
+            except Exception:
+                exit_1h = False
+            if last["macd"] < last["macd_signal"] and last["adx"] > adx_threshold and exit_1h and can_exit(symbol):
+                return "exit", "MACD bearish + ADX", price
+        
         else:
             if last["ema20"] > last["ema50"]:
-                entry_conditions.append(True); entry_strategies.append(f"EMA20>EMA50 ({ENTRY_TF_MINUTES}m)")
+                entry_conditions.append(True); entry_strategies.append(f"EMA20>EMA50 {tf_tag}")
             cond3 = last["macd"] > last["macd_signal"]
             cond4 = last["adx"] > adx_threshold
             if cond3 and cond4:
-                entry_conditions.append(True); entry_strategies.append(f"MACD bullish ({ENTRY_TF_MINUTES}m)")
+                entry_conditions.append(True); entry_strategies.append(f"MACD bullish {tf_tag}")
             cond5 = last["rsi"] > 50 and last["ema20"] > last["ema50"]
             if cond5:
-                entry_conditions.append(True); entry_strategies.append(f"Trend EMA+RSI ({ENTRY_TF_MINUTES}m)")
+                entry_conditions.append(True); entry_strategies.append(f"Trend EMA+RSI {tf_tag}")
             if len(entry_conditions) >= 3:
                 if LOG_DEBUG_STRATEGY:
                     log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
@@ -1575,18 +1630,18 @@ while True:
                 tlog(f"budget:{symbol}", f"💸 Budget insufficiente per {symbol} (disp: {group_available:.2f})", 300)
                 continue
 
-            weights = {
-                "Breakout BB (30m)": 1.0,
-                "MACD bullish + ADX (30m)": 0.9,
-                "Incrocio EMA 20/50 (30m)": 0.75,
-                "EMA20>EMA50 (30m)": 0.75,       # usata nel ramo non-volatile
-                "MACD cross up (30m)": 0.65,     # usata nel ramo volatile
-                "MACD bullish (30m)": 0.65,
-                "Trend EMA+RSI (30m)": 0.6
+            weights_no_tf = {
+                "Breakout BB": 1.0,
+                "MACD bullish + ADX": 0.9,
+                "Incrocio EMA 20/50": 0.75,
+                "EMA20>EMA50": 0.75,
+                "MACD cross up": 0.65,
+                "MACD bullish": 0.65,
+                "Trend EMA+RSI": 0.6
             }
-            parts = [p.strip() for p in (strategy or "").split(",") if p.strip()]
+            parts = [p.strip().split(" (")[0] for p in (strategy or "").split(",") if p.strip()]
             if parts:
-                base = max(weights.get(p, 0.5) for p in parts)
+                base = max(weights_no_tf.get(p, 0.5) for p in parts)
                 bonus = min(0.1 * (len(parts) - 1), 0.3)  # +0.1 per conferma, max +0.3
                 strength = min(1.0, base + bonus)
             else:
@@ -1689,7 +1744,7 @@ while True:
                 tlog(f"sl_init_exc:{symbol}", f"[SL-INIT-EXC] {symbol} exc: {e}", 300)
 
             try:
-                trailing_dist = atr_val * 1.5  # 0.5 ATR come distanza trailing
+                trailing_dist = compute_trailing_distance(symbol, float(atr_val))  # <<< clamp dinamico
                 ok_trailing = place_trailing_stop_long(symbol, trailing_dist)
                 if ok_trailing:
                     tlog(f"trailing_init_ok:{symbol}", f"[TRAILING-INIT-LONG] {symbol} trailing={trailing_dist:.6f}", 30)
