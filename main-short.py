@@ -58,7 +58,7 @@ TRIGGER_BY = "LastPrice"
 TRAILING_POLL_SEC = 5
 # >>> PATCH: parametri breakeven lock (SHORT)
 BREAKEVEN_LOCK_PCT = 0.01    # attiva BE al -1% di prezzo (~+10% PnL con leva 10x)
-BREAKEVEN_BUFFER   = -0.0005 # stop a BE - 0.05% (chiude comunque in leggero profitto)
+BREAKEVEN_BUFFER   = 0.0015  # stop a BE + 0.05% per evitare micro-slippage
 cooldown = {}
 MAX_LOSS_PCT = -2.5  # perdita massima accettata su SHORT in %, più stretto
 ORDER_USDT = 50.0
@@ -810,22 +810,37 @@ def set_position_stoploss_short(symbol: str, sl_price: float) -> bool:
         return False
 
 def breakeven_lock_worker_short():
-    # Portiamo lo stop della POSIZIONE a breakeven quando il prezzo scende di almeno BREAKEVEN_LOCK_PCT
+    # Porta lo stop della POSIZIONE a breakeven e piazza anche uno Stop-Market a BE
     while True:
         for symbol in list(open_positions):
             entry = position_data.get(symbol)
             if not entry or entry.get("be_locked"):
                 continue
+
             price_now = get_last_price(symbol)
             if not price_now:
                 continue
+
             entry_price = entry.get("entry_price", price_now)
-            # SHORT: attiva BE quando il prezzo <= entry * (1 - 2%)
+            # Trigger BE quando il prezzo è sceso almeno dell’1% (≈ +10% PnL a 10x)
             if price_now <= entry_price * (1.0 - BREAKEVEN_LOCK_PCT):
-                be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)  # leggermente sotto l’entry
-                if set_position_stoploss_short(symbol, be_price):
-                    entry["be_locked"] = True
-                    tlog(f"be_lock:{symbol}", f"[BE-LOCK][SHORT] {symbol} SL→BE {be_price:.6f}", 60)
+                # Short: copertura a BE con piccolo buffer di profitto
+                be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
+
+                # 1) cancella eventuali Stop/Conditional preesistenti (mantieni il TP Limit)
+                cancel_all_orders(symbol, order_filter="StopOrder")
+
+                # 2) piazza Stop-Market reduceOnly a BE (sul book)
+                qty_live = get_open_short_qty(symbol)
+                if qty_live and qty_live > 0:
+                    place_conditional_sl_short(symbol, be_price, qty_live, trigger_by="MarkPrice")
+
+                # 3) aggiorna anche lo stopLoss della POSIZIONE (trading-stop)
+                set_position_stoploss_short(symbol, be_price)
+
+                entry["be_locked"] = True
+                entry["be_price"] = be_price
+                tlog(f"be_lock:{symbol}", f"[BE-LOCK][SHORT] {symbol} SL→BE {be_price:.6f}", 60)
         time.sleep(5)
 
 def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigger_by: str = TRIGGER_BY) -> bool:
@@ -1208,7 +1223,12 @@ def sync_positions_from_wallet():
             if not price:
                 continue
             open_positions.add(symbol)
-            entry_price = price
+            # dentro sync_positions_from_wallet(), prima di calcolare tp/sl:
+            try:
+                pos = next(p for p in pos_list if p.get("symbol") == symbol and p.get("side") == "Sell")
+                entry_price = float(pos.get("avgPrice") or price)
+            except StopIteration:
+                entry_price = price
             entry_cost = qty * price
             # Calcola ATR e SL/TP di default
             df = fetch_history(symbol)
