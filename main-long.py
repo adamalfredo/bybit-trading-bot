@@ -791,7 +791,13 @@ def cancel_all_orders(symbol: str, order_filter: Optional[str] = None) -> bool:
 
 # >>> PATCH: funzioni per impostare lo stopLoss sulla posizione (LONG) e worker BE
 def set_position_stoploss_long(symbol: str, sl_price: float) -> bool:
-    body = {"category": "linear", "symbol": symbol, "stopLoss": f"{sl_price:.8f}", "positionIdx": 1}
+    body = {
+        "category": "linear",
+        "symbol": symbol,
+        "stopLoss": f"{sl_price:.8f}",
+        "slTriggerBy": "MarkPrice",   # <<< FIX: allinea al conditional
+        "positionIdx": 1
+    }
     ts = str(int(time.time() * 1000))
     body_json = json.dumps(body, separators=(",", ":"))
     payload = f"{ts}{KEY}5000{body_json}"
@@ -1743,6 +1749,7 @@ while True:
         info = get_instrument_info(symbol)
         min_qty = info.get("min_qty", 0.0)
         if saldo is None or saldo < min_qty:
+            tlog(f"ext_close:{symbol}", f"[CLEANUP][LONG] {symbol} chiusa lato exchange (qty={saldo}). Cancello TP/SL.", 60)
             open_positions.discard(symbol)
             position_data.pop(symbol, None)
             cancel_all_orders(symbol)
