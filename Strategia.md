@@ -2,7 +2,9 @@
 
 ## 🧭 Universe e filtri
 
-- Lista asset dinamica: top per volume spot USDT, filtrati per futures linear (turnover minimo), esclusi stablecoin/blacklist. Split: meno volatili vs volatili.
+- Lista asset dinamica: 
+    - top per volume spot USDT, filtrati per futures linear (turnover minimo), esclusi stablecoin/blacklist.
+    - Split: meno volatili vs volatili.
 - Trend filter multi‑TF:
     - LONG: ok se 4h uptrend oppure 1h uptrend e 4h non fortemente down. Block se 4h+1h entrambi down.
     - SHORT: speculare (downtrend permesso; block se 4h+1h entrambi up).
