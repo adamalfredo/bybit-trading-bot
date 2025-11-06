@@ -1823,5 +1823,26 @@ while True:
             open_positions.discard(symbol)
             position_data.pop(symbol, None)
             cancel_all_orders(symbol)
+    
+        # --- SAFETY: impone il BE se il worker non è riuscito a piazzarlo ---
+    for symbol in list(open_positions):
+        entry = position_data.get(symbol)
+        if not entry or entry.get("be_locked"):
+            continue
+        price_now = get_last_price(symbol)
+        if not price_now:
+            continue
+        entry_price = entry.get("entry_price", price_now)
+        # LONG: trigger BE se prezzo ≥ entry*(1 + 1%)
+        if price_now >= entry_price * (1.0 + BREAKEVEN_LOCK_PCT):
+            be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)  # sopra entry
+            cancel_all_orders(symbol, order_filter="StopOrder")
+            qty_live = get_open_long_qty(symbol)
+            if qty_live and qty_live > 0:
+                place_conditional_sl_long(symbol, be_price, qty_live, trigger_by="MarkPrice")
+                set_position_stoploss_long(symbol, be_price)
+                entry["be_locked"] = True
+                entry["be_price"] = be_price
+                tlog(f"be_lock_safety:{symbol}", f"[BE-LOCK-SAFETY][LONG] SL→BE {be_price:.6f}", 60)
 
     time.sleep(120)

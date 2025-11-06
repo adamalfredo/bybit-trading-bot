@@ -57,8 +57,8 @@ TRAILING_PROTECT_TIERS = [
 TRIGGER_BY = "LastPrice"
 TRAILING_POLL_SEC = 5
 # >>> PATCH: parametri breakeven lock (SHORT)
-BREAKEVEN_LOCK_PCT = 0.01    # attiva BE al -1% di prezzo (~+10% PnL con leva 10x)
-BREAKEVEN_BUFFER   = 0.0015  # stop a BE + 0.05% per evitare micro-slippage
+BREAKEVEN_LOCK_PCT = 0.01     # -1% di prezzo ≈ +10% PnL a 10x
+BREAKEVEN_BUFFER   = -0.0015  # buffer SOTTO l’entry (chiusura sempre ≥ BE)
 cooldown = {}
 MAX_LOSS_PCT = -2.5  # perdita massima accettata su SHORT in %, più stretto
 ORDER_USDT = 50.0
@@ -1924,6 +1924,27 @@ while True:
             open_positions.discard(symbol)
             position_data.pop(symbol, None)
             cancel_all_orders(symbol)
+    
+    # --- SAFETY: impone il BE se il worker non è riuscito a piazzarlo ---
+    for symbol in list(open_positions):
+        entry = position_data.get(symbol)
+        if not entry or entry.get("be_locked"):
+            continue
+        price_now = get_last_price(symbol)
+        if not price_now:
+            continue
+        entry_price = entry.get("entry_price", price_now)
+        # SHORT: trigger BE se prezzo ≤ entry*(1 - 1%)
+        if price_now <= entry_price * (1.0 - BREAKEVEN_LOCK_PCT):
+            be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)  # buffer negativo → sotto entry
+            cancel_all_orders(symbol, order_filter="StopOrder")
+            qty_live = get_open_short_qty(symbol)
+            if qty_live and qty_live > 0:
+                place_conditional_sl_short(symbol, be_price, qty_live, trigger_by="MarkPrice")
+                set_position_stoploss_short(symbol, be_price)
+                entry["be_locked"] = True
+                entry["be_price"] = be_price
+                tlog(f"be_lock_safety:{symbol}", f"[BE-LOCK-SAFETY][SHORT] SL→BE {be_price:.6f}", 60)
 
     # Sicurezza: attesa tra i cicli principali
     # time.sleep(INTERVAL_MINUTES * 60)
