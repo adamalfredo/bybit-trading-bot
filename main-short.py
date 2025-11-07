@@ -58,13 +58,10 @@ TRIGGER_BY = "LastPrice"
 TRAILING_POLL_SEC = 5
 
 RATCHET_TIERS_ROI = [
-    (10, 0),   # ROI raggiunto → ROI minimo garantito
-    (20, 10),
-    (30, 20),
-    (40, 30),
-    (50, 45),
-    (60, 55),
-    (80, 65),
+    (30, 15),
+    (45, 30),
+    (60, 45),
+    (80, 60),
     (100, 75)
 ]
 FLOOR_BUFFER_PCT = 0.0015          # 0.15% di prezzo per sicurezza esecuzione
@@ -858,71 +855,89 @@ def breakeven_lock_worker_short():
                 tlog(f"be_lock:{symbol}", f"[BE-LOCK][SHORT] {symbol} SL→BE {be_price:.6f}", 60)
         time.sleep(5)
 
-def _pick_floor_roi_short(mfe_roi: float) -> float:
+def _pick_floor_roi_short(mfe_roi: float) -> Optional[float]:
     """
-    Dato il massimo ROI favorevole (MFE in ROI), ritorna il floor ROI da garantire.
-    Esempio: MFE=50 → floor=45 (non scende mai sotto 45% ROI).
+    Ritorna il floor ROI (SHORT) oppure None se non superata la prima soglia.
+    Ignora floor=0 (non applica nulla).
     """
-    target = 0.0
+    if not RATCHET_TIERS_ROI:
+        return None
+    first_threshold = RATCHET_TIERS_ROI[0][0]
+    if mfe_roi < first_threshold:
+        return None
+    target = None
     for th, floor in RATCHET_TIERS_ROI:
-        if mfe_roi >= th:
+        if mfe_roi >= th and floor > 0:
             target = floor
     return target
 
 def profit_floor_worker_short():
     """
-    Aggiorna lo stopLoss della POSIZIONE (trading-stop) a scalini di ROI per SHORT.
-    Piazza anche uno Stop-Market di backup allo stesso livello.
-    Non alza mai lo stop oltre il necessario.
+    Aggiorna stopLoss posizione (SHORT) a scalini di ROI solo dopo prima soglia.
+    Salta floor=0. Non abbassa mai il floor. Usa trading-stop + Stop-Market backup.
     """
     while True:
         for symbol in list(open_positions):
             entry = position_data.get(symbol) or {}
             entry_price = entry.get("entry_price")
-            if not entry_price:
+            qty_live = get_open_short_qty(symbol)
+            if not entry_price or not qty_live or qty_live <= 0:
                 continue
 
             price_now = get_last_price(symbol)
             if not price_now:
                 continue
 
-            # ROI corrente stimato (prezzo%) * leva (SHORT: prezzo scende = ROI positivo)
+            # ROI (SHORT): prezzo scende → ROI positivo
             price_move_pct = ((entry_price - price_now) / entry_price) * 100.0
             roi_now = price_move_pct * DEFAULT_LEVERAGE
 
-            # Traccia MFE ROI
             mfe_roi = max(entry.get("mfe_roi", 0.0), roi_now)
             entry["mfe_roi"] = mfe_roi
 
-            # Calcola floor ROI
             target_floor_roi = _pick_floor_roi_short(mfe_roi)
-            prev_floor_roi = entry.get("floor_roi", -1.0)
+            prev_floor_roi = entry.get("floor_roi", None)
 
-            # Applica solo se stai ALZANDO il floor e cooldown rispettato
+            if target_floor_roi is None:
+                position_data[symbol] = entry
+                continue
+
+            if prev_floor_roi is not None and target_floor_roi <= prev_floor_roi:
+                position_data[symbol] = entry
+                continue
+
             last_upd = entry.get("floor_updated_ts", 0)
-            if target_floor_roi > prev_floor_roi and (time.time() - last_upd) >= FLOOR_UPDATE_COOLDOWN_SEC:
-                # ROI floor → livello di prezzo floor (SHORT: entry * (1 - delta))
-                delta_pct_price = (target_floor_roi / max(1, DEFAULT_LEVERAGE)) / 100.0
-                floor_price = entry_price * (1.0 - delta_pct_price)
-                # leggera maggiorazione per il trigger al rialzo (SHORT → leggermente sopra)
-                floor_price = floor_price * (1.0 + FLOOR_BUFFER_PCT)
+            if time.time() - last_upd < FLOOR_UPDATE_COOLDOWN_SEC:
+                continue
 
-                # Aggiorna trading-stop (server-side)
-                set_ok = set_position_stoploss_short(symbol, floor_price)
+            # Converti floor ROI in prezzo (SHORT: entry * (1 - delta))
+            delta_pct_price = (target_floor_roi / max(1, DEFAULT_LEVERAGE)) / 100.0
+            floor_price = entry_price * (1.0 - delta_pct_price)
 
-                # Piazza/aggiorna Stop-Market di backup
-                qty_live = get_open_short_qty(symbol)
-                if qty_live and qty_live > 0:
-                    place_conditional_sl_short(symbol, floor_price, qty_live, trigger_by=FLOOR_TRIGGER_BY)
+            # Buffer (SHORT → leggermente sopra il floor per attivarsi prima se risale)
+            floor_price *= (1.0 + FLOOR_BUFFER_PCT)
 
+            # Se floor_price ≤ prezzo attuale, lo stop sarebbe sotto → inutile (non protegge profitto)
+            if floor_price <= price_now:
                 entry["floor_roi"] = target_floor_roi
                 entry["floor_price"] = floor_price
                 entry["floor_updated_ts"] = time.time()
-
-                tlog(f"floor_up_short:{symbol}",
-                     f"[FLOOR-UP][SHORT] {symbol} MFE={mfe_roi:.1f}% → FloorROI={target_floor_roi:.1f}% "
-                     f"→ SL={floor_price:.6f} set={set_ok}", 30)
                 position_data[symbol] = entry
+                tlog(f"floor_up_short_skip:{symbol}",
+                     f"[FLOOR-UP-SKIP][SHORT] {symbol} MFE={mfe_roi:.1f}% targetROI={target_floor_roi:.1f}% floorPrice={floor_price:.6f} ≤ current={price_now:.6f}", 120)
+                continue
+
+            set_ok = set_position_stoploss_short(symbol, floor_price)
+            place_conditional_sl_short(symbol, floor_price, qty_live, trigger_by=FLOOR_TRIGGER_BY)
+
+            entry["floor_roi"] = target_floor_roi
+            entry["floor_price"] = floor_price
+            entry["floor_updated_ts"] = time.time()
+
+            tlog(f"floor_up_short:{symbol}",
+                 f"[FLOOR-UP][SHORT] {symbol} MFE={mfe_roi:.1f}% → FloorROI={target_floor_roi:.1f}% → SL={floor_price:.6f} set={set_ok}", 30)
+            position_data[symbol] = entry
+
         time.sleep(3)
 
 def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigger_by: str = TRIGGER_BY) -> bool:
