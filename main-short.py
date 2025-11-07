@@ -56,6 +56,21 @@ TRAILING_PROTECT_TIERS = [
 ]
 TRIGGER_BY = "LastPrice"
 TRAILING_POLL_SEC = 5
+
+RATCHET_TIERS_ROI = [
+    (10, 0),   # ROI raggiunto → ROI minimo garantito
+    (20, 10),
+    (30, 20),
+    (40, 30),
+    (50, 45),
+    (60, 55),
+    (80, 65),
+    (100, 75)
+]
+FLOOR_BUFFER_PCT = 0.0015          # 0.15% di prezzo per sicurezza esecuzione
+FLOOR_UPDATE_COOLDOWN_SEC = 8      # evita update troppo frequenti
+FLOOR_TRIGGER_BY = "MarkPrice"     # usa Mark per coerenza con SL
+
 # >>> PATCH: parametri breakeven lock (SHORT)
 BREAKEVEN_LOCK_PCT = 0.01     # -1% di prezzo ≈ +10% PnL a 10x
 BREAKEVEN_BUFFER   = -0.0015  # buffer SOTTO l’entry (chiusura sempre ≥ BE)
@@ -843,6 +858,73 @@ def breakeven_lock_worker_short():
                 tlog(f"be_lock:{symbol}", f"[BE-LOCK][SHORT] {symbol} SL→BE {be_price:.6f}", 60)
         time.sleep(5)
 
+def _pick_floor_roi_short(mfe_roi: float) -> float:
+    """
+    Dato il massimo ROI favorevole (MFE in ROI), ritorna il floor ROI da garantire.
+    Esempio: MFE=50 → floor=45 (non scende mai sotto 45% ROI).
+    """
+    target = 0.0
+    for th, floor in RATCHET_TIERS_ROI:
+        if mfe_roi >= th:
+            target = floor
+    return target
+
+def profit_floor_worker_short():
+    """
+    Aggiorna lo stopLoss della POSIZIONE (trading-stop) a scalini di ROI per SHORT.
+    Piazza anche uno Stop-Market di backup allo stesso livello.
+    Non alza mai lo stop oltre il necessario.
+    """
+    while True:
+        for symbol in list(open_positions):
+            entry = position_data.get(symbol) or {}
+            entry_price = entry.get("entry_price")
+            if not entry_price:
+                continue
+
+            price_now = get_last_price(symbol)
+            if not price_now:
+                continue
+
+            # ROI corrente stimato (prezzo%) * leva (SHORT: prezzo scende = ROI positivo)
+            price_move_pct = ((entry_price - price_now) / entry_price) * 100.0
+            roi_now = price_move_pct * DEFAULT_LEVERAGE
+
+            # Traccia MFE ROI
+            mfe_roi = max(entry.get("mfe_roi", 0.0), roi_now)
+            entry["mfe_roi"] = mfe_roi
+
+            # Calcola floor ROI
+            target_floor_roi = _pick_floor_roi_short(mfe_roi)
+            prev_floor_roi = entry.get("floor_roi", -1.0)
+
+            # Applica solo se stai ALZANDO il floor e cooldown rispettato
+            last_upd = entry.get("floor_updated_ts", 0)
+            if target_floor_roi > prev_floor_roi and (time.time() - last_upd) >= FLOOR_UPDATE_COOLDOWN_SEC:
+                # ROI floor → livello di prezzo floor (SHORT: entry * (1 - delta))
+                delta_pct_price = (target_floor_roi / max(1, DEFAULT_LEVERAGE)) / 100.0
+                floor_price = entry_price * (1.0 - delta_pct_price)
+                # leggera maggiorazione per il trigger al rialzo (SHORT → leggermente sopra)
+                floor_price = floor_price * (1.0 + FLOOR_BUFFER_PCT)
+
+                # Aggiorna trading-stop (server-side)
+                set_ok = set_position_stoploss_short(symbol, floor_price)
+
+                # Piazza/aggiorna Stop-Market di backup
+                qty_live = get_open_short_qty(symbol)
+                if qty_live and qty_live > 0:
+                    place_conditional_sl_short(symbol, floor_price, qty_live, trigger_by=FLOOR_TRIGGER_BY)
+
+                entry["floor_roi"] = target_floor_roi
+                entry["floor_price"] = floor_price
+                entry["floor_updated_ts"] = time.time()
+
+                tlog(f"floor_up_short:{symbol}",
+                     f"[FLOOR-UP][SHORT] {symbol} MFE={mfe_roi:.1f}% → FloorROI={target_floor_roi:.1f}% "
+                     f"→ SL={floor_price:.6f} set={set_ok}", 30)
+                position_data[symbol] = entry
+        time.sleep(3)
+
 def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigger_by: str = TRIGGER_BY) -> bool:
     """
     Piazza/aggiorna uno stop-market reduceOnly per proteggere la posizione SHORT.
@@ -1616,6 +1698,8 @@ trailing_thread.start()
 # >>> PATCH: avvio worker di breakeven lock (SHORT)
 be_lock_thread_short = threading.Thread(target=breakeven_lock_worker_short, daemon=True)
 be_lock_thread_short.start()
+profit_floor_thread_short = threading.Thread(target=profit_floor_worker_short, daemon=True)
+profit_floor_thread_short.start()
 
 while True:
     # Aggiorna la lista asset dinamicamente ogni ciclo
