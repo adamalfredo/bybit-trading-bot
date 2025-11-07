@@ -42,7 +42,7 @@ TP_MAX = 3.0
 SL_MIN = 1.0
 SL_MAX = 2.0
 # Nuovi parametri per protezione guadagni (stop_floor)
-MIN_PROTECT_PCT = 1.0       # soglia minima protezione (2%)
+MIN_PROTECT_PCT = 1.0       # soglia minima protezione (1%)  // <<< PATCH commento corretto
 TRAILING_PROTECT_TIERS = [  # (p_max_pct_threshold, margin_pct)
     (2, 2.0),   # se p_max_pct <5 e >=2 -> margin 2%
     (5, 3.0),   # se p_max_pct <10 -> margin 3%
@@ -62,13 +62,13 @@ TP1_CLOSE_PCT = 0.5     # chiudi il 50% a TP1
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
 COOLDOWN_MINUTES = 60
 cooldown = {}
-MAX_LOSS_PCT = -2.5  # perdita massima accettata su SHORT in %, più stretto
+MAX_LOSS_PCT = -2.5  # perdita massima accettata sul LONG (chiusura forzata se PnL < -2.5%)
 ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
 # --- MTF entry: segnali su 15m, trend su 4h/1h ---
 USE_MTF_ENTRY = True
-ENTRY_ADX_VOLATILE = 12   # soglia ADX più bassa su 15m per non arrivare tardi
-ENTRY_ADX_STABLE = 10
+ENTRY_ADX_VOLATILE = 25   # soglia ADX più bassa su 15m per non arrivare tardi
+ENTRY_ADX_STABLE = 23
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
 ASSETS = []
 LESS_VOLATILE_ASSETS = []
@@ -1015,24 +1015,14 @@ def is_symbol_linear(symbol):
         return False
     
 def analyze_asset(symbol: str):
-    # Filtro permissivo ma accurato per LONG
+    # >>> PATCH: Filtro trend più rigido
     up_4h = is_trending_up(symbol, "240")
     up_1h = is_trending_up_1h(symbol, "60")
-    down_4h = is_trending_down(symbol, "240")
-    down_1h = is_trending_down_1h(symbol, "60")
     
-    # LONG: 4h in uptrend OR (1h in uptrend AND 4h non in forte downtrend)
-    can_long = up_4h or (up_1h and not down_4h)
-    
-    # Blocco: se downtrend troppo forte (4h+1h entrambi down), non entrare LONG
-    if down_4h and down_1h:
+    # LONG solo se 4h E 1h sono entrambi in uptrend
+    if not (up_4h and up_1h):
         if LOG_DEBUG_STRATEGY:
-            log(f"[TREND-FILTER][{symbol}] Forte downtrend 4h+1h, skip LONG.")
-        return None, None, None
-    
-    if not can_long:
-        if LOG_DEBUG_STRATEGY:
-            log(f"[TREND-FILTER][{symbol}] Condizioni trend insufficienti per LONG.")
+            log(f"[TREND-FILTER][{symbol}] Trend 4h+1h non concorde per LONG, skip.")
         return None, None, None
 
     if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_low(symbol):
@@ -1075,109 +1065,64 @@ def analyze_asset(symbol: str):
         adx_threshold = (ENTRY_ADX_VOLATILE if is_volatile else ENTRY_ADX_STABLE)
 
         last = df.iloc[-1]
-        prev = df.iloc[-2]
         price = float(last["Close"])
         tf_tag = f"({tf_minutes}m)"
 
-        # --- ENTRY LONG: condizioni rialziste su 15m ---
-        entry_conditions = []
+        # --- ENTRY LONG: condizioni rialziste (CONFLUENZA ≥2/3) ---
         entry_strategies = []
-        
-        if prev["ema20"] <= prev["ema50"] and last["ema20"] > last["ema50"]:
-            entry_strategies.append(f"Incrocio EMA 20/50 {tf_tag}")
-            entry_conditions.append(True)
-        if (last["macd"] - last["macd_signal"]) > 0 and (prev["macd"] - prev["macd_signal"]) <= 0:
-            entry_conditions.append(True); entry_strategies.append(f"MACD cross up {tf_tag}")
 
-        if is_volatile:
-            cond1 = last["Close"] > last["bb_upper"]
-            cond2 = last["rsi"] > 55
-            if cond1 and cond2:
-                entry_conditions.append(True); entry_strategies.append(f"Breakout BB {tf_tag}")
-            cond5 = last["macd"] > last["macd_signal"]
-            cond6 = last["adx"] > adx_threshold
-            if cond5 and cond6:
-                entry_conditions.append(True); entry_strategies.append(f"MACD bullish + ADX {tf_tag}")
-            if len(entry_conditions) >= 3:
-                if LOG_DEBUG_STRATEGY:
-                    log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
-                return "entry", ", ".join(entry_strategies), price
-        
-            # --- EXIT LONG anche per VOLATILI ---
-            cond_exit1 = last["Close"] < last["bb_lower"] and last["rsi"] < 45
-            def can_exit(symbol):
-                entry = position_data.get(symbol, {})
-                entry_price = entry.get("entry_price")
-                entry_time = entry.get("entry_time")
-                if not entry_price or not entry_time:
-                    return True
-                r = abs(price - entry_price) / (entry_price * INITIAL_STOP_LOSS_PCT)
-                holding_min = (time.time() - entry_time) / 60
-                return (price > entry_price and r > 0.5) or holding_min > 60
-            if cond_exit1 and can_exit(symbol):
-                return "exit", "Breakdown BB + RSI (bearish)", price
+        ema_bullish = last["ema20"] > last["ema50"]
+        if ema_bullish:
+            entry_strategies.append(f"EMA Bullish {tf_tag}")
+
+        macd_bullish = last["macd"] > last["macd_signal"]
+        if macd_bullish:
+            entry_strategies.append(f"MACD Bullish {tf_tag}")
+
+        rsi_bullish = last["rsi"] > 55
+        if rsi_bullish:
+            entry_strategies.append(f"RSI Bullish {tf_tag}")
+
+        # Entry solo se ≥2 condizioni e ADX sopra soglia
+        if [ema_bullish, macd_bullish, rsi_bullish].count(True) >= 2 and last["adx"] > adx_threshold:
+            entry_strategies.append("ADX Trend")
+            if LOG_DEBUG_STRATEGY:
+                log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
+            return "entry", ", ".join(entry_strategies), price
+
+        # --- EXIT LONG: valido sempre (anche per volatili) ---
+        cond_exit1 = last["Close"] < last["bb_lower"] and last["rsi"] < 45
+        def can_exit(symbol):
+            entry = position_data.get(symbol, {})
+            entry_price = entry.get("entry_price")
+            entry_time = entry.get("entry_time")
+            if not entry_price or not entry_time:
+                return True
+            r = abs(price - entry_price) / (entry_price * INITIAL_STOP_LOSS_PCT)
+            holding_min = (time.time() - entry_time) / 60
+            # LONG: esci se perdita ≥0.5R (price < entry) oppure holding > 60 min
+            return (price < entry_price and r > 0.5) or holding_min > 60
+        if cond_exit1 and can_exit(symbol):
+            return "exit", "Breakdown BB + RSI (bearish)", price
+
+        exit_1h = False
+        try:
+            df_1h = fetch_history(symbol, interval=60)
+            if df_1h is not None and len(df_1h) > 2:
+                macd_1h = MACD(close=df_1h["Close"])
+                df_1h["macd"] = macd_1h.macd()
+                df_1h["macd_signal"] = macd_1h.macd_signal()
+                df_1h["adx"] = ADXIndicator(high=df_1h["High"], low=df_1h["Low"], close=df_1h["Close"]).adx()
+                last_1h = df_1h.iloc[-1]
+                adx_threshold_1h = adx_threshold
+                if last_1h["macd"] < last_1h["macd_signal"] and last_1h["adx"] > adx_threshold_1h:
+                    exit_1h = True
+        except Exception:
             exit_1h = False
-            try:
-                df_1h = fetch_history(symbol, interval=60)
-                if df_1h is not None and len(df_1h) > 2:
-                    macd_1h = MACD(close=df_1h["Close"])
-                    df_1h["macd"] = macd_1h.macd()
-                    df_1h["macd_signal"] = macd_1h.macd_signal()
-                    df_1h["adx"] = ADXIndicator(high=df_1h["High"], low=df_1h["Low"], close=df_1h["Close"]).adx()
-                    last_1h = df_1h.iloc[-1]
-                    adx_threshold_1h = adx_threshold
-                    if last_1h["macd"] < last_1h["macd_signal"] and last_1h["adx"] > adx_threshold_1h:
-                        exit_1h = True
-            except Exception:
-                exit_1h = False
-            if last["macd"] < last["macd_signal"] and last["adx"] > adx_threshold and exit_1h and can_exit(symbol):
-                return "exit", "MACD bearish + ADX", price
+
+        if last["macd"] < last["macd_signal"] and last["adx"] > adx_threshold and exit_1h and can_exit(symbol):
+            return "exit", "MACD bearish + ADX", price
         
-        else:
-            if last["ema20"] > last["ema50"]:
-                entry_conditions.append(True); entry_strategies.append(f"EMA20>EMA50 {tf_tag}")
-            cond3 = last["macd"] > last["macd_signal"]
-            cond4 = last["adx"] > adx_threshold
-            if cond3 and cond4:
-                entry_conditions.append(True); entry_strategies.append(f"MACD bullish {tf_tag}")
-            cond5 = last["rsi"] > 50 and last["ema20"] > last["ema50"]
-            if cond5:
-                entry_conditions.append(True); entry_strategies.append(f"Trend EMA+RSI {tf_tag}")
-            if len(entry_conditions) >= 3:
-                if LOG_DEBUG_STRATEGY:
-                    log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
-                return "entry", ", ".join(entry_strategies), price
-
-            # --- EXIT LONG: segnali ribassisti ---
-            cond_exit1 = last["Close"] < last["bb_lower"] and last["rsi"] < 45
-            def can_exit(symbol):
-                entry = position_data.get(symbol, {})
-                entry_price = entry.get("entry_price")
-                entry_time = entry.get("entry_time")
-                if not entry_price or not entry_time:
-                    return True  # fallback: consenti sempre
-                r = abs(price - entry_price) / (entry_price * INITIAL_STOP_LOSS_PCT)
-                holding_min = (time.time() - entry_time) / 60
-                return (price > entry_price and r > 0.5) or holding_min > 60
-            if cond_exit1 and can_exit(symbol):
-                return "exit", "Breakdown BB + RSI (bearish)", price
-            exit_1h = False
-            try:
-                df_1h = fetch_history(symbol, interval=60)
-                if df_1h is not None and len(df_1h) > 2:
-                    macd_1h = MACD(close=df_1h["Close"])
-                    df_1h["macd"] = macd_1h.macd()
-                    df_1h["macd_signal"] = macd_1h.macd_signal()
-                    df_1h["adx"] = ADXIndicator(high=df_1h["High"], low=df_1h["Low"], close=df_1h["Close"]).adx()
-                    last_1h = df_1h.iloc[-1]
-                    adx_threshold_1h = adx_threshold  # puoi usare la stessa soglia
-                    if last_1h["macd"] < last_1h["macd_signal"] and last_1h["adx"] > adx_threshold_1h:
-                        exit_1h = True
-            except Exception:
-                exit_1h = False
-            if last["macd"] < last["macd_signal"] and last["adx"] > adx_threshold and exit_1h and can_exit(symbol):
-                return "exit", "MACD bearish + ADX", price
-
         return None, None, None
     except Exception as e:
         log(f"Errore analisi {symbol}: {e}")
@@ -1263,6 +1208,22 @@ def sync_positions_from_wallet():
             log(f"[SYNC] Posizione LONG trovata: {symbol} qty={qty} entry={entry_price:.4f} SL={sl:.4f} TP={tp:.4f}")
             # Marca come già in posizione per evitare nuovi entry
             open_positions.add(symbol)
+
+            # >>> PATCH: BE-LOCK immediato se già oltre soglia al riavvio
+            try:
+                if price >= entry_price * (1.0 + BREAKEVEN_LOCK_PCT) and not position_data[symbol].get("be_locked"):
+                    be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
+                    cancel_all_orders(symbol, order_filter="StopOrder")
+                    qty_live = get_open_long_qty(symbol)
+                    if qty_live and qty_live > 0:
+                        place_conditional_sl_long(symbol, be_price, qty_live, trigger_by="MarkPrice")
+                        set_position_stoploss_long(symbol, be_price)
+                        position_data[symbol]["be_locked"] = True
+                        position_data[symbol]["be_price"] = be_price
+                        tlog(f"be_lock_sync:{symbol}", f"[BE-LOCK-SYNC][LONG] SL→BE {be_price:.6f}", 300)
+            except Exception as e:
+                tlog(f"be_lock_sync_exc:{symbol}", f"[BE-LOCK-SYNC][LONG] exc: {e}", 300)
+                
     log(f"[SYNC] Totale posizioni LONG recuperate dal wallet: {trovate}")
 
 # --- Esegui sync all'avvio ---
@@ -1646,13 +1607,19 @@ while True:
                 continue
 
             weights_no_tf = {
-                "Breakout BB": 1.0,
-                "MACD bullish + ADX": 0.9,
+                # Nuovi nomi (confluenza)
+                "EMA Bullish": 0.75,
+                "MACD Bullish": 0.70,
+                "RSI Bullish": 0.60,
+                "ADX Trend": 0.85,
+                # Vecchi nomi (compatibilità log storici)
+                "Breakout BB": 1.00,
+                "MACD bullish + ADX": 0.90,
                 "Incrocio EMA 20/50": 0.75,
                 "EMA20>EMA50": 0.75,
                 "MACD cross up": 0.65,
                 "MACD bullish": 0.65,
-                "Trend EMA+RSI": 0.6
+                "Trend EMA+RSI": 0.60
             }
             parts = [p.strip().split(" (")[0] for p in (strategy or "").split(",") if p.strip()]
             if parts:
@@ -1702,41 +1669,36 @@ while True:
                 continue
 
             qty = market_long(symbol, order_amount)
+            price_now = get_last_price(symbol)
+            if not price_now:
+                log(f"❌ Prezzo non disponibile post-ordine per {symbol}")
+                continue
+
+            df = fetch_history(symbol)
+            if df is not None and "Close" in df.columns:
+                atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
+                atr_val = atr.iloc[-1]
+            else:
+                atr_val = price_now * 0.02
 
             if not qty or qty == 0:
                 if LOG_DEBUG_STRATEGY:
                     log(f"❌ LONG non aperto per {symbol}")
                 continue
 
-            tp_price = None
-            try:
-                price_now = get_last_price(symbol)
-                df = fetch_history(symbol)
-                if df is not None and "Close" in df.columns:
-                    atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
-                    atr_val = atr.iloc[-1]
-                else:
-                    atr_val = price_now * 0.02
-                tp_price = price_now + (atr_val * TP_FACTOR)
-                ok_tp, tp_oid = place_takeprofit_long(symbol, tp_price, qty)
-                if ok_tp:
-                    tlog(f"tp_init_ok:{symbol}", f"[TP-PLACE-INIT] {symbol} tp={tp_price:.6f} orderId={tp_oid}", 30)
-                else:
-                    tlog(f"tp_init_fail:{symbol}", f"[TP-PLACE-INIT] {symbol} tp={tp_price:.6f} ok=False", 30)
-            except Exception as _:
-                tp_price = None
+            tp_price = price_now + (atr_val * TP_FACTOR)
+            ok_tp, tp_oid = place_takeprofit_long(symbol, tp_price, qty)
+            if ok_tp:
+                tlog(f"tp_init_ok:{symbol}", f"[TP-PLACE-INIT] {symbol} tp={tp_price:.6f} orderId={tp_oid}", 30)
+            else:
+                tlog(f"tp_init_fail:{symbol}", f"[TP-PLACE-INIT] {symbol} tp={tp_price:.6f} ok=False", 30)
 
-            price_now = get_last_price(symbol)
             actual_cost = qty * price_now
-            df = fetch_history(symbol)
-            if df is None or "Close" not in df.columns:
-                continue
-            atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
-            atr_val = atr.iloc[-1]
+            
             atr_ratio = atr_val / price_now if price_now > 0 else 0
             tp_factor = min(TP_MAX, max(TP_MIN, TP_FACTOR + atr_ratio * 5))
             sl_factor = min(SL_MAX, max(SL_MIN, SL_FACTOR + atr_ratio * 3))
-
+            
             tp = price_now + (atr_val * tp_factor)
             sl = price_now - (atr_val * sl_factor)
             
@@ -1824,7 +1786,7 @@ while True:
             position_data.pop(symbol, None)
             cancel_all_orders(symbol)
     
-        # --- SAFETY: impone il BE se il worker non è riuscito a piazzarlo ---
+    # --- SAFETY: impone il BE se il worker non è riuscito a piazzarlo ---
     for symbol in list(open_positions):
         entry = position_data.get(symbol)
         if not entry or entry.get("be_locked"):

@@ -47,7 +47,7 @@ TP1_CLOSE_PCT = 0.5     # chiudi il 50% a TP1
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
 COOLDOWN_MINUTES = 60
 # Nuovi parametri protezione guadagni (SHORT)
-MIN_PROTECT_PCT = 1.0
+MIN_PROTECT_PCT = 1.0       # soglia minima protezione (1%)  // <<< PATCH commento corretto
 TRAILING_PROTECT_TIERS = [
     (2, 2.0),
     (5, 3.0),
@@ -66,8 +66,8 @@ ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
 # --- MTF entry: segnali su 15m, trend su 4h/1h ---
 USE_MTF_ENTRY = True
 ENTRY_TF_MINUTES = 60
-ENTRY_ADX_VOLATILE = 12   # soglia ADX più bassa su 15m per non arrivare tardi
-ENTRY_ADX_STABLE = 10
+ENTRY_ADX_VOLATILE = 25   # soglia ADX più bassa su 15m per non arrivare tardi
+ENTRY_ADX_STABLE = 23
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
 ASSETS = []
 LESS_VOLATILE_ASSETS = []
@@ -1024,24 +1024,14 @@ def is_symbol_linear(symbol):
         return False
     
 def analyze_asset(symbol: str):
-    # Filtro permissivo ma accurato per SHORT
+    # >>> PATCH: Filtro trend più rigido
     down_4h = is_trending_down(symbol, "240")
     down_1h = is_trending_down_1h(symbol, "60")
-    up_4h = is_trending_up(symbol, "240")
-    up_1h = is_trending_up_1h(symbol, "60")
     
-    # SHORT: 4h in downtrend OR (1h in downtrend AND 4h non in forte uptrend)
-    can_short = down_4h or (down_1h and not up_4h)
-    
-    # Blocco: se uptrend troppo forte (4h+1h entrambi up), non entrare SHORT
-    if up_4h and up_1h:
+    # SHORT solo se 4h E 1h sono entrambi in downtrend
+    if not (down_4h and down_1h):
         if LOG_DEBUG_STRATEGY:
-            log(f"[TREND-FILTER][{symbol}] Forte uptrend 4h+1h, skip SHORT.")
-        return None, None, None
-    
-    if not can_short:
-        if LOG_DEBUG_STRATEGY:
-            log(f"[TREND-FILTER][{symbol}] Condizioni trend insufficienti per SHORT.")
+            log(f"[TREND-FILTER][{symbol}] Trend 4h+1h non concorde per SHORT, skip.")
         return None, None, None
     
     if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_low(symbol):
@@ -1055,16 +1045,16 @@ def analyze_asset(symbol: str):
         df = fetch_history(symbol, interval=tf_minutes)
 
         # PATCH: Funzione per rendere meno reattiva l'uscita
-        def can_exit(symbol):
+        def can_exit(symbol, current_price):
             entry = position_data.get(symbol, {})
             entry_price = entry.get("entry_price")
             entry_time = entry.get("entry_time")
             if not entry_price or not entry_time:
-                return True  # fallback: consenti sempre
-            r = abs(price - entry_price) / (entry_price * INITIAL_STOP_LOSS_PCT)
+                return True
+            r = abs(current_price - entry_price) / (entry_price * INITIAL_STOP_LOSS_PCT)
             holding_min = (time.time() - entry_time) / 60
             # SHORT: esci solo se profitto > 0.5R o holding > 60min
-            return (price < entry_price and r > 0.5) or holding_min > 60
+            return (current_price < entry_price and r > 0.5) or holding_min > 60
         
         if df is None or len(df) < 3:
             log(f"[ANALYZE] Dati storici insufficienti per {symbol}")
@@ -1103,53 +1093,35 @@ def analyze_asset(symbol: str):
         adx_threshold = (ENTRY_ADX_VOLATILE if is_volatile else ENTRY_ADX_STABLE)
 
         last = df.iloc[-1]
-        prev = df.iloc[-2]
         price = float(last["Close"])
         tf_tag = f"({tf_minutes}m)"
 
-        # --- SHORT: condizioni ribassiste ---
-        entry_conditions = []
+        # --- ENTRY SHORT: condizioni ribassiste (CONFLUENZA ≥2/3) ---
         entry_strategies = []
         
-        # Trigger anticipato: incrocio EMA20/EMA50 o MACD cross su 15m
-        if prev["ema20"] >= prev["ema50"] and last["ema20"] < last["ema50"]:
-            entry_conditions.append(True); entry_strategies.append(f"Incrocio EMA 20/50 {tf_tag}")
-        if (last["macd"] - last["macd_signal"]) < 0 and (prev["macd"] - prev["macd_signal"]) >= 0:
-            entry_conditions.append(True); entry_strategies.append(f"MACD cross down {tf_tag}")
-
-        if is_volatile:
-            # SHORT: breakdown BB, RSI bearish, MACD bearish
-            cond1 = last["Close"] < last["bb_lower"]
-            cond2 = last["rsi"] < 45
-            if cond1 and cond2:
-                entry_conditions.append(True); entry_strategies.append(f"Breakdown BB {tf_tag}")
-            cond5 = last["macd"] < last["macd_signal"]
-            cond6 = last["adx"] > adx_threshold
-            if cond5 and cond6:
-                entry_conditions.append(True); entry_strategies.append(f"MACD bearish + ADX {tf_tag}")
-            if len(entry_conditions) >= 3:
-                if LOG_DEBUG_STRATEGY:
-                    log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT: {entry_strategies}")
-                return "entry", ", ".join(entry_strategies), price
-        else:
-            # Condizioni per asset stabili
-            if last["ema20"] < last["ema50"]:
-                entry_conditions.append(True); entry_strategies.append(f"EMA20<EMA50 {tf_tag}")
-            cond3 = last["macd"] < last["macd_signal"]
-            cond4 = last["adx"] > adx_threshold
-            if cond3 and cond4:
-                entry_conditions.append(True); entry_strategies.append(f"MACD bearish {tf_tag}")
-            cond5 = last["rsi"] < 45 and last["ema20"] < last["ema50"]
-            if cond5:
-                entry_conditions.append(True); entry_strategies.append(f"Trend EMA+RSI {tf_tag}")
-            if len(entry_conditions) >= 3:
+        ema_bearish = last["ema20"] < last["ema50"]
+        if ema_bearish:
+            entry_strategies.append(f"EMA Bearish {tf_tag}")
+        
+        macd_bearish = last["macd"] < last["macd_signal"]
+        if macd_bearish:
+            entry_strategies.append(f"MACD Bearish {tf_tag}")
+        
+        rsi_bearish = last["rsi"] < 45
+        if rsi_bearish:
+            entry_strategies.append(f"RSI Bearish {tf_tag}")
+        
+        # Confluenza: almeno 2 vere
+        if [ema_bearish, macd_bearish, rsi_bearish].count(True) >= 2:
+            if last["adx"] > adx_threshold:
+                entry_strategies.append("ADX Trend")
                 if LOG_DEBUG_STRATEGY:
                     log(f"[STRATEGY][{symbol}] Segnale ENTRY SHORT: {entry_strategies}")
                 return "entry", ", ".join(entry_strategies), price
 
         # --- EXIT SHORT: segnali bullish ---
         cond_exit1 = last["Close"] > last["bb_upper"] and last["rsi"] > 60
-        if cond_exit1 and can_exit(symbol):
+        if cond_exit1 and can_exit(symbol, price):
             return "exit", "Rimbalzo BB + RSI (bullish)", price
         # PATCH 6: Conferma exit anche su 1h
         exit_1h = False
@@ -1166,7 +1138,7 @@ def analyze_asset(symbol: str):
                     exit_1h = True
         except Exception:
             exit_1h = False
-        if last["macd"] > last["macd_signal"] and last["adx"] > adx_threshold and exit_1h and can_exit(symbol):
+        if last["macd"] > last["macd_signal"] and last["adx"] > adx_threshold and exit_1h and can_exit(symbol, price):
             return "exit", "MACD bullish + ADX", price
 
         return None, None, None
@@ -1256,6 +1228,22 @@ def sync_positions_from_wallet():
             }
             trovate += 1
             log(f"[SYNC] Posizione trovata: {symbol} qty={qty} entry={entry_price:.4f} SL={sl:.4f} TP={tp:.4f}")
+
+            # >>> PATCH: BE-LOCK immediato se già oltre soglia al riavvio (SHORT)
+            try:
+                if price <= entry_price * (1.0 - BREAKEVEN_LOCK_PCT) and not position_data[symbol].get("be_locked"):
+                    be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)  # buffer negativo
+                    cancel_all_orders(symbol, order_filter="StopOrder")
+                    qty_live = get_open_short_qty(symbol)
+                    if qty_live and qty_live > 0:
+                        place_conditional_sl_short(symbol, be_price, qty_live, trigger_by="MarkPrice")
+                        set_position_stoploss_short(symbol, be_price)
+                        position_data[symbol]["be_locked"] = True
+                        position_data[symbol]["be_price"] = be_price
+                        tlog(f"be_lock_sync:{symbol}", f"[BE-LOCK-SYNC][SHORT] SL→BE {be_price:.6f}", 300)
+            except Exception as e:
+                tlog(f"be_lock_sync_exc:{symbol}", f"[BE-LOCK-SYNC][SHORT] exc: {e}", 300)
+
     log(f"[SYNC] Totale posizioni short recuperate dal wallet: {trovate}")
 
 # --- Esegui sync all'avvio ---
@@ -1698,12 +1686,18 @@ while True:
 
             # 📊 Valuta la forza del segnale in base alla strategia
             weights_no_tf = {
-                "Breakdown BB": 1.0,
-                "MACD bearish + ADX": 0.9,
+                # Nuovi nomi (confluenza)
+                "EMA Bearish": 0.75,
+                "MACD Bearish": 0.70,
+                "RSI Bearish": 0.60,
+                "ADX Trend": 0.85,
+                # Vecchi nomi (compatibilità)
+                "Breakdown BB": 1.00,
+                "MACD bearish + ADX": 0.90,
                 "Incrocio EMA 20/50": 0.75,
-                "EMA20<EMA50": 0.7,
+                "EMA20<EMA50": 0.70,
                 "MACD bearish": 0.65,
-                "Trend EMA+RSI": 0.6
+                "Trend EMA+RSI": 0.60
             }
             parts = [p.strip().split(" (")[0] for p in (strategy or "").split(",") if p.strip()]
             if parts:
@@ -1789,22 +1783,16 @@ while True:
                     tlog(f"tp_init_short_fail:{symbol}", f"[TP-PLACE-INIT-SHORT] {symbol} tp={tp_price:.6f} ok=False", 30)
             except Exception:
                 tp_oid = None
-            actual_cost = qty * get_last_price(symbol)
+            actual_cost = qty * price_now
             log(f"🟢 SHORT aperto per {symbol}. Investito effettivo: {actual_cost:.2f} USDT")
 
             # Calcolo ATR, SL, TP per SHORT
-            df = fetch_history(symbol)
-            if df is None or "Close" not in df.columns:
-                log(f"❌ Dati storici mancanti per {symbol}")
-                continue
-            atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
-            last = df.iloc[-1]
-            atr_val = last["atr"] if "atr" in last else atr.iloc[-1]
-            atr_ratio = atr_val / get_last_price(symbol) if get_last_price(symbol) > 0 else 0
+            atr_ratio = atr_val / price_now if price_now > 0 else 0
             tp_factor = min(TP_MAX, max(TP_MIN, TP_FACTOR + atr_ratio * 5))
             sl_factor = min(SL_MAX, max(SL_MIN, SL_FACTOR + atr_ratio * 3))
-            tp = get_last_price(symbol) - (atr_val * tp_factor)  # PATCH: TP SOTTO ENTRY
-            sl = get_last_price(symbol) + (atr_val * sl_factor)  # PATCH: SL SOPRA ENTRY
+            
+            tp = price_now - (atr_val * tp_factor)  # TP sotto l’entry (short)
+            sl = price_now + (atr_val * sl_factor)  # SL sopra l’entry
 
             # >>> PIAZZA SUBITO LO STOP LOSS CONDITIONAL (reduceOnly) ALL'APERTURA (SHORT)
             sl_order_id = None
@@ -1832,10 +1820,10 @@ while True:
             except Exception as e:
                 tlog(f"trailing_init_exc:{symbol}", f"[TRAILING-INIT-EXC-SHORT] {symbol} exc: {e}", 300)
 
-            log(f"[ENTRY-DETAIL] {symbol} | Entry: {get_last_price(symbol):.4f} | SL: {sl:.4f} | TP: {tp:.4f} | ATR: {atr_val:.4f}")
-
+            log(f"[ENTRY-DETAIL] {symbol} | Entry: {price_now:.4f} | SL: {sl:.4f} | TP: {tp:.4f} | ATR: {atr_val:.4f}")
+            
             position_data[symbol] = {
-                "entry_price": get_last_price(symbol),
+                "entry_price": price_now,
                 "tp": tp,
                 "tp_order_id": tp_oid if 'tp_oid' in locals() else None,
                 "sl_order_id": sl_order_id,
@@ -1844,10 +1832,10 @@ while True:
                 "qty": qty,
                 "entry_time": time.time(),
                 "trailing_active": False,
-                "p_min": get_last_price(symbol)  # PATCH: p_min per trailing SHORT
+                "p_min": price_now
             }
             open_positions.add(symbol)
-            notify_telegram(f"🟢📉 SHORT aperto per {symbol}\nPrezzo: {get_last_price(symbol):.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f} USDT\nSL: {sl:.4f}\nTP: {tp:.4f}")
+            notify_telegram(f"🟢📉 SHORT aperto per {symbol}\nPrezzo: {price_now:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f} USDT\nSL: {sl:.4f}\nTP: {tp:.4f}")
             time.sleep(3)
 
         # 🔴 USCITA SHORT (EXIT) - INSERISCI QUI
