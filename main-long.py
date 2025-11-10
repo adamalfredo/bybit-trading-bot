@@ -65,7 +65,7 @@ FLOOR_TRIGGER_BY = "MarkPrice"     # usa Mark per coerenza con SL
 
 # >>> PATCH: parametri breakeven lock (LONG)
 BREAKEVEN_LOCK_PCT = 0.01   # attiva BE al +1% di prezzo (~+10% PnL con leva 10x)
-BREAKEVEN_BUFFER   = 0.0015  # stop a BE + 0.05% per evitare micro-slippage
+BREAKEVEN_BUFFER   = 0.0015  # stop a BE + 0.15% per evitare micro-slippage
 
 ENABLE_TP1 = False       # abilita TP parziale a 1R
 TP1_R_MULT = 1.0        # target TP1 a 1R
