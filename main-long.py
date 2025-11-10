@@ -23,7 +23,7 @@ BYBIT_BASE_URL = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
 # --- Sizing per trade (notional) ---
-DEFAULT_LEVERAGE = int(os.getenv("BYBIT_LEVERAGE", "15"))          # leva usata sul conto (Cross/Isolated)
+DEFAULT_LEVERAGE = 10          # leva usata sul conto (Cross/Isolated)
 MARGIN_USE_PCT = float(os.getenv("MARGIN_USE_PCT", "0.35"))         # quota saldo USDT da impegnare come margine max (50%)
 TARGET_NOTIONAL_PER_TRADE = float(os.getenv("TARGET_NOTIONAL_PER_TRADE", "200"))  # obiettivo notional per trade (USDT)
 
@@ -1133,8 +1133,8 @@ def analyze_asset(symbol: str):
         return None, None, None
 
     if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_low(symbol):
-        # per LONG puoi anche usare un filtro "breakout 6h al rialzo" se lo implementi
-        pass
+        if LOG_DEBUG_STRATEGY:
+            log(f"[BREAKOUT-FILTER][{symbol}] Non in breakout 6h (non blocco, continuo analisi).")
 
     try:
         is_volatile = symbol in VOLATILE_ASSETS
@@ -1208,7 +1208,7 @@ def analyze_asset(symbol: str):
             r = abs(price - entry_price) / (entry_price * INITIAL_STOP_LOSS_PCT)
             holding_min = (time.time() - entry_time) / 60
             # LONG: esci se perdita ≥0.5R (price < entry) oppure holding > 60 min
-            return (price < entry_price and r > 0.5) or holding_min > 60
+            return (price > entry_price and r > 0.5) or holding_min > 60
         if cond_exit1 and can_exit(symbol):
             return "exit", "Breakdown BB + RSI (bearish)", price
 

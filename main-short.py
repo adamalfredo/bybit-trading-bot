@@ -23,7 +23,7 @@ BYBIT_BASE_URL = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
 # --- Sizing per trade (notional) ---
-DEFAULT_LEVERAGE = int(os.getenv("BYBIT_LEVERAGE", "15"))          # leva usata sul conto (Cross/Isolated)
+DEFAULT_LEVERAGE = 10          # leva usata sul conto (Cross/Isolated)
 MARGIN_USE_PCT = float(os.getenv("MARGIN_USE_PCT", "0.35"))         # quota saldo USDT da impegnare come margine max (50%)
 TARGET_NOTIONAL_PER_TRADE = float(os.getenv("TARGET_NOTIONAL_PER_TRADE", "200"))  # obiettivo notional per trade (USDT)
 
@@ -92,6 +92,8 @@ LOG_DEBUG_SYNC       = os.getenv("LOG_DEBUG_SYNC", "0") == "1"
 LOG_DEBUG_STRATEGY   = os.getenv("LOG_DEBUG_STRATEGY", "0") == "1"
 LOG_DEBUG_TRAILING   = os.getenv("LOG_DEBUG_TRAILING", "0") == "1"
 LOG_DEBUG_PORTFOLIO  = os.getenv("LOG_DEBUG_PORTFOLIO", "0") == "1"
+# Large-cap con minQty elevata: abilita auto-bump del notional al minimo (come nel LONG)
+LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 
 # --- BLACKLIST STABLECOIN ---
 STABLECOIN_BLACKLIST = [
@@ -1133,8 +1135,7 @@ def analyze_asset(symbol: str):
     
     if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_low(symbol):
         if LOG_DEBUG_STRATEGY:
-            log(f"[BREAKOUT-FILTER][{symbol}] Non in breakout 6h, salto analisi.")
-        return None, None, None
+            log(f"[BREAKOUT-FILTER][{symbol}] Non in breakout 6h (non blocco, continuo analisi).")
         
     try:
         is_volatile = symbol in VOLATILE_ASSETS
@@ -1840,11 +1841,15 @@ while True:
             price_now_chk = get_last_price(symbol) or 0.0
             min_notional = max(min_order_amt, (min_qty or 0.0) * price_now_chk)
             if order_amount < min_notional:
-                tlog(f"min_notional:{symbol}", f"❌ Notional richiesto {order_amount:.2f} < minimo {min_notional:.2f} per {symbol} (min_qty={min_qty}, price={price_now_chk})", 300)
-                if not low_balance_alerted:
-                    # notify_telegram(f"❗️ Saldo/budget insufficiente per short su {symbol}: richiesti ≥ {min_notional:.2f} USDT.")
-                    low_balance_alerted = True
-                continue
+                bump = min_notional * 1.01  # +1% cuscinetto
+                max_by_margin = max_notional_by_margin
+                if symbol in LARGE_CAPS and max_by_margin >= bump:
+                    old = order_amount
+                    order_amount = min(bump, max_by_margin, 1000.0)
+                    log(f"[BUMP-NOTIONAL][{symbol}] alzato notional da {old:.2f} a {order_amount:.2f} per rispettare min_qty/min_notional")
+                else:
+                    tlog(f"min_notional:{symbol}", f"❌ Notional richiesto {order_amount:.2f} < minimo {min_notional:.2f} per {symbol} (min_qty={min_qty}, price={price_now_chk})", 300)
+                    continue
             else:
                 low_balance_alerted = False
 
