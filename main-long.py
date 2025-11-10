@@ -78,13 +78,21 @@ ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
 # --- MTF entry: segnali su 15m, trend su 4h/1h ---
 USE_MTF_ENTRY = True
-ENTRY_ADX_VOLATILE = 25   # soglia ADX più bassa su 15m per non arrivare tardi
-ENTRY_ADX_STABLE = 23
+ENTRY_ADX_VOLATILE = 22   # soglia ADX più bassa su 15m per non arrivare tardi
+ENTRY_ADX_STABLE = 20
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
 ASSETS = []
 LESS_VOLATILE_ASSETS = []
 VOLATILE_ASSETS = []
 LIQUIDITY_MIN_VOLUME = 1_000_000  # Soglia minima volume 24h USDT (consigliato)
+# --- SYNC POSIZIONI APERTE DA WALLET ALL'AVVIO ---
+open_positions = set()
+position_data = {}
+last_exit_time = {}
+recent_losses = {}          # conteggio loss consecutivi per simbolo
+last_entry_side = {}        # "LONG" o "SHORT"
+MAX_CONSEC_LOSSES = 2       # dopo 2 loss consecutivi blocca nuovi ingressi
+FORCED_WAIT_MIN = 90        # attesa minima (minuti) se il contesto resta sfavorevole
 # ---- Logging flags (accensione selettiva via env/Variables di Railway) ----
 LOG_DEBUG_ASSETS     = os.getenv("LOG_DEBUG_ASSETS", "0") == "1"
 LOG_DEBUG_DECIMALS   = os.getenv("LOG_DEBUG_DECIMALS", "0") == "1"
@@ -127,7 +135,7 @@ def is_trending_down(symbol: str, tf: str = "240"):
             return False
         ema200 = EMAIndicator(close=df["Close"], window=200).ema_indicator()
         # Downtrend se EMA200 decrescente e prezzo sotto EMA200
-        return df["Close"].iloc[-1] < ema200.iloc[-1] and ema200.iloc[-1] < ema200.iloc[-3]
+        return df["Close"].iloc[-1] < ema200.iloc[-1] and ema200.iloc[-1] <= ema200.iloc[-2]
     except Exception:
         return False
 
@@ -157,7 +165,7 @@ def is_trending_down_1h(symbol: str, tf: str = "60"):
             return False
         ema100 = EMAIndicator(close=df["Close"], window=100).ema_indicator()
         # Downtrend se EMA100 decrescente e prezzo sotto EMA100
-        return df["Close"].iloc[-1] < ema100.iloc[-1] and ema100.iloc[-1] < ema100.iloc[-3]
+        return df["Close"].iloc[-1] < ema100.iloc[-1] and ema100.iloc[-1] <= ema100.iloc[-2]
     except Exception:
         return False
 
@@ -179,7 +187,7 @@ def is_trending_up(symbol: str, tf: str = "240"):
         if len(df) < 200:
             return False
         ema200 = EMAIndicator(close=df["Close"], window=200).ema_indicator()
-        return df["Close"].iloc[-1] > ema200.iloc[-1] and ema200.iloc[-1] > ema200.iloc[-3]
+        return df["Close"].iloc[-1] > ema200.iloc[-1] and ema200.iloc[-1] >= ema200.iloc[-2]
     except Exception:
         return False
 
@@ -201,7 +209,7 @@ def is_trending_up_1h(symbol: str, tf: str = "60"):
         if len(df) < 100:
             return False
         ema100 = EMAIndicator(close=df["Close"], window=100).ema_indicator()
-        return df["Close"].iloc[-1] > ema100.iloc[-1] and ema100.iloc[-1] > ema100.iloc[-3]
+        return df["Close"].iloc[-1] > ema100.iloc[-1] and ema100.iloc[-1] >= ema100.iloc[-2]
     except Exception:
         return False
 
@@ -1121,6 +1129,19 @@ def is_symbol_linear(symbol):
     except Exception:
         return False
     
+def record_exit(symbol: str, entry_price: float, exit_price: float, side: str):
+    # Aggiorna cooldown e contatore di loss
+    last_exit_time[symbol] = time.time()
+    if side == "LONG":
+        pnl_pct = ((exit_price - entry_price) / entry_price) * 100.0
+    else:  # SHORT
+        pnl_pct = ((entry_price - exit_price) / entry_price) * 100.0
+    if pnl_pct < 0:
+        recent_losses[symbol] = recent_losses.get(symbol, 0) + 1
+    else:
+        recent_losses[symbol] = 0
+    last_entry_side[symbol] = side
+    
 def analyze_asset(symbol: str):
     # >>> PATCH: Filtro trend più rigido
     up_4h = is_trending_up(symbol, "240")
@@ -1172,29 +1193,44 @@ def analyze_asset(symbol: str):
         adx_threshold = (ENTRY_ADX_VOLATILE if is_volatile else ENTRY_ADX_STABLE)
 
         last = df.iloc[-1]
+        prev = df.iloc[-2]
         price = float(last["Close"])
         tf_tag = f"({tf_minutes}m)"
 
-        # --- ENTRY LONG: condizioni rialziste (CONFLUENZA ≥2/3) ---
+        # --- ENTRY LONG: evento + confluenza ---
         entry_strategies = []
-
-        ema_bullish = last["ema20"] > last["ema50"]
-        if ema_bullish:
-            entry_strategies.append(f"EMA Bullish {tf_tag}")
-
-        macd_bullish = last["macd"] > last["macd_signal"]
-        if macd_bullish:
-            entry_strategies.append(f"MACD Bullish {tf_tag}")
-
-        rsi_bullish = last["rsi"] > 55
-        if rsi_bullish:
-            entry_strategies.append(f"RSI Bullish {tf_tag}")
-
-        # Entry solo se ≥2 condizioni e ADX sopra soglia
-        if [ema_bullish, macd_bullish, rsi_bullish].count(True) >= 2 and last["adx"] > adx_threshold:
+        
+        # EVENTI (serve che almeno uno di questi scatti ora)
+        ema_bullish_cross = (prev["ema20"] <= prev["ema50"]) and (last["ema20"] > last["ema50"])
+        macd_bullish_cross = (prev["macd"] <= prev["macd_signal"]) and (last["macd"] > last["macd_signal"])
+        rsi_break = (prev["rsi"] <= 55) and (last["rsi"] > 55)
+        
+        # STATI (per la confluenza ≥2)
+        ema_state = last["ema20"] > last["ema50"]
+        macd_state = last["macd"] > last["macd_signal"]
+        rsi_state = last["rsi"] > 55
+        
+        event_triggered = ema_bullish_cross or macd_bullish_cross or rsi_break
+        
+        # Guardrail: troppi loss? se prezzo < EMA50 e non sono passati FORCED_WAIT_MIN → blocca
+        if recent_losses.get(symbol, 0) >= MAX_CONSEC_LOSSES:
+            wait_min = (time.time() - last_exit_time.get(symbol, 0)) / 60
+            if price < last["ema50"] and wait_min < FORCED_WAIT_MIN:
+                if LOG_DEBUG_STRATEGY:
+                    tlog(f"loss_guard:{symbol}", f"[LOSS-GUARD] Blocco LONG {symbol} (loss={recent_losses.get(symbol)}) sotto EMA50, wait {wait_min:.1f}m", 300)
+                return None, None, None
+        
+        adx_relaxed = adx_threshold  # già abbassato globalmente
+        if (([ema_state, macd_state, rsi_state].count(True) >= 2) or event_triggered) and last["adx"] > adx_relaxed:
+            if ema_state:
+                entry_strategies.append(f"EMA Bullish {tf_tag}")
+            if macd_state:
+                entry_strategies.append(f"MACD Bullish {tf_tag}")
+            if rsi_state:
+                entry_strategies.append(f"RSI Bullish {tf_tag}")
             entry_strategies.append("ADX Trend")
             if LOG_DEBUG_STRATEGY:
-                log(f"[STRATEGY][{symbol}] Segnale ENTRY LONG: {entry_strategies}")
+                log(f"[ENTRY-LONG][{symbol}] EVENTO → {entry_strategies}")
             return "entry", ", ".join(entry_strategies), price
 
         # --- EXIT LONG: valido sempre (anche per volatili) ---
@@ -1239,11 +1275,6 @@ log("🔄 Avvio sistema di monitoraggio segnali reali")
 notify_telegram("🤖 BOT [LONG] AVVIATO - In ascolto per segnali di ingresso/uscita")
 
 TEST_MODE = False  # Acquisti e vendite normali abilitati
-
-# --- SYNC POSIZIONI APERTE DA WALLET ALL'AVVIO ---
-open_positions = set()
-position_data = {}
-last_exit_time = {}
 
 def sync_positions_from_wallet():
     log("[SYNC] Avvio scansione posizioni LONG DAL CONTO (tutti i simboli linear)...")
@@ -1874,6 +1905,7 @@ while True:
                 exit_value = current_price * qty
                 pnl = ((current_price - entry_price) / entry_price) * 100.0
                 notify_telegram(f"✅ Exit LONG {symbol} a {current_price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}%")
+                record_exit(symbol, entry_price, current_price, "LONG")
                 log_trade_to_google(symbol, entry_price, current_price, pnl, strategy, "Exit Signal",
                                     usdt_entry=entry_cost, usdt_exit=exit_value,
                                     holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
@@ -1892,6 +1924,10 @@ while True:
         if saldo is None or saldo < min_qty:
             tlog(f"ext_close:{symbol}", f"[CLEANUP][LONG] {symbol} chiusa lato exchange (qty={saldo}). Cancello TP/SL.", 60)
             open_positions.discard(symbol)
+            entry = position_data.get(symbol, {})
+            entry_price = entry.get("entry_price", get_last_price(symbol) or 0.0)
+            exit_price = get_last_price(symbol) or 0.0
+            record_exit(symbol, entry_price, exit_price, "LONG")
             position_data.pop(symbol, None)
             cancel_all_orders(symbol)
     
