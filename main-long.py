@@ -127,7 +127,7 @@ def is_trending_down(symbol: str, tf: str = "240"):
             return False
         ema200 = EMAIndicator(close=df["Close"], window=200).ema_indicator()
         # Downtrend se EMA200 decrescente e prezzo sotto EMA200
-        return df["Close"].iloc[-1] < ema200.iloc[-1] and ema200.iloc[-1] < ema200.iloc[-10]
+        return df["Close"].iloc[-1] < ema200.iloc[-1] and ema200.iloc[-1] < ema200.iloc[-3]
     except Exception:
         return False
 
@@ -157,7 +157,7 @@ def is_trending_down_1h(symbol: str, tf: str = "60"):
             return False
         ema100 = EMAIndicator(close=df["Close"], window=100).ema_indicator()
         # Downtrend se EMA100 decrescente e prezzo sotto EMA100
-        return df["Close"].iloc[-1] < ema100.iloc[-1] and ema100.iloc[-1] < ema100.iloc[-10]
+        return df["Close"].iloc[-1] < ema100.iloc[-1] and ema100.iloc[-1] < ema100.iloc[-3]
     except Exception:
         return False
 
@@ -179,7 +179,7 @@ def is_trending_up(symbol: str, tf: str = "240"):
         if len(df) < 200:
             return False
         ema200 = EMAIndicator(close=df["Close"], window=200).ema_indicator()
-        return df["Close"].iloc[-1] > ema200.iloc[-1] and ema200.iloc[-1] > ema200.iloc[-10]
+        return df["Close"].iloc[-1] > ema200.iloc[-1] and ema200.iloc[-1] > ema200.iloc[-3]
     except Exception:
         return False
 
@@ -201,7 +201,7 @@ def is_trending_up_1h(symbol: str, tf: str = "60"):
         if len(df) < 100:
             return False
         ema100 = EMAIndicator(close=df["Close"], window=100).ema_indicator()
-        return df["Close"].iloc[-1] > ema100.iloc[-1] and ema100.iloc[-1] > ema100.iloc[-10]
+        return df["Close"].iloc[-1] > ema100.iloc[-1] and ema100.iloc[-1] > ema100.iloc[-3]
     except Exception:
         return False
 
@@ -1199,17 +1199,17 @@ def analyze_asset(symbol: str):
 
         # --- EXIT LONG: valido sempre (anche per volatili) ---
         cond_exit1 = last["Close"] < last["bb_lower"] and last["rsi"] < 45
-        def can_exit(symbol):
+        def can_exit(symbol, current_price):
             entry = position_data.get(symbol, {})
             entry_price = entry.get("entry_price")
             entry_time = entry.get("entry_time")
             if not entry_price or not entry_time:
                 return True
-            r = abs(price - entry_price) / (entry_price * INITIAL_STOP_LOSS_PCT)
+            r = abs(current_price - entry_price) / (entry_price * INITIAL_STOP_LOSS_PCT)
             holding_min = (time.time() - entry_time) / 60
-            # LONG: esci se perdita ≥0.5R (price < entry) oppure holding > 60 min
-            return (price > entry_price and r > 0.5) or holding_min > 60
-        if cond_exit1 and can_exit(symbol):
+            # LONG: esci su segnale solo se in profitto ≥0.5R oppure dopo 60 min
+            return (current_price > entry_price and r > 0.5) or holding_min > 60
+        if cond_exit1 and can_exit(symbol, price):
             return "exit", "Breakdown BB + RSI (bearish)", price
 
         exit_1h = False
@@ -1227,7 +1227,7 @@ def analyze_asset(symbol: str):
         except Exception:
             exit_1h = False
 
-        if last["macd"] < last["macd_signal"] and last["adx"] > adx_threshold and exit_1h and can_exit(symbol):
+        if last["macd"] < last["macd_signal"] and last["adx"] > adx_threshold and exit_1h and can_exit(symbol, price):
             return "exit", "MACD bearish + ADX", price
         
         return None, None, None

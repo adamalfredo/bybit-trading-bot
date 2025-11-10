@@ -128,7 +128,7 @@ def is_trending_down(symbol: str, tf: str = "240"):
             return False
         ema200 = EMAIndicator(close=df["Close"], window=200).ema_indicator()
         # Downtrend se EMA200 decrescente e prezzo sotto EMA200
-        return df["Close"].iloc[-1] < ema200.iloc[-1] and ema200.iloc[-1] < ema200.iloc[-10]
+        return df["Close"].iloc[-1] < ema200.iloc[-1] and ema200.iloc[-1] < ema200.iloc[-3]
     except Exception:
         return False
 
@@ -158,7 +158,7 @@ def is_trending_down_1h(symbol: str, tf: str = "60"):
             return False
         ema100 = EMAIndicator(close=df["Close"], window=100).ema_indicator()
         # Downtrend se EMA100 decrescente e prezzo sotto EMA100
-        return df["Close"].iloc[-1] < ema100.iloc[-1] and ema100.iloc[-1] < ema100.iloc[-10]
+        return df["Close"].iloc[-1] < ema100.iloc[-1] and ema100.iloc[-1] < ema100.iloc[-3]
     except Exception:
         return False
 
@@ -180,7 +180,7 @@ def is_trending_up(symbol: str, tf: str = "240"):
         if len(df) < 200:
             return False
         ema200 = EMAIndicator(close=df["Close"], window=200).ema_indicator()
-        return df["Close"].iloc[-1] > ema200.iloc[-1] and ema200.iloc[-1] > ema200.iloc[-10]
+        return df["Close"].iloc[-1] > ema200.iloc[-1] and ema200.iloc[-1] > ema200.iloc[-3]
     except Exception:
         return False
 
@@ -202,7 +202,7 @@ def is_trending_up_1h(symbol: str, tf: str = "60"):
         if len(df) < 100:
             return False
         ema100 = EMAIndicator(close=df["Close"], window=100).ema_indicator()
-        return df["Close"].iloc[-1] > ema100.iloc[-1] and ema100.iloc[-1] > ema100.iloc[-10]
+        return df["Close"].iloc[-1] > ema100.iloc[-1] and ema100.iloc[-1] > ema100.iloc[-3]
     except Exception:
         return False
 
