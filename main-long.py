@@ -1169,13 +1169,13 @@ def analyze_asset(symbol: str):
 
     if not trend_ok:
         if LOG_DEBUG_STRATEGY:
-            log(f"[TREND-FILTER][{symbol}] Trend non idoneo (mode={TREND_MODE}), skip.")
+            tlog(f"trend_long:{symbol}", f"[TREND-FILTER][{symbol}] Trend non idoneo (mode={TREND_MODE}), skip.", 600)
         return None, None, None
 
     # Non blocca: solo log informativo
     if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_low(symbol):
         if LOG_DEBUG_STRATEGY:
-            log(f"[BREAKOUT-FILTER][{symbol}] Non in breakout 6h (info).")
+            tlog(f"breakout_long:{symbol}", f"[BREAKOUT-FILTER][{symbol}] Non in breakout 6h (info).", 1800)
 
     try:
         is_volatile = symbol in VOLATILE_ASSETS
@@ -1234,9 +1234,11 @@ def analyze_asset(symbol: str):
         adx_needed = max(0.0, adx_threshold - (ADX_RELAX_EVENT if event_triggered else 0.0))
 
         if LOG_DEBUG_STRATEGY:
-            tlog(f"entry_chk_long:{symbol}",
-                 f"[ENTRY-CHECK][LONG] conf={conf_count}/{MIN_CONFLUENCE} | ADX={last['adx']:.1f}>{adx_needed:.1f} | event={event_triggered} | tf={tf_tag}",
-                 60)
+            tlog(
+                f"entry_chk_long:{symbol}",
+                f"[ENTRY-CHECK][LONG] conf={conf_count}/{MIN_CONFLUENCE} | ADX={last['adx']:.1f}>{adx_needed:.1f} | event={event_triggered} | tf={tf_tag}",
+                300
+            )
 
         # Guardrail su loss recenti
         if recent_losses.get(symbol, 0) >= MAX_CONSEC_LOSSES:

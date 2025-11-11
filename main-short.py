@@ -1169,13 +1169,13 @@ def analyze_asset(symbol: str):
 
     if not trend_ok:
         if LOG_DEBUG_STRATEGY:
-            log(f"[TREND-FILTER][{symbol}] Trend SHORT non idoneo (mode={TREND_MODE})")
+            tlog(f"trend_short:{symbol}", f"[TREND-FILTER][{symbol}] SHORT non idoneo (mode={TREND_MODE})", 600)
         return None, None, None
 
     # Breakout (solo log informativo, non blocca)
     if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_low(symbol):
         if LOG_DEBUG_STRATEGY:
-            log(f"[BREAKOUT-FILTER][{symbol}] Non in breakdown 6h (info)")
+            tlog(f"breakout_short:{symbol}", f"[BREAKOUT-FILTER][{symbol}] Non in breakdown 6h (info)", 1800)
 
     try:
         is_volatile = symbol in VOLATILE_ASSETS
@@ -1234,9 +1234,11 @@ def analyze_asset(symbol: str):
         adx_needed = max(0.0, adx_threshold - (ADX_RELAX_EVENT if event_triggered else 0.0))
 
         if LOG_DEBUG_STRATEGY:
-            tlog(f"entry_chk_short:{symbol}",
-                 f"[ENTRY-CHECK][SHORT] conf={conf_count}/{MIN_CONFLUENCE} | ADX={last['adx']:.1f}>{adx_needed:.1f} | event={event_triggered} | tf={tf_tag}",
-                 60)
+            tlog(
+                f"entry_chk_short:{symbol}",
+                f"[ENTRY-CHECK][SHORT] conf={conf_count}/{MIN_CONFLUENCE} | ADX={last['adx']:.1f}>{adx_needed:.1f} | event={event_triggered} | tf={tf_tag}",
+                300
+            )
 
         # Guardrail loss consecutivi (SHORT): se troppe perdite recenti e prezzo sopra ema50 → aspetta
         if recent_losses.get(symbol, 0) >= MAX_CONSEC_LOSSES:
@@ -1783,7 +1785,8 @@ while True:
     tot_invested = volatile_invested + stable_invested
     perc_volatile = (volatile_invested / portfolio_value * 100) if portfolio_value > 0 else 0
     perc_stable = (stable_invested / portfolio_value * 100) if portfolio_value > 0 else 0
-    tlog("portfolio", f"[PORTAFOGLIO] Totale: {portfolio_value:.2f} USDT | Volatili: {volatile_invested:.2f} ({perc_volatile:.1f}%) | Meno volatili: {stable_invested:.2f} ({perc_stable:.1f}%) | USDT: {usdt_balance:.2f}", 900)
+    if LOG_DEBUG_PORTFOLIO:
+        tlog("portfolio", f"[PORTAFOGLIO] Totale: {portfolio_value:.2f} USDT | Volatili: {volatile_invested:.2f} ({perc_volatile:.1f}%) | Meno volatili: {stable_invested:.2f} ({perc_stable:.1f}%) | USDT: {usdt_balance:.2f}", 900)
 
     # --- Avviso saldo basso: invia solo una volta finché non torna sopra soglia ---
     # low_balance_alerted ora è globale rispetto al ciclo
