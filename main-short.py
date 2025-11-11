@@ -24,8 +24,8 @@ BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
 # --- Sizing per trade (notional) ---
 DEFAULT_LEVERAGE = 10          # leva usata sul conto (Cross/Isolated)
-MARGIN_USE_PCT = float(os.getenv("MARGIN_USE_PCT", "0.35"))         # quota saldo USDT da impegnare come margine max (50%)
-TARGET_NOTIONAL_PER_TRADE = float(os.getenv("TARGET_NOTIONAL_PER_TRADE", "200"))  # obiettivo notional per trade (USDT)
+MARGIN_USE_PCT = 0.35
+TARGET_NOTIONAL_PER_TRADE = 200.0
 
 INTERVAL_MINUTES = 60  # era 15
 ATR_WINDOW = 14
@@ -100,6 +100,20 @@ LOG_DEBUG_SYNC       = os.getenv("LOG_DEBUG_SYNC", "0") == "1"
 LOG_DEBUG_STRATEGY   = os.getenv("LOG_DEBUG_STRATEGY", "0") == "1"
 LOG_DEBUG_TRAILING   = os.getenv("LOG_DEBUG_TRAILING", "0") == "1"
 LOG_DEBUG_PORTFOLIO  = os.getenv("LOG_DEBUG_PORTFOLIO", "0") == "1"
+# --- Loosening via env ---
+MIN_CONFLUENCE = 1
+TREND_MODE = "LOOSE_4H"
+ENTRY_TF_VOLATILE = 30
+ENTRY_TF_STABLE = 30
+ENTRY_ADX_VOLATILE = 22       # fisso
+ENTRY_ADX_STABLE = 20         # fisso
+ADX_RELAX_EVENT = 5.0
+RSI_SHORT_THRESHOLD = 48.0
+COOLDOWN_MINUTES = 60         # fisso
+MAX_CONSEC_LOSSES = 2         # fisso
+FORCED_WAIT_MIN = 90          # fisso
+LIQUIDITY_MIN_VOLUME = 1_000_000
+LINEAR_MIN_TURNOVER = 5_000_000
 # Large-cap con minQty elevata: abilita auto-bump del notional al minimo (come nel LONG)
 LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 
@@ -108,7 +122,6 @@ STABLECOIN_BLACKLIST = [
     "USDCUSDT", "USDEUSDT", "TUSDUSDT", "USDPUSDT", "BUSDUSDT", "FDUSDUSDT", "DAIUSDT", "EURUSDT", "USDTUSDT"
 ]
 EXCLUSION_LIST = ["FUSDT", "YBUSDT", "ZBTUSDT", "RECALLUSDT", "XPLUSDT", "BRETTUSDT"]
-LINEAR_MIN_TURNOVER = 5_000_000
 
 def is_trending_down(symbol: str, tf: str = "240"):
     """
@@ -1143,26 +1156,111 @@ def record_exit(symbol: str, entry_price: float, exit_price: float, side: str):
     last_entry_side[symbol] = side
 
 def analyze_asset(symbol: str):
-    # >>> PATCH: Filtro trend più rigido
+    # Filtro trend configurabile (SHORT)
     down_4h = is_trending_down(symbol, "240")
     down_1h = is_trending_down_1h(symbol, "60")
-    
-    # SHORT solo se 4h E 1h sono entrambi in downtrend
-    if not (down_4h and down_1h):
+
+    if TREND_MODE == "STRICT":
+        trend_ok = down_4h and down_1h
+    elif TREND_MODE == "LOOSE_4H":
+        trend_ok = down_4h
+    else:  # ANY
+        trend_ok = down_4h or down_1h
+
+    if not trend_ok:
         if LOG_DEBUG_STRATEGY:
-            log(f"[TREND-FILTER][{symbol}] Trend 4h+1h non concorde per SHORT, skip.")
+            log(f"[TREND-FILTER][{symbol}] Trend SHORT non idoneo (mode={TREND_MODE})")
         return None, None, None
-    
+
+    # Breakout (solo log informativo, non blocca)
     if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_low(symbol):
         if LOG_DEBUG_STRATEGY:
-            log(f"[BREAKOUT-FILTER][{symbol}] Non in breakout 6h (non blocco, continuo analisi).")
-        
+            log(f"[BREAKOUT-FILTER][{symbol}] Non in breakdown 6h (info)")
+
     try:
         is_volatile = symbol in VOLATILE_ASSETS
-        tf_minutes = 30 if (USE_MTF_ENTRY and is_volatile) else 60
-        df = fetch_history(symbol, interval=tf_minutes)
+        tf_minutes = ENTRY_TF_VOLATILE if (USE_MTF_ENTRY and is_volatile) else ENTRY_TF_STABLE
 
-        # PATCH: Funzione per rendere meno reattiva l'uscita
+        df = fetch_history(symbol, interval=tf_minutes)
+        if df is None or len(df) < 3:
+            if LOG_DEBUG_STRATEGY:
+                log(f"[ANALYZE][{symbol}] Dati insufficienti ({tf_minutes}m)")
+            return None, None, None
+
+        close = find_close_column(df)
+        if close is None:
+            log(f"[ANALYZE][{symbol}] Colonna Close assente")
+            return None, None, None
+
+        # Indicatori
+        bb = BollingerBands(close=close)
+        df["bb_upper"] = bb.bollinger_hband()
+        df["bb_lower"] = bb.bollinger_lband()
+        df["rsi"] = RSIIndicator(close=close).rsi()
+        df["ema20"] = EMAIndicator(close=close, window=20).ema_indicator()
+        df["ema50"] = EMAIndicator(close=close, window=50).ema_indicator()
+        df["ema200"] = EMAIndicator(close=close, window=200).ema_indicator()
+        df["sma20"] = SMAIndicator(close=close, window=20).sma_indicator()
+        df["sma50"] = SMAIndicator(close=close, window=50).sma_indicator()
+        macd = MACD(close=close)
+        df["macd"] = macd.macd()
+        df["macd_signal"] = macd.macd_signal()
+        df["adx"] = ADXIndicator(high=df["High"], low=df["Low"], close=close).adx()
+        atr = AverageTrueRange(high=df["High"], low=df["Low"], close=close, window=ATR_WINDOW)
+        df["atr"] = atr.average_true_range()
+
+        df.dropna(subset=["bb_upper","bb_lower","rsi","ema20","ema50","ema200","macd","macd_signal","adx","atr"], inplace=True)
+        if len(df) < 3:
+            return None, None, None
+
+        adx_threshold = ENTRY_ADX_VOLATILE if is_volatile else ENTRY_ADX_STABLE
+        last = df.iloc[-1]; prev = df.iloc[-2]
+        price = float(last["Close"])
+        tf_tag = f"({tf_minutes}m)"
+
+        # Eventi (trigger anticipato)
+        rsi_th = RSI_SHORT_THRESHOLD
+        ema_bearish_cross = (prev["ema20"] >= prev["ema50"]) and (last["ema20"] < last["ema50"])
+        macd_bearish_cross = (prev["macd"] >= prev["macd_signal"]) and (last["macd"] < last["macd_signal"])
+        rsi_break = (prev["rsi"] >= rsi_th) and (last["rsi"] < rsi_th)
+
+        # Stati
+        ema_state = last["ema20"] < last["ema50"]
+        macd_state = last["macd"] < last["macd_signal"]
+        rsi_state = last["rsi"] < rsi_th
+
+        event_triggered = ema_bearish_cross or macd_bearish_cross or rsi_break
+        conf_count = [ema_state, macd_state, rsi_state].count(True)
+        adx_needed = max(0.0, adx_threshold - (ADX_RELAX_EVENT if event_triggered else 0.0))
+
+        if LOG_DEBUG_STRATEGY:
+            tlog(f"entry_chk_short:{symbol}",
+                 f"[ENTRY-CHECK][SHORT] conf={conf_count}/{MIN_CONFLUENCE} | ADX={last['adx']:.1f}>{adx_needed:.1f} | event={event_triggered} | tf={tf_tag}",
+                 60)
+
+        # Guardrail loss consecutivi (SHORT): se troppe perdite recenti e prezzo sopra ema50 → aspetta
+        if recent_losses.get(symbol, 0) >= MAX_CONSEC_LOSSES:
+            wait_min = (time.time() - last_exit_time.get(symbol, 0)) / 60
+            if price > last["ema50"] and wait_min < FORCED_WAIT_MIN:
+                if LOG_DEBUG_STRATEGY:
+                    tlog(f"loss_guard_short:{symbol}",
+                         f"[LOSS-GUARD][SHORT] Blocco {symbol} (loss={recent_losses.get(symbol)}) sopra EMA50 wait={wait_min:.1f}m",
+                         300)
+                return None, None, None
+
+        # Segnale ingresso SHORT
+        if ((conf_count >= MIN_CONFLUENCE) or event_triggered) and float(last["adx"]) > adx_needed:
+            entry_strategies = []
+            if ema_state: entry_strategies.append(f"EMA Bearish {tf_tag}")
+            if macd_state: entry_strategies.append(f"MACD Bearish {tf_tag}")
+            if rsi_state: entry_strategies.append(f"RSI Bearish {tf_tag}")
+            entry_strategies.append("ADX Trend")
+            if LOG_DEBUG_STRATEGY:
+                log(f"[ENTRY-SHORT][{symbol}] EVENTO/CONFLUENZA → {entry_strategies}")
+            return "entry", ", ".join(entry_strategies), price
+
+        # Segnale uscita (chiudi SHORT se eccesso di compressione)
+        cond_exit1 = last["Close"] > last["bb_upper"] and last["rsi"] > 55
         def can_exit(symbol, current_price):
             entry = position_data.get(symbol, {})
             entry_price = entry.get("entry_price")
@@ -1171,91 +1269,12 @@ def analyze_asset(symbol: str):
                 return True
             r = abs(current_price - entry_price) / (entry_price * INITIAL_STOP_LOSS_PCT)
             holding_min = (time.time() - entry_time) / 60
-            # SHORT: esci solo se profitto > 0.5R o holding > 60min
-            return (current_price < entry_price and r > 0.5) or holding_min > 60
-        
-        if df is None or len(df) < 3:
-            log(f"[ANALYZE] Dati storici insufficienti per {symbol}")
-            return None, None, None
-        close = find_close_column(df)
-        if close is None:
-            log(f"[ANALYZE] Colonna close non trovata per {symbol}")
-            return None, None, None
+            # SHORT: se risalito sopra entry con >0.5R contro e poco tempo → chiudi
+            return (current_price > entry_price and r > 0.5) or holding_min > 60
 
-        bb = BollingerBands(close=close)
-        df["bb_upper"] = bb.bollinger_hband()
-        df["bb_lower"] = bb.bollinger_lband()
-        df["rsi"] = RSIIndicator(close=close).rsi()
-        df["sma20"] = SMAIndicator(close=close, window=20).sma_indicator()
-        df["sma50"] = SMAIndicator(close=close, window=50).sma_indicator()
-        df["ema20"] = EMAIndicator(close=close, window=20).ema_indicator()
-        df["ema50"] = EMAIndicator(close=close, window=50).ema_indicator()
-        df["ema200"] = EMAIndicator(close=close, window=200).ema_indicator()
-        macd = MACD(close=close)
-        df["macd"] = macd.macd()
-        df["macd_signal"] = macd.macd_signal()
-        df["adx"] = ADXIndicator(high=df["High"], low=df["Low"], close=close).adx()
-        atr = AverageTrueRange(high=df["High"], low=df["Low"], close=close, window=ATR_WINDOW)
-        df["atr"] = atr.average_true_range()
-
-        df.dropna(subset=[
-            "bb_upper", "bb_lower", "rsi", "sma20", "sma50", "ema20", "ema50", "ema200",
-            "macd", "macd_signal", "adx", "atr"
-        ], inplace=True)
-
-        if len(df) < 3:
-            log(f"[ANALYZE] Dati storici insufficienti dopo dropna per {symbol}")
-            return None, None, None
-
-        is_volatile = symbol in VOLATILE_ASSETS
-        adx_threshold = (ENTRY_ADX_VOLATILE if is_volatile else ENTRY_ADX_STABLE)
-
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        price = float(last["Close"])
-        tf_tag = f"({tf_minutes}m)"
-
-        # --- ENTRY SHORT: evento + confluenza ---
-        entry_strategies = []
-        
-        # EVENTI (serve che almeno uno scatti ora)
-        ema_bearish_cross = (prev["ema20"] >= prev["ema50"]) and (last["ema20"] < last["ema50"])
-        macd_bearish_cross = (prev["macd"] >= prev["macd_signal"]) and (last["macd"] < last["macd_signal"])
-        rsi_break = (prev["rsi"] >= 45) and (last["rsi"] < 45)
-        
-        # STATI (per la confluenza ≥2)
-        ema_state = last["ema20"] < last["ema50"]
-        macd_state = last["macd"] < last["macd_signal"]
-        rsi_state = last["rsi"] < 45
-        
-        event_triggered = ema_bearish_cross or macd_bearish_cross or rsi_break
-        
-        # Guardrail: troppi loss? se prezzo > EMA50 e non sono passati FORCED_WAIT_MIN → blocca
-        if recent_losses.get(symbol, 0) >= MAX_CONSEC_LOSSES:
-            wait_min = (time.time() - last_exit_time.get(symbol, 0)) / 60
-            if price > last["ema50"] and wait_min < FORCED_WAIT_MIN:
-                if LOG_DEBUG_STRATEGY:
-                    tlog(f"loss_guard:{symbol}", f"[LOSS-GUARD] Blocco SHORT {symbol} (loss={recent_losses.get(symbol)}) sopra EMA50, wait {wait_min:.1f}m", 300)
-                return None, None, None
-        
-        adx_relaxed = adx_threshold
-        if (([ema_state, macd_state, rsi_state].count(True) >= 2) or event_triggered) and last["adx"] > adx_relaxed:
-            if ema_state:
-                entry_strategies.append(f"EMA Bearish {tf_tag}")
-            if macd_state:
-                entry_strategies.append(f"MACD Bearish {tf_tag}")
-            if rsi_state:
-                entry_strategies.append(f"RSI Bearish {tf_tag}")
-            entry_strategies.append("ADX Trend")
-            if LOG_DEBUG_STRATEGY:
-                log(f"[ENTRY-SHORT][{symbol}] EVENTO → {entry_strategies}")
-            return "entry", ", ".join(entry_strategies), price
-
-        # --- EXIT SHORT: segnali bullish ---
-        cond_exit1 = last["Close"] > last["bb_upper"] and last["rsi"] > 60
         if cond_exit1 and can_exit(symbol, price):
-            return "exit", "Rimbalzo BB + RSI (bullish)", price
-        # PATCH 6: Conferma exit anche su 1h
+            return "exit", "Breakout BB + RSI (bullish)", price
+
         exit_1h = False
         try:
             df_1h = fetch_history(symbol, interval=60)
@@ -1265,17 +1284,17 @@ def analyze_asset(symbol: str):
                 df_1h["macd_signal"] = macd_1h.macd_signal()
                 df_1h["adx"] = ADXIndicator(high=df_1h["High"], low=df_1h["Low"], close=df_1h["Close"]).adx()
                 last_1h = df_1h.iloc[-1]
-                adx_threshold_1h = adx_threshold
-                if last_1h["macd"] > last_1h["macd_signal"] and last_1h["adx"] > adx_threshold_1h:
+                if last_1h["macd"] > last_1h["macd_signal"] and last_1h["adx"] > adx_threshold:
                     exit_1h = True
         except Exception:
             exit_1h = False
+
         if last["macd"] > last["macd_signal"] and last["adx"] > adx_threshold and exit_1h and can_exit(symbol, price):
             return "exit", "MACD bullish + ADX", price
 
         return None, None, None
     except Exception as e:
-        log(f"Errore analisi {symbol}: {e}")
+        log(f"Errore analisi SHORT {symbol}: {e}")
         return None, None, None
 
 log("🔄 Avvio sistema di monitoraggio segnali reali")
