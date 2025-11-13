@@ -73,7 +73,7 @@ TP1_CLOSE_PCT = 0.5     # chiudi il 50% a TP1
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
 COOLDOWN_MINUTES = 60
 cooldown = {}
-MAX_LOSS_PCT = -2.5  # perdita massima accettata sul LONG (chiusura forzata se PnL < -2.5%)
+MAX_LOSS_CAP_PCT = 0.03  # CAP perdita sul prezzo: 3% sotto l'entry (SL non oltre questo)
 ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
 # --- MTF entry: segnali su 15m, trend su 4h/1h ---
@@ -1669,23 +1669,28 @@ while True:
             sl_factor = min(SL_MAX, max(SL_MIN, SL_FACTOR + atr_ratio * 3))
             
             tp = price_now + (atr_val * tp_factor)
-            sl = price_now - (atr_val * sl_factor)
+            sl_atr = price_now - (atr_val * sl_factor)
+            # CAP di perdita: non permettere SL oltre MAX_LOSS_CAP_PCT
+            sl_cap = price_now * (1.0 - MAX_LOSS_CAP_PCT)
+            final_sl = max(sl_atr, sl_cap)  # LONG: più vicino all'entry = max tra due prezzi sotto l'entry
             
             # >>> PIAZZA SUBITO LO STOP LOSS CONDITIONAL (reduceOnly) ALL'APERTURA
             sl_order_id = None
             try:
                 qty_for_sl = qty
                 # prima prova con MarkPrice (più robusto), fallback su LastPrice se retCode==10001
-                ok_sl = place_conditional_sl_long(symbol, sl, qty_for_sl, trigger_by="MarkPrice")
+                ok_sl = place_conditional_sl_long(symbol, final_sl, qty_for_sl, trigger_by="MarkPrice")
                 if ok_sl:
                     sl_order_id = "placed_mark"
                 else:
                     # retry con LastPrice
-                    ok_sl2 = place_conditional_sl_long(symbol, sl, qty_for_sl, trigger_by="LastPrice")
+                    ok_sl2 = place_conditional_sl_long(symbol, final_sl, qty_for_sl, trigger_by="LastPrice")
                     if ok_sl2:
                         sl_order_id = "placed_last"
                     else:
-                        tlog(f"sl_init_fail:{symbol}", f"[SL-INIT-FAIL] {symbol} sl={sl:.6f} qty={qty_for_sl} (Mark/Last failed)", 30)
+                        tlog(f"sl_init_fail:{symbol}", f"[SL-INIT-FAIL] {symbol} sl={final_sl:.6f} qty={qty_for_sl} (Mark/Last failed)", 30)
+                # Backup: imposta anche lo stopLoss della POSIZIONE (lato exchange)
+                set_position_stoploss_long(symbol, final_sl)
             except Exception as e:
                 tlog(f"sl_init_exc:{symbol}", f"[SL-INIT-EXC] {symbol} exc: {e}", 300)
 
@@ -1699,14 +1704,14 @@ while True:
             except Exception as e:
                 tlog(f"trailing_init_exc:{symbol}", f"[TRAILING-INIT-EXC-LONG] {symbol} exc: {e}", 300)
 
-            log(f"[ENTRY-DETAIL] {symbol} | Entry: {price_now:.4f} | SL: {sl:.4f} | TP: {tp:.4f} | ATR: {atr_val:.4f}")
+            log(f"[ENTRY-DETAIL] {symbol} | Entry: {price_now:.4f} | SL: {final_sl:.4f} | TP: {tp:.4f} | ATR: {atr_val:.4f}")
 
             position_data[symbol] = {
                 "entry_price": price_now,
                 "tp": tp,
                 "tp_order_id": tp_oid if 'tp_oid' in locals() else None,
                 "sl_order_id": sl_order_id,
-                "sl": sl,
+                "sl": final_sl,
                 "entry_cost": actual_cost,
                 "qty": qty,
                 "entry_time": time.time(),
