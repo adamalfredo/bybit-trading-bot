@@ -23,3 +23,13 @@ BREAKEVEN
 BREAKEVEN_LOCK_PCT = 0.01   # attiva BE al +1% di prezzo (~+10% PnL con leva 10x)
 BREAKEVEN_BUFFER   = 0.0005 # stop a BE + 0.05% per evitare micro-slippage
 ```
+
+
+al momento commentato log in analyze assets: 
+
+```python
+if not trend_ok:
+    if LOG_DEBUG_STRATEGY:
+        tlog(f"trend_short:{symbol}", f"[TREND-FILTER][{symbol}] SHORT non idoneo (mode={TREND_MODE})", 600)
+    return None, None, None
+```
