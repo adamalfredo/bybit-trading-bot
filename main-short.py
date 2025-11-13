@@ -1133,6 +1133,10 @@ def fetch_history(symbol: str, interval=INTERVAL_MINUTES, limit=400):
         }
         resp = requests.get(endpoint, params=params, timeout=10)
         data = resp.json()
+        if data.get("retCode") == 10006:
+            tlog(f"fetch_rl:{symbol}", f"[BYBIT] Rate limit su {symbol}, piccolo backoff...", 10)
+            time.sleep(1.2)
+            return None
         if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
             tlog(f"fetch_err:{symbol}", f"[BYBIT] Errore fetch_history {symbol}: {data}", 600)
             return None
@@ -1767,7 +1771,7 @@ while True:
                 "p_min": price_now
             }
             open_positions.add(symbol)
-            notify_telegram(f"🟢📉 SHORT aperto per {symbol}\nPrezzo: {price_now:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f} USDT\nSL: {sl:.4f}\nTP: {tp:.4f}")
+            notify_telegram(f"🟢📉 SHORT aperto per {symbol}\nPrezzo: {price_now:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f} USDT\nSL: {final_sl:.4f}\nTP: {tp:.4f}")
             time.sleep(3)
 
         # 🔴 USCITA SHORT (EXIT) - INSERISCI QUI

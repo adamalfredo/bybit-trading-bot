@@ -1127,6 +1127,10 @@ def fetch_history(symbol: str, interval=INTERVAL_MINUTES, limit=400):
         }
         resp = requests.get(endpoint, params=params, timeout=10)
         data = resp.json()
+        if data.get("retCode") == 10006:
+            tlog(f"fetch_rl:{symbol}", f"[BYBIT] Rate limit su {symbol}, piccolo backoff...", 10)
+            time.sleep(1.2)
+            return None
         if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
             log(f"[BYBIT] Errore fetch_history {symbol}: {data}")
             return None
@@ -1719,7 +1723,7 @@ while True:
                 "p_max": price_now
             }
             open_positions.add(symbol)
-            notify_telegram(f"🟢📈 LONG aperto {symbol}\nPrezzo: {price_now:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f}\nSL: {sl:.4f}\nTP: {tp:.4f}")
+            notify_telegram(f"🟢📈 LONG aperto {symbol}\nPrezzo: {price_now:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f}\nSL: {final_sl:.4f}\nTP: {tp:.4f}")
             time.sleep(3)
 
         # EXIT LONG (segnale di uscita strategico)
