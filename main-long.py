@@ -73,7 +73,7 @@ TP1_CLOSE_PCT = 0.5     # chiudi il 50% a TP1
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
 COOLDOWN_MINUTES = 60
 cooldown = {}
-MAX_LOSS_CAP_PCT = 0.03  # CAP perdita sul prezzo: 3% sotto l'entry (SL non oltre questo)
+MAX_LOSS_CAP_PCT = 0.02  # CAP perdita sul prezzo: 2% sotto l'entry (SL non oltre questo)
 ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
 # --- MTF entry: segnali su 15m, trend su 4h/1h ---
@@ -1382,12 +1382,13 @@ def sync_positions_from_wallet():
                 atr_val = price * 0.02
 
             tp = price + (atr_val * TP_FACTOR)
-            sl = price - (atr_val * SL_FACTOR)
-
+            sl_atr = entry_price - (atr_val * SL_FACTOR)      # usa entry_price come riferimento
+            sl_cap = entry_price * (1.0 - MAX_LOSS_CAP_PCT)   # cap 3% sotto entry
+            final_sl = max(sl_atr, sl_cap)
             position_data[symbol] = {
                 "entry_price": entry_price,
                 "tp": tp,
-                "sl": sl,
+                "sl": final_sl,
                 "entry_cost": entry_cost,
                 "qty": qty,
                 "entry_time": time.time(),
@@ -1395,7 +1396,10 @@ def sync_positions_from_wallet():
                 "p_max": price
             }
             trovate += 1
-            log(f"[SYNC] Posizione LONG trovata: {symbol} qty={qty} entry={entry_price:.4f} SL={sl:.4f} TP={tp:.4f}")
+            log(f"[SYNC] Posizione LONG trovata: {symbol} qty={qty} entry={entry_price:.4f} SL={final_sl:.4f} TP={tp:.4f}")
+            # Piazza subito stop di posizione + conditional (backup) col CAP
+            set_position_stoploss_long(symbol, final_sl)
+            place_conditional_sl_long(symbol, final_sl, qty, trigger_by="MarkPrice")
             # Marca come già in posizione per evitare nuovi entry
             open_positions.add(symbol)
 

@@ -72,7 +72,7 @@ FLOOR_TRIGGER_BY = "MarkPrice"     # usa Mark per coerenza con SL
 BREAKEVEN_LOCK_PCT = 0.01     # -1% di prezzo ≈ +10% PnL a 10x
 BREAKEVEN_BUFFER   = -0.0015  # buffer SOTTO l’entry (chiusura sempre ≥ BE)
 cooldown = {}
-MAX_LOSS_CAP_PCT = 0.03  # CAP perdita sul prezzo: 3% sopra l'entry (SL non oltre questo)
+MAX_LOSS_CAP_PCT = 0.02  # CAP perdita sul prezzo: 2% sopra l'entry (SL non oltre questo)
 ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
 # --- MTF entry: segnali su 15m, trend su 4h/1h ---
@@ -1393,12 +1393,13 @@ def sync_positions_from_wallet():
             else:
                 atr_val = price * 0.02
             tp = price - (atr_val * TP_FACTOR)
-            sl = price + (atr_val * SL_FACTOR)
-            
+            sl_atr = entry_price + (atr_val * SL_FACTOR)       # riferimento entry
+            sl_cap = entry_price * (1.0 + MAX_LOSS_CAP_PCT)    # cap 3% sopra entry
+            final_sl = min(sl_atr, sl_cap)
             position_data[symbol] = {
                 "entry_price": entry_price,
                 "tp": tp,
-                "sl": sl,
+                "sl": final_sl,
                 "entry_cost": entry_cost,
                 "qty": qty,
                 "entry_time": time.time(),
@@ -1406,7 +1407,9 @@ def sync_positions_from_wallet():
                 "p_min": price
             }
             trovate += 1
-            log(f"[SYNC] Posizione trovata: {symbol} qty={qty} entry={entry_price:.4f} SL={sl:.4f} TP={tp:.4f}")
+            log(f"[SYNC] Posizione trovata: {symbol} qty={qty} entry={entry_price:.4f} SL={final_sl:.4f} TP={tp:.4f}")
+            set_position_stoploss_short(symbol, final_sl)
+            place_conditional_sl_short(symbol, final_sl, qty, trigger_by="MarkPrice")
 
             # >>> PATCH: BE-LOCK immediato se già oltre soglia al riavvio (SHORT)
             try:

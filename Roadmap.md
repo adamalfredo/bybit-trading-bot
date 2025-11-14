@@ -33,3 +33,9 @@ if not trend_ok:
         tlog(f"trend_short:{symbol}", f"[TREND-FILTER][{symbol}] SHORT non idoneo (mode={TREND_MODE})", 600)
     return None, None, None
 ```
+
+Impostata perdita massima al 2% 
+
+```python
+MAX_LOSS_CAP_PCT = 0.02  # CAP perdita sul prezzo: 2% sotto l'entry (SL non oltre questo)
+```
