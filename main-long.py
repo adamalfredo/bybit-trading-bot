@@ -113,7 +113,7 @@ ENTRY_TF_VOLATILE = 30
 ENTRY_TF_STABLE = 30
 ENTRY_ADX_VOLATILE = 22        # fisso
 ENTRY_ADX_STABLE = 20          # fisso
-ADX_RELAX_EVENT = 5.0
+ADX_RELAX_EVENT = 3.0
 RSI_LONG_THRESHOLD = 52.0
 COOLDOWN_MINUTES = 60          # fisso (non usare os.getenv)
 MAX_CONSEC_LOSSES = 2          # fisso
@@ -1252,10 +1252,11 @@ def analyze_asset(symbol: str):
     else:  # ANY
         trend_ok = up_4h or up_1h
 
-    # if not trend_ok:
-    #     if LOG_DEBUG_STRATEGY:
-    #         tlog(f"trend_long:{symbol}", f"[TREND-FILTER][{symbol}] Trend non idoneo (mode={TREND_MODE}), skip.", 600)
-    #     return None, None, None
+    # Filtro trend: attivo SOLO in regime MIXED (in BULL lo ignoro per avere più ingressi)
+    if CURRENT_REGIME == "MIXED" and not trend_ok:
+        if LOG_DEBUG_STRATEGY:
+            tlog(f"trend_long:{symbol}", f"[TREND-FILTER][{symbol}] Regime=MIXED, trend non idoneo (mode={TREND_MODE}), skip.", 600)
+        return None, None, None
 
     # Non blocca: solo log informativo
     if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_low(symbol):
@@ -1316,12 +1317,18 @@ def analyze_asset(symbol: str):
 
         event_triggered = ema_bullish_cross or macd_bullish_cross or rsi_break
         conf_count = [ema_state, macd_state, rsi_state].count(True)
+        # Confluenza richiesta: in MIXED alza di 1
+        required_confluence = MIN_CONFLUENCE + (1 if CURRENT_REGIME == "MIXED" else 0)
+
         adx_needed = max(0.0, adx_threshold - (ADX_RELAX_EVENT if event_triggered else 0.0))
+        # Bonus ADX in MIXED (mercato meno direzionale)
+        if CURRENT_REGIME == "MIXED":
+            adx_needed += 1.5
 
         if LOG_DEBUG_STRATEGY:
             tlog(
                 f"entry_chk_long:{symbol}",
-                f"[ENTRY-CHECK][LONG] conf={conf_count}/{MIN_CONFLUENCE} | ADX={last['adx']:.1f}>{adx_needed:.1f} | event={event_triggered} | tf={tf_tag}",
+                f"[ENTRY-CHECK][LONG] conf={conf_count}/{required_confluence} | ADX={last['adx']:.1f}>{adx_needed:.1f} | event={event_triggered} | regime={CURRENT_REGIME} | tf={tf_tag}",
                 300
             )
 
@@ -1334,7 +1341,7 @@ def analyze_asset(symbol: str):
                 return None, None, None
 
         # Segnale ingresso
-        if ((conf_count >= MIN_CONFLUENCE) or event_triggered) and float(last["adx"]) > adx_needed:
+        if (((conf_count >= required_confluence) or event_triggered) and float(last["adx"]) > adx_needed):
             entry_strategies = []
             if ema_state: entry_strategies.append(f"EMA Bullish {tf_tag}")
             if macd_state: entry_strategies.append(f"MACD Bullish {tf_tag}")

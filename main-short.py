@@ -91,7 +91,6 @@ ENTRY_TF_MINUTES = 60
 ASSETS = []
 LESS_VOLATILE_ASSETS = []
 VOLATILE_ASSETS = []
-LIQUIDITY_MIN_VOLUME = 1_000_000  # Soglia minima volume 24h USDT (consigliato)
 # --- SYNC POSIZIONI APERTE DA WALLET ALL'AVVIO ---
 open_positions = set()
 position_data = {}
@@ -114,11 +113,8 @@ ENTRY_TF_VOLATILE = 30
 ENTRY_TF_STABLE = 30
 ENTRY_ADX_VOLATILE = 22       # fisso
 ENTRY_ADX_STABLE = 20         # fisso
-ADX_RELAX_EVENT = 5.0
+ADX_RELAX_EVENT = 3.0
 RSI_SHORT_THRESHOLD = 48.0
-COOLDOWN_MINUTES = 60         # fisso
-MAX_CONSEC_LOSSES = 2         # fisso
-FORCED_WAIT_MIN = 90          # fisso
 LIQUIDITY_MIN_VOLUME = 1_000_000
 LINEAR_MIN_TURNOVER = 5_000_000
 # Large-cap con minQty elevata: abilita auto-bump del notional al minimo (come nel LONG)
@@ -1261,10 +1257,11 @@ def analyze_asset(symbol: str):
     else:  # ANY
         trend_ok = down_4h or down_1h
 
-    # if not trend_ok:
-    #     if LOG_DEBUG_STRATEGY:
-    #         tlog(f"trend_short:{symbol}", f"[TREND-FILTER][{symbol}] SHORT non idoneo (mode={TREND_MODE})", 600)
-    #     return None, None, None
+    # Filtro trend attivo SOLO in regime MIXED per evitare short “deboli” in range
+    if CURRENT_REGIME == "MIXED" and not trend_ok:
+        if LOG_DEBUG_STRATEGY:
+            tlog(f"trend_short:{symbol}", f"[TREND-FILTER][{symbol}] Regime=MIXED, trend non idoneo (mode={TREND_MODE})", 600)
+        return None, None, None
 
     # Breakout (solo log informativo, non blocca)
     if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_low(symbol):
@@ -1325,12 +1322,16 @@ def analyze_asset(symbol: str):
 
         event_triggered = ema_bearish_cross or macd_bearish_cross or rsi_break
         conf_count = [ema_state, macd_state, rsi_state].count(True)
+        required_confluence = MIN_CONFLUENCE + (1 if CURRENT_REGIME == "MIXED" else 0)
+
         adx_needed = max(0.0, adx_threshold - (ADX_RELAX_EVENT if event_triggered else 0.0))
+        if CURRENT_REGIME == "MIXED":
+            adx_needed += 1.5
 
         if LOG_DEBUG_STRATEGY:
             tlog(
                 f"entry_chk_short:{symbol}",
-                f"[ENTRY-CHECK][SHORT] conf={conf_count}/{MIN_CONFLUENCE} | ADX={last['adx']:.1f}>{adx_needed:.1f} | event={event_triggered} | tf={tf_tag}",
+                f"[ENTRY-CHECK][SHORT] conf={conf_count}/{required_confluence} | ADX={last['adx']:.1f}>{adx_needed:.1f} | event={event_triggered} | regime={CURRENT_REGIME} | tf={tf_tag}",
                 300
             )
 
@@ -1345,7 +1346,7 @@ def analyze_asset(symbol: str):
                 return None, None, None
 
         # Segnale ingresso SHORT
-        if ((conf_count >= MIN_CONFLUENCE) or event_triggered) and float(last["adx"]) > adx_needed:
+        if (((conf_count >= required_confluence) or event_triggered) and float(last["adx"]) > adx_needed):
             entry_strategies = []
             if ema_state: entry_strategies.append(f"EMA Bearish {tf_tag}")
             if macd_state: entry_strategies.append(f"MACD Bearish {tf_tag}")
@@ -1665,7 +1666,7 @@ while True:
             if CURRENT_REGIME == "BULL":
                 tlog(f"reg_gate:{symbol}", f"[REGIME-GATE] BULL → skip SHORT {symbol}", 600)
                 continue
-            
+
             # Cooldown
             if symbol in last_exit_time:
                 elapsed = time.time() - last_exit_time[symbol]
