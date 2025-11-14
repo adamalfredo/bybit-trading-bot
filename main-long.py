@@ -66,6 +66,7 @@ FLOOR_TRIGGER_BY = "MarkPrice"     # usa Mark per coerenza con SL
 # >>> PATCH: parametri breakeven lock (LONG)
 BREAKEVEN_LOCK_PCT = 0.01   # attiva BE al +1% di prezzo (~+10% PnL con leva 10x)
 BREAKEVEN_BUFFER   = 0.0015  # stop a BE + 0.15% per evitare micro-slippage
+MAX_LOSS_CAP_PCT = 0.015  # CAP perdita sul prezzo: 1.5% sotto l'entry (SL non oltre questo)
 
 ENABLE_TP1 = False       # abilita TP parziale a 1R
 TP1_R_MULT = 1.0        # target TP1 a 1R
@@ -73,7 +74,6 @@ TP1_CLOSE_PCT = 0.5     # chiudi il 50% a TP1
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
 COOLDOWN_MINUTES = 60
 cooldown = {}
-MAX_LOSS_CAP_PCT = 0.02  # CAP perdita sul prezzo: 2% sotto l'entry (SL non oltre questo)
 ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
 # --- MTF entry: segnali su 15m, trend su 4h/1h ---

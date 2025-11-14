@@ -71,8 +71,9 @@ FLOOR_TRIGGER_BY = "MarkPrice"     # usa Mark per coerenza con SL
 # >>> PATCH: parametri breakeven lock (SHORT)
 BREAKEVEN_LOCK_PCT = 0.01     # -1% di prezzo ≈ +10% PnL a 10x
 BREAKEVEN_BUFFER   = -0.0015  # buffer SOTTO l’entry (chiusura sempre ≥ BE)
+MAX_LOSS_CAP_PCT = 0.015  # CAP perdita sul prezzo: 1.5% sopra l'entry
+
 cooldown = {}
-MAX_LOSS_CAP_PCT = 0.02  # CAP perdita sul prezzo: 2% sopra l'entry (SL non oltre questo)
 ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
 # --- MTF entry: segnali su 15m, trend su 4h/1h ---
