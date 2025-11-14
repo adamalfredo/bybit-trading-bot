@@ -73,6 +73,14 @@ BREAKEVEN_LOCK_PCT = 0.01     # -1% di prezzo ≈ +10% PnL a 10x
 BREAKEVEN_BUFFER   = -0.0015  # buffer SOTTO l’entry (chiusura sempre ≥ BE)
 MAX_LOSS_CAP_PCT = 0.015  # CAP perdita sul prezzo: 1.5% sopra l'entry
 
+# >>> NEW: regime + drawdown giornaliero (SHORT)
+DAILY_DD_CAP_PCT = 0.04         # blocca nuovi ingressi se equity < -4% dal livello di inizio giorno
+REGIME_REFRESH_SEC = 180        # aggiorna regime ogni 3 minuti
+CURRENT_REGIME = "MIXED"        # BULL / BEAR / MIXED
+_last_regime_ts = 0
+_daily_start_equity = None
+_trading_paused_until = 0
+
 cooldown = {}
 ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
@@ -225,6 +233,60 @@ def is_trending_up_1h(symbol: str, tf: str = "60"):
         return df["Close"].iloc[-1] > ema100.iloc[-1] and ema100.iloc[-1] >= ema100.iloc[-2]
     except Exception:
         return False
+
+def _get_market_breadth():
+    """Breadth futures linear: quota di simboli con price24hPcnt < 0."""
+    try:
+        resp = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category": "linear"}, timeout=10)
+        data = resp.json()
+        lst = data.get("result", {}).get("list", [])
+        if not lst:
+            return 0.5
+        changes = []
+        for t in lst:
+            try:
+                changes.append(float(t.get("price24hPcnt", 0.0)))
+            except:
+                pass
+        red = sum(1 for c in changes if c < 0)
+        return red / max(1, len(changes))
+    except:
+        return 0.5
+
+def _detect_market_regime():
+    """
+    Regole:
+    - BEAR: BTC/ETH in downtrend su 4h e breadth rossa > 0.6
+    - BULL: BTC/ETH NON in downtrend e breadth rossa < 0.4
+    - MIXED: altrimenti
+    """
+    try:
+        btc_down = is_trending_down("BTCUSDT", "240")
+        eth_down = is_trending_down("ETHUSDT", "240")
+        breadth_red = _get_market_breadth()
+        if btc_down and eth_down and breadth_red > 0.6:
+            return "BEAR"
+        if (not btc_down) and (not eth_down) and breadth_red < 0.4:
+            return "BULL"
+        return "MIXED"
+    except:
+        return "MIXED"
+
+def _equity_now():
+    total, usdt_balance, coin_values = get_portfolio_value()
+    return total
+
+def _update_daily_anchor_and_regime():
+    """Aggiorna ancora giornaliera di equity e regime di mercato con throttling."""
+    global _daily_start_equity, CURRENT_REGIME, _last_regime_ts
+    # reset ancora se cambia il giorno
+    if _daily_start_equity is None or time.strftime("%Y-%m-%d") != time.strftime("%Y-%m-%d", time.localtime(_last_regime_ts or time.time())):
+        _daily_start_equity = _equity_now()
+    # refresh regime
+    if time.time() - _last_regime_ts > REGIME_REFRESH_SEC:
+        CURRENT_REGIME = _detect_market_regime()
+        _last_regime_ts = time.time()
+        tlog("regime", f"[REGIME] mercato={CURRENT_REGIME}", 180)
 
 def is_breaking_weekly_low(symbol: str):
     """
@@ -1548,6 +1610,16 @@ profit_floor_thread_short.start()
 while True:
     # Aggiorna la lista asset dinamicamente ogni ciclo
     update_assets()
+    _update_daily_anchor_and_regime()
+    portfolio_value, usdt_balance, coin_values = get_portfolio_value()
+
+    # >>> NEW: daily drawdown cap (pausa nuovi ingressi per 2h se superato)
+    if _daily_start_equity:
+        dd_pct = (portfolio_value - _daily_start_equity) / max(1e-9, _daily_start_equity)
+        if dd_pct < -DAILY_DD_CAP_PCT:
+            tlog("dd_cap", f"🛑 DD giornaliero {-dd_pct*100:.2f}% > cap {DAILY_DD_CAP_PCT*100:.1f}%, stop nuovi SHORT per 2h", 600)
+            _trading_paused_until = time.time() + 2*3600
+
     # sync_positions_from_wallet()  # evita di resettare position_data/trailing ad ogni ciclo
     portfolio_value, usdt_balance, coin_values = get_portfolio_value()
     # SHORT: più conservativo sui volatili, più aggressivo su large cap
@@ -1575,16 +1647,25 @@ while True:
         if not is_symbol_linear(symbol):
             tlog(f"skip_linear:{symbol}", f"[SKIP] {symbol} non disponibile su futures linear, salto.", 1800)
             continue
+
         signal, strategy, price = analyze_asset(symbol)
         # Skip se non ci sono segnali
         if signal is None or strategy is None or price is None:
             continue
-        # Log analisi: verboso solo in debug, altrimenti throttling 10min per combinazione
+        # Log analisi: verboso solo in debug
         if LOG_DEBUG_STRATEGY:
             log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
 
         # ✅ ENTRATA SHORT
         if signal == "entry":
+            # GATE: blocca solo le NUOVE APERTURE (non le uscite)
+            if time.time() < _trading_paused_until:
+                tlog(f"paused:{symbol}", f"[PAUSE] trading sospeso (DD cap), skip SHORT {symbol}", 600)
+                continue
+            if CURRENT_REGIME == "BULL":
+                tlog(f"reg_gate:{symbol}", f"[REGIME-GATE] BULL → skip SHORT {symbol}", 600)
+                continue
+            
             # Cooldown
             if symbol in last_exit_time:
                 elapsed = time.time() - last_exit_time[symbol]

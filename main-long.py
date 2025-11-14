@@ -68,6 +68,14 @@ BREAKEVEN_LOCK_PCT = 0.01   # attiva BE al +1% di prezzo (~+10% PnL con leva 10x
 BREAKEVEN_BUFFER   = 0.0015  # stop a BE + 0.15% per evitare micro-slippage
 MAX_LOSS_CAP_PCT = 0.015  # CAP perdita sul prezzo: 1.5% sotto l'entry (SL non oltre questo)
 
+# >>> NEW: regime + drawdown giornaliero (LONG)
+DAILY_DD_CAP_PCT = 0.04
+REGIME_REFRESH_SEC = 180
+CURRENT_REGIME = "MIXED"   # BULL / BEAR / MIXED
+_last_regime_ts = 0
+_daily_start_equity = None
+_trading_paused_until = 0
+
 ENABLE_TP1 = False       # abilita TP parziale a 1R
 TP1_R_MULT = 1.0        # target TP1 a 1R
 TP1_CLOSE_PCT = 0.5     # chiudi il 50% a TP1
@@ -223,6 +231,57 @@ def is_trending_up_1h(symbol: str, tf: str = "60"):
         return df["Close"].iloc[-1] > ema100.iloc[-1] and ema100.iloc[-1] >= ema100.iloc[-2]
     except Exception:
         return False
+
+def _get_market_breadth():
+    """Breadth futures linear: quota di simboli con price24hPcnt < 0."""
+    try:
+        resp = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category": "linear"}, timeout=10)
+        data = resp.json()
+        lst = data.get("result", {}).get("list", [])
+        if not lst:
+            return 0.5
+        changes = []
+        for t in lst:
+            try:
+                changes.append(float(t.get("price24hPcnt", 0.0)))
+            except:
+                pass
+        red = sum(1 for c in changes if c < 0)
+        return red / max(1, len(changes))
+    except:
+        return 0.5
+
+def _detect_market_regime():
+    """
+    Regole:
+    - BULL: BTC/ETH in uptrend su 4h e breadth rossa < 0.4
+    - BEAR: BTC/ETH NON in uptrend e breadth rossa > 0.6
+    - MIXED: altrimenti
+    """
+    try:
+        btc_up = is_trending_up("BTCUSDT", "240")
+        eth_up = is_trending_up("ETHUSDT", "240")
+        breadth_red = _get_market_breadth()
+        if btc_up and eth_up and breadth_red < 0.4:
+            return "BULL"
+        if (not btc_up) and (not eth_up) and breadth_red > 0.6:
+            return "BEAR"
+        return "MIXED"
+    except:
+        return "MIXED"
+
+def _equity_now():
+    total, usdt_balance, coin_values = get_portfolio_value()
+    return total
+
+def _update_daily_anchor_and_regime():
+    global _daily_start_equity, CURRENT_REGIME, _last_regime_ts
+    if _daily_start_equity is None or time.strftime("%Y-%m-%d") != time.strftime("%Y-%m-%d", time.localtime(_last_regime_ts or time.time())):
+        _daily_start_equity = _equity_now()
+    if time.time() - _last_regime_ts > REGIME_REFRESH_SEC:
+        CURRENT_REGIME = _detect_market_regime()
+        _last_regime_ts = time.time()
+        tlog("regime", f"[REGIME] mercato={CURRENT_REGIME}", 180)
 
 def is_breaking_weekly_low(symbol: str):
     """
@@ -1537,6 +1596,17 @@ profit_floor_thread_long.start()
 
 while True:
     update_assets()
+
+    _update_daily_anchor_and_regime()
+    portfolio_value, usdt_balance, coin_values = get_portfolio_value()
+
+    # >>> NEW: daily drawdown cap (pausa nuovi ingressi per 2h se superato)
+    if _daily_start_equity:
+        dd_pct = (portfolio_value - _daily_start_equity) / max(1e-9, _daily_start_equity)
+        if dd_pct < -DAILY_DD_CAP_PCT:
+            tlog("dd_cap", f"🛑 DD giornaliero {-dd_pct*100:.2f}% > cap {DAILY_DD_CAP_PCT*100:.1f}%, stop nuovi LONG per 2h", 600)
+            _trading_paused_until = time.time() + 2*3600
+
     portfolio_value, usdt_balance, coin_values = get_portfolio_value()
     volatile_budget = portfolio_value * 0.4
     stable_budget = portfolio_value * 0.6
@@ -1559,8 +1629,16 @@ while True:
             # nessun segnale → skip
             continue
 
-        # ENTRY LONG
+        # ✅ ENTRATA LONG
         if signal == "entry":
+            # >>> GATE: blocca solo le NUOVE APERTURE (non gli exit)
+            if time.time() < _trading_paused_until:
+                tlog(f"paused:{symbol}", f"[PAUSE] trading sospeso (DD cap), skip LONG {symbol}", 600)
+                continue
+            if CURRENT_REGIME == "BEAR":
+                tlog(f"reg_gate:{symbol}", f"[REGIME-GATE] BEAR → skip LONG {symbol}", 600)
+                continue
+
             if symbol in last_exit_time:
                 elapsed = time.time() - last_exit_time[symbol]
                 if elapsed < COOLDOWN_MINUTES * 60:
