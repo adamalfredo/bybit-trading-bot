@@ -433,7 +433,7 @@ def get_open_short_qty(symbol):
         if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
             if LOG_DEBUG_SYNC:
                 tlog(f"qty_err:{symbol}", f"[BYBIT-RAW][ERRORE] get_open_short_qty {symbol}: {json.dumps(data)}", 300)
-            return 0.0
+            return None  # <<< PRIMA era 0.0
         for pos in data["result"]["list"]:
             if pos.get("side") == "Sell":
                 qty = float(pos.get("size", 0))
@@ -442,7 +442,7 @@ def get_open_short_qty(symbol):
     except Exception as e:
         if LOG_DEBUG_SYNC:
             tlog(f"qty_exc:{symbol}", f"❌ Errore get_open_short_qty per {symbol}: {e}", 300)
-        return 0.0
+        return None  # <<< PRIMA era 0.0
 
 def get_open_long_qty(symbol):
     try:
@@ -463,14 +463,18 @@ def get_open_long_qty(symbol):
         resp = requests.get(endpoint, headers=headers, params=params, timeout=10)
         data = resp.json()
         if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
-            return 0.0
+            if LOG_DEBUG_SYNC:
+                tlog(f"qty_err_long:{symbol}", f"[BYBIT-RAW][ERRORE] get_open_long_qty {symbol}: {json.dumps(data)}", 300)
+            return None  # <<< PRIMA era 0.0
         for pos in data["result"]["list"]:
             if pos.get("side") == "Buy":
                 qty = float(pos.get("size", 0))
                 return qty if qty > 0 else 0.0
         return 0.0
-    except Exception:
-        return 0.0
+    except Exception as e:
+        if LOG_DEBUG_SYNC:
+            tlog(f"qty_exc_long:{symbol}", f"❌ Errore get_open_long_qty per {symbol}: {e}", 300)
+        return None  # <<< PRIMA era 0.0
 
 # --- FUNZIONI DI SUPPORTO BYBIT E TELEGRAM ---
 def get_last_price(symbol):
@@ -946,10 +950,6 @@ def breakeven_lock_worker_short():
             if price_now <= entry_price * (1.0 - BREAKEVEN_LOCK_PCT):
                 # Short: copertura a BE con piccolo buffer di profitto
                 be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
-
-                # 1) cancella eventuali Stop/Conditional preesistenti (mantieni il TP Limit)
-                if get_open_long_qty(symbol) == 0:
-                    cancel_all_orders(symbol, order_filter="StopOrder")
 
                 # 2) piazza Stop-Market reduceOnly a BE (sul book)
                 qty_live = get_open_short_qty(symbol)
@@ -1479,8 +1479,6 @@ def sync_positions_from_wallet():
             try:
                 if price <= entry_price * (1.0 - BREAKEVEN_LOCK_PCT) and not position_data[symbol].get("be_locked"):
                     be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)  # buffer negativo
-                    if get_open_long_qty(symbol) == 0:
-                        cancel_all_orders(symbol, order_filter="StopOrder")
                     qty_live = get_open_short_qty(symbol)
                     if qty_live and qty_live > 0:
                         place_conditional_sl_short(symbol, be_price, qty_live, trigger_by="MarkPrice")
@@ -1930,7 +1928,8 @@ while True:
         saldo = get_open_short_qty(symbol)
         info = get_instrument_info(symbol)
         min_qty = info.get("min_qty", 0.0)
-        if saldo is None or saldo < min_qty:
+        # cleanup SOLO se lettura qty è valida e < min_qty
+        if (saldo is not None) and (saldo < min_qty):
             tlog(f"ext_close:{symbol}", f"[CLEANUP][SHORT] {symbol} chiusa lato exchange (qty={saldo}). Cancello TP/SL.", 60)
             open_positions.discard(symbol)
             entry = position_data.get(symbol, {})
@@ -1953,8 +1952,6 @@ while True:
         # SHORT: trigger BE se prezzo ≤ entry*(1 - 1%)
         if price_now <= entry_price * (1.0 - BREAKEVEN_LOCK_PCT):
             be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)  # buffer negativo → sotto entry
-            if get_open_long_qty(symbol) == 0:
-                cancel_all_orders(symbol, order_filter="StopOrder")
             qty_live = get_open_short_qty(symbol)
             if qty_live and qty_live > 0:
                 place_conditional_sl_short(symbol, be_price, qty_live, trigger_by="MarkPrice")
