@@ -1250,10 +1250,13 @@ def analyze_asset(symbol: str):
     else:  # ANY
         trend_ok = up_4h or up_1h
 
-    # Filtro trend: attivo SOLO in regime MIXED (in BULL lo ignoro per avere più ingressi)
-    if CURRENT_REGIME == "MIXED" and not trend_ok:
+    # Filtro trend:
+    # - BULL: permissivo (non richiede trend_ok)
+    # - BEAR: obbligatorio (long solo se asset in uptrend)
+    # - MIXED: obbligatorio
+    if CURRENT_REGIME in ("BEAR", "MIXED") and not trend_ok:
         if LOG_DEBUG_STRATEGY:
-            tlog(f"trend_long:{symbol}", f"[TREND-FILTER][{symbol}] Regime=MIXED, trend non idoneo (mode={TREND_MODE}), skip.", 600)
+            tlog(f"trend_long:{symbol}", f"[TREND-FILTER][{symbol}] Regime={CURRENT_REGIME}, trend non idoneo (mode={TREND_MODE}), skip.", 600)
         return None, None, None
 
     # Non blocca: solo log informativo
@@ -1315,13 +1318,19 @@ def analyze_asset(symbol: str):
 
         event_triggered = ema_bullish_cross or macd_bullish_cross or rsi_break
         conf_count = [ema_state, macd_state, rsi_state].count(True)
-        # Confluenza richiesta: in MIXED alza di 1
-        required_confluence = MIN_CONFLUENCE + (1 if CURRENT_REGIME == "MIXED" else 0)
+        
+        # Confluenza richiesta per regime
+        if CURRENT_REGIME in ("BEAR", "MIXED"):
+            required_confluence = MIN_CONFLUENCE + 1
+        else:  # BULL
+            required_confluence = MIN_CONFLUENCE
 
+        # ADX richiesto + bonus per regime
         adx_needed = max(0.0, adx_threshold - (ADX_RELAX_EVENT if event_triggered else 0.0))
-        # Bonus ADX in MIXED (mercato meno direzionale)
         if CURRENT_REGIME == "MIXED":
             adx_needed += 1.5
+        elif CURRENT_REGIME == "BEAR":
+            adx_needed += 2.0
 
         if LOG_DEBUG_STRATEGY:
             tlog(
@@ -1638,9 +1647,10 @@ while True:
             if time.time() < _trading_paused_until:
                 tlog(f"paused:{symbol}", f"[PAUSE] trading sospeso (DD cap), skip LONG {symbol}", 600)
                 continue
-            if CURRENT_REGIME == "BEAR":
-                tlog(f"reg_gate:{symbol}", f"[REGIME-GATE] BEAR → skip LONG {symbol}", 600)
-                continue
+            # if CURRENT_REGIME == "BEAR":
+            #     tlog(f"reg_gate:{symbol}", f"[REGIME-GATE] BEAR → skip LONG {symbol}", 600)
+            #     continue
+            #     Nessun blocco regime: in BEAR i filtri sono irrigiditi in analyze_asset.
 
             if symbol in last_exit_time:
                 elapsed = time.time() - last_exit_time[symbol]

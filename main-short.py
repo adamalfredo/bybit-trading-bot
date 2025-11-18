@@ -1257,10 +1257,13 @@ def analyze_asset(symbol: str):
     else:  # ANY
         trend_ok = down_4h or down_1h
 
-    # Filtro trend attivo SOLO in regime MIXED per evitare short “deboli” in range
-    if CURRENT_REGIME == "MIXED" and not trend_ok:
+    # Filtro trend:
+    # - BEAR: permissivo
+    # - BULL: obbligatorio (short solo se asset in downtrend)
+    # - MIXED: obbligatorio
+    if CURRENT_REGIME in ("BULL", "MIXED") and not trend_ok:
         if LOG_DEBUG_STRATEGY:
-            tlog(f"trend_short:{symbol}", f"[TREND-FILTER][{symbol}] Regime=MIXED, trend non idoneo (mode={TREND_MODE})", 600)
+            tlog(f"trend_short:{symbol}", f"[TREND-FILTER][{symbol}] Regime={CURRENT_REGIME}, trend non idoneo (mode={TREND_MODE})", 600)
         return None, None, None
 
     # Breakout (solo log informativo, non blocca)
@@ -1322,11 +1325,19 @@ def analyze_asset(symbol: str):
 
         event_triggered = ema_bearish_cross or macd_bearish_cross or rsi_break
         conf_count = [ema_state, macd_state, rsi_state].count(True)
-        required_confluence = MIN_CONFLUENCE + (1 if CURRENT_REGIME == "MIXED" else 0)
 
+        # Confluenza richiesta per regime
+        if CURRENT_REGIME in ("BULL", "MIXED"):
+            required_confluence = MIN_CONFLUENCE + 1
+        else:  # BEAR
+            required_confluence = MIN_CONFLUENCE
+
+        # ADX richiesto + bonus per regime
         adx_needed = max(0.0, adx_threshold - (ADX_RELAX_EVENT if event_triggered else 0.0))
         if CURRENT_REGIME == "MIXED":
             adx_needed += 1.5
+        elif CURRENT_REGIME == "BULL":
+            adx_needed += 2.0
 
         if LOG_DEBUG_STRATEGY:
             tlog(
@@ -1661,9 +1672,10 @@ while True:
             if time.time() < _trading_paused_until:
                 tlog(f"paused:{symbol}", f"[PAUSE] trading sospeso (DD cap), skip SHORT {symbol}", 600)
                 continue
-            if CURRENT_REGIME == "BULL":
-                tlog(f"reg_gate:{symbol}", f"[REGIME-GATE] BULL → skip SHORT {symbol}", 600)
-                continue
+            # if CURRENT_REGIME == "BULL":
+            #     tlog(f"reg_gate:{symbol}", f"[REGIME-GATE] BULL → skip SHORT {symbol}", 600)
+            #     continue
+            #     Regime: niente blocco. In BULL verranno già irrigiditi i filtri a monte (analyze_asset).
 
             # Cooldown
             if symbol in last_exit_time:
