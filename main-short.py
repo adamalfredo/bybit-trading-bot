@@ -80,7 +80,10 @@ CURRENT_REGIME = "MIXED"        # BULL / BEAR / MIXED
 _last_regime_ts = 0
 _daily_start_equity = None
 _trading_paused_until = 0
-
+# BEGIN PATCH: throttle DD (no pausa forzata di default)
+ENABLE_DD_PAUSE = os.getenv("ENABLE_DD_PAUSE", "0") == "1"
+DD_PAUSE_MINUTES = int(os.getenv("DD_PAUSE_MINUTES", "120"))
+RISK_THROTTLE_LEVEL = 0  # 0=off, 1=DD > cap, 2=DD > 2*cap
 cooldown = {}
 ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
@@ -1339,6 +1342,12 @@ def analyze_asset(symbol: str):
         elif CURRENT_REGIME == "BULL":
             adx_needed += 2.0
 
+        # >>> PATCH: throttle DD → più conferme, ADX più alto, e richiedi evento se in DD
+        required_confluence += RISK_THROTTLE_LEVEL
+        adx_needed += 1.5 * RISK_THROTTLE_LEVEL
+        if RISK_THROTTLE_LEVEL >= 1 and not event_triggered:
+            return None, None, None
+
         if LOG_DEBUG_STRATEGY:
             tlog(
                 f"entry_chk_short:{symbol}",
@@ -1623,12 +1632,17 @@ while True:
     _update_daily_anchor_and_regime()
     portfolio_value, usdt_balance, coin_values = get_portfolio_value()
 
-    # >>> NEW: daily drawdown cap (pausa nuovi ingressi per 2h se superato)
+     # >>> PATCH: throttle DD (selettivo, niente stop forzato salvo ENABLE_DD_PAUSE=1)
     if _daily_start_equity:
         dd_pct = (portfolio_value - _daily_start_equity) / max(1e-9, _daily_start_equity)
-        if dd_pct < -DAILY_DD_CAP_PCT:
-            tlog("dd_cap", f"🛑 DD giornaliero {-dd_pct*100:.2f}% > cap {DAILY_DD_CAP_PCT*100:.1f}%, stop nuovi SHORT per 2h", 600)
-            _trading_paused_until = time.time() + 2*3600
+        if ENABLE_DD_PAUSE and dd_pct < -DAILY_DD_CAP_PCT:
+            tlog("dd_cap", f"🛑 DD giornaliero {-dd_pct*100:.2f}% > cap {DAILY_DD_CAP_PCT*100:.1f}%, stop nuovi SHORT per {DD_PAUSE_MINUTES}m", 600)
+            _trading_paused_until = time.time() + DD_PAUSE_MINUTES * 60
+        else:
+            draw = -dd_pct
+            RISK_THROTTLE_LEVEL = 2 if draw > DAILY_DD_CAP_PCT * 2 else (1 if draw > DAILY_DD_CAP_PCT else 0)
+            if RISK_THROTTLE_LEVEL > 0:
+                tlog("dd_throttle", f"[THROTTLE] DD={draw*100:.2f}% → livello={RISK_THROTTLE_LEVEL}", 600)
 
     # sync_positions_from_wallet()  # evita di resettare position_data/trailing ad ogni ciclo
     portfolio_value, usdt_balance, coin_values = get_portfolio_value()
@@ -1669,9 +1683,9 @@ while True:
         # ✅ ENTRATA SHORT
         if signal == "entry":
             # GATE: blocca solo le NUOVE APERTURE (non le uscite)
-            if time.time() < _trading_paused_until:
-                tlog(f"paused:{symbol}", f"[PAUSE] trading sospeso (DD cap), skip SHORT {symbol}", 600)
-                continue
+            if ENABLE_DD_PAUSE and time.time() < _trading_paused_until:
+                 tlog(f"paused:{symbol}", f"[PAUSE] trading sospeso (DD cap), skip SHORT {symbol}", 600)
+                 continue
             # if CURRENT_REGIME == "BULL":
             #     tlog(f"reg_gate:{symbol}", f"[REGIME-GATE] BULL → skip SHORT {symbol}", 600)
             #     continue
@@ -1729,6 +1743,11 @@ while True:
                 strength = min(1.0, base + bonus)
             else:
                 strength = 0.5
+            # >>> PATCH: throttle DD – riduci aggressività
+            if RISK_THROTTLE_LEVEL == 1:
+                strength *= 0.7
+            elif RISK_THROTTLE_LEVEL >= 2:
+                strength *= 0.5
 
             # --- Adatta la size ordine in base alla volatilità (ATR/Prezzo) ---
             df_hist = fetch_history(symbol)
