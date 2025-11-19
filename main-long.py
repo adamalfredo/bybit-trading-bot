@@ -1272,7 +1272,7 @@ def analyze_asset(symbol: str):
         tf_minutes = ENTRY_TF_VOLATILE if (USE_MTF_ENTRY and is_volatile) else ENTRY_TF_STABLE
 
         df = fetch_history(symbol, interval=tf_minutes)
-        if df is None or len(df) < 3:
+        if df is None or len(df) < 4:
             log(f"[ANALYZE] Dati storici insufficienti per {symbol}")
             return None, None, None
 
@@ -1299,15 +1299,25 @@ def analyze_asset(symbol: str):
         df["atr"] = atr.average_true_range()
 
         df.dropna(subset=["bb_upper","bb_lower","rsi","sma20","sma50","ema20","ema50","ema200","macd","macd_signal","adx","atr"], inplace=True)
-        if len(df) < 3:
+        if len(df) < 4:
             return None, None, None
 
         adx_threshold = ENTRY_ADX_VOLATILE if is_volatile else ENTRY_ADX_STABLE
 
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        price = float(last["Close"])
+        # Usa SOLO candele chiuse per i segnali (evita repaint)
+        last = df.iloc[-2]       # candela appena chiusa
+        prev = df.iloc[-3]       # candela chiusa precedente
+        price = float(df["Close"].iloc[-1])  # prezzo attuale (candela in corso)
         tf_tag = f"({tf_minutes}m)"
+
+        # Filtro estensione: evita LONG troppo sopra EMA20 + k*ATR
+        ema20v = float(last["ema20"]); atrv = float(last["atr"])
+        k = 1.8 if symbol in LARGE_CAPS else 1.5
+        ext_cap = ema20v + k * atrv
+        if float(last["Close"]) > ext_cap:
+            if LOG_DEBUG_STRATEGY:
+                tlog(f"ext_long:{symbol}", f"[FILTER][{symbol}] Estensione: close {last['Close']:.6f} > ema20 {ema20v:.6f} + {k}*ATR ({ext_cap:.6f})", 600)
+            return None, None, None
 
         # Eventi e stati
         rsi_th = RSI_LONG_THRESHOLD
@@ -1327,6 +1337,10 @@ def analyze_asset(symbol: str):
             required_confluence = MIN_CONFLUENCE + 1
         else:  # BULL
             required_confluence = MIN_CONFLUENCE
+
+        # In regime MIXED richiedi SEMPRE un evento reale (cross/break)
+        if CURRENT_REGIME == "MIXED" and not event_triggered:
+            return None, None, None
 
         # ADX richiesto + bonus per regime
         adx_needed = max(0.0, adx_threshold - (ADX_RELAX_EVENT if event_triggered else 0.0))
@@ -1377,7 +1391,8 @@ def analyze_asset(symbol: str):
                 return True
             r = abs(current_price - entry_price) / (entry_price * INITIAL_STOP_LOSS_PCT)
             holding_min = (time.time() - entry_time) / 60
-            return (current_price > entry_price and r > 0.5) or holding_min > 60
+            # Uscita più reattiva: se |R|>0.5 oppure dopo 20 minuti
+            return (r > 0.5) or (holding_min > 20)
 
         if cond_exit1 and can_exit(symbol, price):
             return "exit", "Breakdown BB + RSI (bearish)", price

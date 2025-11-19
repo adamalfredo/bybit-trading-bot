@@ -1279,7 +1279,7 @@ def analyze_asset(symbol: str):
         tf_minutes = ENTRY_TF_VOLATILE if (USE_MTF_ENTRY and is_volatile) else ENTRY_TF_STABLE
 
         df = fetch_history(symbol, interval=tf_minutes)
-        if df is None or len(df) < 3:
+        if df is None or len(df) < 4:
             if LOG_DEBUG_STRATEGY:
                 log(f"[ANALYZE][{symbol}] Dati insufficienti ({tf_minutes}m)")
             return None, None, None
@@ -1307,13 +1307,23 @@ def analyze_asset(symbol: str):
         df["atr"] = atr.average_true_range()
 
         df.dropna(subset=["bb_upper","bb_lower","rsi","ema20","ema50","ema200","macd","macd_signal","adx","atr"], inplace=True)
-        if len(df) < 3:
+        if len(df) < 4:
             return None, None, None
 
         adx_threshold = ENTRY_ADX_VOLATILE if is_volatile else ENTRY_ADX_STABLE
-        last = df.iloc[-1]; prev = df.iloc[-2]
-        price = float(last["Close"])
+        # Usa SOLO candele chiuse per i segnali (evita repaint)
+        last = df.iloc[-2]       # candela appena chiusa
+        prev = df.iloc[-3]       # candela chiusa precedente
+        price = float(df["Close"].iloc[-1])  # prezzo attuale
         tf_tag = f"({tf_minutes}m)"
+        # Filtro estensione: evita SHORT troppo sotto EMA20 - k*ATR (rischio rimbalzo)
+        ema20v = float(last["ema20"]); atrv = float(last["atr"])
+        k = 1.8 if symbol in LARGE_CAPS else 1.5
+        ext_floor = ema20v - k * atrv
+        if float(last["Close"]) < ext_floor:
+            if LOG_DEBUG_STRATEGY:
+                tlog(f"ext_short:{symbol}", f"[FILTER][{symbol}] Estensione: close {last['Close']:.6f} < ema20 {ema20v:.6f} - {k}*ATR ({ext_floor:.6f})", 600)
+            return None, None, None
 
         # Eventi (trigger anticipato)
         rsi_th = RSI_SHORT_THRESHOLD
@@ -1386,8 +1396,8 @@ def analyze_asset(symbol: str):
                 return True
             r = abs(current_price - entry_price) / (entry_price * INITIAL_STOP_LOSS_PCT)
             holding_min = (time.time() - entry_time) / 60
-            # SHORT: se risalito sopra entry con >0.5R contro e poco tempo → chiudi
-            return (current_price > entry_price and r > 0.5) or holding_min > 60
+            # Uscita più reattiva: se |R|>0.5 oppure dopo 20 minuti
+            return (r > 0.5) or (holding_min > 20)
 
         if cond_exit1 and can_exit(symbol, price):
             return "exit", "Breakout BB + RSI (bullish)", price
