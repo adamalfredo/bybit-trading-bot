@@ -4,5 +4,3 @@ yfinance
 ta==0.11.0
 pandas
 numpy
-gspread==5.11.3
-google-auth==2.29.0

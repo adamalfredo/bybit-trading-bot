@@ -48,3 +48,25 @@ Così posso analizzare come e quando si attiva il trailing stop, se viene gestit
 
 - ⚙️ LOG_DEBUG_PORTFOLIO = 1  
 Così posso vedere l’evoluzione del portafoglio, la ripartizione tra USDT e posizioni, e se il sizing è coerente.
+
+## 🚀 Servizi separati LONG/SHORT su Railway
+
+Per eseguire i due bot come servizi indipendenti:
+
+- Variabili d’ambiente (uguali per entrambi i servizi):
+  - `BYBIT_API_KEY`, `BYBIT_API_SECRET`
+  - `BYBIT_ACCOUNT_TYPE` (es. `UNIFIED`)
+  - `BYBIT_TESTNET` (`true` per testnet, `false` per produzione)
+  - `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID` (opzionali, per notifiche)
+
+- Servizio LONG
+  - Build: `pip install -r requirements.txt`
+  - Start: `python main-long.py`
+
+- Servizio SHORT
+  - Build: `pip install -r requirements.txt`
+  - Start: `python main-short.py`
+
+Note:
+- Le funzioni di Google Sheets sono state rimosse da `main-long.py` e `main-short.py`. Il file `requirements.txt` è stato snellito: se usi script legacy che richiedono Google Sheets, aggiungi manualmente i pacchetti necessari o un file `requirements-sheets.txt` dedicato.
+- Imposta `PYTHONUNBUFFERED=1` su Railway per log in tempo reale. Impostare `TZ=Etc/UTC` aiuta ad avere timestamp coerenti.

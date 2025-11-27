@@ -10,6 +10,7 @@ import pandas as pd
 from ta.volatility import BollingerBands, AverageTrueRange
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD, ADXIndicator, SMAIndicator
+import threading
 
 # Env vars (Railway)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -22,19 +23,19 @@ BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
 BYBIT_BASE_URL = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
+# Indici posizione Bybit
+LONG_IDX = 1
+SHORT_IDX = 2
+
 # --- Sizing per trade (notional) ---
 DEFAULT_LEVERAGE = 10          # leva usata sul conto (Cross/Isolated)
 MARGIN_USE_PCT = 0.35
 TARGET_NOTIONAL_PER_TRADE = 200.0
 
 INTERVAL_MINUTES = 60  # era 15
-ENTRY_TF_MINUTES = 60  # era 30
 ATR_WINDOW = 14
 TRAILING_MIN = 0.015  # trailing più largo
 TRAILING_MAX = 0.05   # trailing più largo
-TRAILING_ACTIVATION_THRESHOLD = 0.015  # trailing parte dopo +1.5%
-TRAILING_SL_BUFFER = 0.015             # trailing SL più largo
-TRAILING_DISTANCE = 0.04               # trailing SL più largo
 TP_FACTOR = 2.5                        # TP più ambizioso
 SL_FACTOR = 1.2                        # SL più stretto
 TP_MIN = 2.0
@@ -42,16 +43,7 @@ TP_MAX = 3.0
 SL_MIN = 1.0
 SL_MAX = 2.0
 # Nuovi parametri per protezione guadagni (stop_floor)
-MIN_PROTECT_PCT = 1.0       # soglia minima protezione (1%)  // <<< PATCH commento corretto
-TRAILING_PROTECT_TIERS = [  # (p_max_pct_threshold, margin_pct)
-    (2, 2.0),   # se p_max_pct <5 e >=2 -> margin 2%
-    (5, 3.0),   # se p_max_pct <10 -> margin 3%
-    (10, 4.0),  # se p_max_pct <20 -> margin 4%
-    (20, 5.0)   # >=20 -> margin 5%
-]
 TRIGGER_BY = "LastPrice"    # "LastPrice" o "MarkPrice" per trigger degli stop exchange
-TRAILING_POLL_SEC = 5       # frequenza worker trailing in secondi (default 5s)
-
 RATCHET_TIERS_ROI = [
     (30, 15),   # superato 30% ROI → garantisci 15%
     (45, 30),
@@ -79,12 +71,7 @@ _trading_paused_until = 0
 ENABLE_DD_PAUSE = os.getenv("ENABLE_DD_PAUSE", "0") == "1"   # se "1" mantiene la pausa forzata
 DD_PAUSE_MINUTES = int(os.getenv("DD_PAUSE_MINUTES", "120"))
 RISK_THROTTLE_LEVEL = 0  # 0=off, 1=DD > cap, 2=DD > 2*cap
-ENABLE_TP1 = False       # abilita TP parziale a 1R
-TP1_R_MULT = 1.0        # target TP1 a 1R
-TP1_CLOSE_PCT = 0.5     # chiudi il 50% a TP1
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
-COOLDOWN_MINUTES = 60
-cooldown = {}
 ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
 # --- MTF entry: segnali su 15m, trend su 4h/1h ---
@@ -99,15 +86,12 @@ open_positions = set()
 position_data = {}
 last_exit_time = {}
 recent_losses = {}          # conteggio loss consecutivi per simbolo
-last_entry_side = {}        # "LONG" o "SHORT"
-MAX_CONSEC_LOSSES = 2       # dopo 2 loss consecutivi blocca nuovi ingressi
 FORCED_WAIT_MIN = 90        # attesa minima (minuti) se il contesto resta sfavorevole
 # ---- Logging flags (accensione selettiva via env/Variables di Railway) ----
 LOG_DEBUG_ASSETS     = os.getenv("LOG_DEBUG_ASSETS", "0") == "1"
 LOG_DEBUG_DECIMALS   = os.getenv("LOG_DEBUG_DECIMALS", "0") == "1"
 LOG_DEBUG_SYNC       = os.getenv("LOG_DEBUG_SYNC", "0") == "1"
 LOG_DEBUG_STRATEGY   = os.getenv("LOG_DEBUG_STRATEGY", "0") == "1"
-LOG_DEBUG_TRAILING   = os.getenv("LOG_DEBUG_TRAILING", "0") == "1"
 LOG_DEBUG_PORTFOLIO  = os.getenv("LOG_DEBUG_PORTFOLIO", "0") == "1"
 # --- Loosening via env (ingressi più frequenti) ---
 MIN_CONFLUENCE = 1
@@ -120,76 +104,49 @@ ADX_RELAX_EVENT = 3.0
 RSI_LONG_THRESHOLD = 52.0
 COOLDOWN_MINUTES = 60          # fisso (non usare os.getenv)
 MAX_CONSEC_LOSSES = 2          # fisso
-FORCED_WAIT_MIN = 90           # fisso
-LIQUIDITY_MIN_VOLUME = 1_000_000
+ 
 LINEAR_MIN_TURNOVER = 5_000_000
 # Large-cap con minQty elevata: abilita auto-bump del notional al minimo
 LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
+# --- Nuova gestione rischio e R-multipli ---
+RISK_PCT = float(os.getenv("RISK_PCT", "0.0075"))   # 0.75% equity per trade
+SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "1.4"))
+TP1_R = float(os.getenv("TP1_R", "1.0"))
+TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.4"))  # 40% posizione al primo TP
+BE_AT_R = float(os.getenv("BE_AT_R", "1.0"))
+TRAIL_START_R = float(os.getenv("TRAIL_START_R", "2.0"))
+TRAIL_ATR_MULT = float(os.getenv("TRAIL_ATR_MULT", "1.0"))
 # --- BLACKLIST STABLECOIN ---
 STABLECOIN_BLACKLIST = [
     "USDCUSDT", "USDEUSDT", "TUSDUSDT", "USDPUSDT", "BUSDUSDT", "FDUSDUSDT", "DAIUSDT", "EURUSDT", "USDTUSDT"
 ]
 EXCLUSION_LIST = ["FUSDT", "YBUSDT", "ZBTUSDT", "RECALLUSDT", "XPLUSDT", "BRETTUSDT"]
 
-def is_trending_down(symbol: str, tf: str = "240"):
-    """
-    Ritorna True se l'asset è in downtrend su timeframe superiore (default 4h).
-    """
-    endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
-    params = {
-        "category": "linear",
-        "symbol": symbol,
-        "interval": tf,
-        "limit": 220  # almeno 200 barre per EMA200
-    }
-    try:
-        resp = requests.get(endpoint, params=params, timeout=10)
-        data = resp.json()
-        if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
-            return False
-        raw = data["result"]["list"]
-        df = pd.DataFrame(raw, columns=[
-            "timestamp", "Open", "High", "Low", "Close", "Volume", "turnover"
-        ])
-        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
-        df.dropna(subset=["Close"], inplace=True)
-        if len(df) < 200:
-            return False
-        ema200 = EMAIndicator(close=df["Close"], window=200).ema_indicator()
-        # Downtrend se EMA200 decrescente e prezzo sotto EMA200
-        return df["Close"].iloc[-1] < ema200.iloc[-1] and ema200.iloc[-1] <= ema200.iloc[-2]
-    except Exception:
-        return False
+# Cache leggera prezzo (TTL in secondi)
+LAST_PRICE_TTL_SEC = 2
+_last_price_cache = {}
 
-def is_trending_down_1h(symbol: str, tf: str = "60"):
-    """
-    Ritorna True se l'asset è in downtrend su timeframe 1h.
-    """
-    endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
-    params = {
-        "category": "linear",
-        "symbol": symbol,
-        "interval": tf,
-        "limit": 120  # almeno 100 barre per EMA100
-    }
-    try:
-        resp = requests.get(endpoint, params=params, timeout=10)
-        data = resp.json()
-        if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
-            return False
-        raw = data["result"]["list"]
-        df = pd.DataFrame(raw, columns=[
-            "timestamp", "Open", "High", "Low", "Close", "Volume", "turnover"
-        ])
-        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
-        df.dropna(subset=["Close"], inplace=True)
-        if len(df) < 100:
-            return False
-        ema100 = EMAIndicator(close=df["Close"], window=100).ema_indicator()
-        # Downtrend se EMA100 decrescente e prezzo sotto EMA100
-        return df["Close"].iloc[-1] < ema100.iloc[-1] and ema100.iloc[-1] <= ema100.iloc[-2]
-    except Exception:
-        return False
+# Locks per strutture condivise
+_state_lock = threading.RLock()
+_instr_lock = threading.RLock()
+_price_lock = threading.RLock()
+
+# Helpers atomici per lo stato
+def get_position(symbol: str):
+    with _state_lock:
+        return position_data.get(symbol)
+
+def set_position(symbol: str, entry: dict) -> None:
+    with _state_lock:
+        position_data[symbol] = entry
+
+def add_open(symbol: str) -> None:
+    with _state_lock:
+        open_positions.add(symbol)
+
+def discard_open(symbol: str) -> None:
+    with _state_lock:
+        open_positions.discard(symbol)
 
 def is_trending_up(symbol: str, tf: str = "240"):
     """
@@ -367,6 +324,63 @@ def tlog(key: str, msg: str, interval_sec: int = 60):
         _last_log_times[key] = now
         log(msg)
 
+# --- Logging trade su CSV ---
+def _trade_log(event: str, symbol: str, side: str, entry_price: float = 0.0, qty: float = 0.0,
+               sl: float = 0.0, tp: float = 0.0, r_dist: float = 0.0, extra: dict | None = None):
+    try:
+        os.makedirs("logs", exist_ok=True)
+        path = os.path.join("logs", "trades.csv")
+        header_needed = not os.path.exists(path)
+        with open(path, "a", encoding="utf-8") as f:
+            if header_needed:
+                f.write("ts,event,symbol,side,entry,qty,sl,tp,r_dist,extra\n")
+            jextra = json.dumps(extra or {}, separators=(",", ":"))
+            f.write(f"{int(time.time())},{event},{symbol},{side},{entry_price},{qty},{sl},{tp},{r_dist},{jextra}\n")
+    except Exception:
+        pass
+
+# --- Helper richieste firmate Bybit (centralizzati) ---
+def _bybit_signed_get(path: str, params: dict):
+    try:
+        from urllib.parse import urlencode
+        query_string = urlencode(sorted(params.items()))
+        ts = str(int(time.time() * 1000))
+        recv_window = "5000"
+        payload = f"{ts}{KEY}{recv_window}{query_string}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": recv_window
+        }
+        url = f"{BYBIT_BASE_URL}{path}"
+        return requests.get(url, headers=headers, params=params, timeout=10)
+    except Exception as e:
+        tlog("signed_get_exc", f"[SIGNED-GET][{path}] exc: {e}", 300)
+        raise
+
+def _bybit_signed_post(path: str, body: dict):
+    try:
+        ts = str(int(time.time() * 1000))
+        recv_window = "5000"
+        body_json = json.dumps(body, separators=(",", ":"))
+        payload = f"{ts}{KEY}{recv_window}{body_json}"
+        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY,
+            "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": recv_window,
+            "X-BAPI-SIGN-TYPE": "2",
+            "Content-Type": "application/json"
+        }
+        url = f"{BYBIT_BASE_URL}{path}"
+        return requests.post(url, headers=headers, data=body_json, timeout=10)
+    except Exception as e:
+        tlog("signed_post_exc", f"[SIGNED-POST][{path}] exc: {e}", 300)
+        raise
+
 def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] = None) -> str:
     """
     Restituisce la quantità formattata secondo i decimali accettati da Bybit per qty_step e basePrecision,
@@ -420,16 +434,8 @@ def compute_trailing_distance(symbol: str, atr_val: float) -> float:
 
 def get_open_long_qty(symbol):
     try:
-        endpoint = f"{BYBIT_BASE_URL}/v5/position/list"
         params = {"category": "linear", "symbol": symbol}
-        from urllib.parse import urlencode
-        query_string = urlencode(sorted(params.items()))
-        ts = str(int(time.time() * 1000))
-        recv_window = "5000"
-        sign_payload = f"{ts}{KEY}{recv_window}{query_string}"
-        sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
-        headers = {"X-BAPI-API-KEY": KEY, "X-BAPI-SIGN": sign, "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": recv_window}
-        resp = requests.get(endpoint, headers=headers, params=params, timeout=10)
+        resp = _bybit_signed_get("/v5/position/list", params)
         data = resp.json()
         if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
             if LOG_DEBUG_SYNC:
@@ -447,16 +453,8 @@ def get_open_long_qty(symbol):
 
 def get_open_short_qty(symbol):
     try:
-        endpoint = f"{BYBIT_BASE_URL}/v5/position/list"
         params = {"category": "linear", "symbol": symbol}
-        from urllib.parse import urlencode
-        query_string = urlencode(sorted(params.items()))
-        ts = str(int(time.time() * 1000))
-        recv_window = "5000"
-        sign_payload = f"{ts}{KEY}{recv_window}{query_string}"
-        sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
-        headers = {"X-BAPI-API-KEY": KEY, "X-BAPI-SIGN": sign, "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": recv_window}
-        resp = requests.get(endpoint, headers=headers, params=params, timeout=10)
+        resp = _bybit_signed_get("/v5/position/list", params)
         data = resp.json()
         if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
             return None  # <<< PRIMA 0.0
@@ -471,13 +469,20 @@ def get_open_short_qty(symbol):
 # --- FUNZIONI DI SUPPORTO BYBIT E TELEGRAM ---
 def get_last_price(symbol):
     try:
+        now = time.time()
+        with _price_lock:
+            cached = _last_price_cache.get(symbol)
+            if cached and (now - cached.get("ts", 0)) <= LAST_PRICE_TTL_SEC:
+                return cached.get("price")
         endpoint = f"{BYBIT_BASE_URL}/v5/market/tickers"
         params = {"category": "linear", "symbol": symbol}  # PATCH: era "spot"
         resp = requests.get(endpoint, params=params, timeout=10)
         data = resp.json()
         if data.get("retCode") == 0:
-            price = data["result"]["list"][0]["lastPrice"]
-            return float(price)
+            price = float(data["result"]["list"][0]["lastPrice"])
+            with _price_lock:
+                _last_price_cache[symbol] = {"price": price, "ts": now}
+            return price
         else:
             log(f"[BYBIT] Errore get_last_price {symbol}: {data}")
             return None
@@ -493,12 +498,12 @@ def get_instrument_info(symbol: str) -> dict:
     now = time.time()
     # Cache semplice (aggiungi queste variabili globali in alto)
     global _instrument_cache
-    if '_instrument_cache' not in globals():
-        _instrument_cache = {}
-    
-    cached = _instrument_cache.get(symbol)
-    if cached and (now - cached["ts"] < 300):
-        return cached["data"]
+    with _instr_lock:
+        if '_instrument_cache' not in globals():
+            _instrument_cache = {}
+        cached = _instrument_cache.get(symbol)
+        if cached and (now - cached["ts"] < 300):
+            return cached["data"]
 
     try:
         endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
@@ -514,7 +519,8 @@ def get_instrument_info(symbol: str) -> dict:
                 "price_step": 0.01,
                 "min_order_amt": 10.0
             }
-            _instrument_cache[symbol] = {"data": parsed, "ts": now}
+            with _instr_lock:
+                _instrument_cache[symbol] = {"data": parsed, "ts": now}
             return parsed
         
         lst = data.get("result", {}).get("list", [])
@@ -527,7 +533,8 @@ def get_instrument_info(symbol: str) -> dict:
                 "price_step": 0.01,
                 "min_order_amt": 10.0
             }
-            _instrument_cache[symbol] = {"data": parsed, "ts": now}
+            with _instr_lock:
+                _instrument_cache[symbol] = {"data": parsed, "ts": now}
             return parsed
             
         info = lst[0]
@@ -547,7 +554,8 @@ def get_instrument_info(symbol: str) -> dict:
             "price_step": float(price_filter.get("tickSize", "0.01") or "0.01"),
             "min_order_amt": float(info.get("minOrderAmt", 10) or 10)
         }
-        _instrument_cache[symbol] = {"data": parsed, "ts": now}
+        with _instr_lock:
+            _instrument_cache[symbol] = {"data": parsed, "ts": now}
         return parsed
         
     except Exception as e:
@@ -582,24 +590,10 @@ def get_free_qty(symbol):
     else:
         coin = symbol
 
-    url = f"{BYBIT_BASE_URL}/v5/account/wallet-balance"
     params = {"accountType": BYBIT_ACCOUNT_TYPE}
 
-    from urllib.parse import urlencode
-    query_string = urlencode(params)
-    timestamp = str(int(time.time() * 1000))
-    sign_payload = f"{timestamp}{KEY}5000{query_string}"
-    sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
-
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": "5000"
-    }
-
     try:
-        resp = requests.get(url, headers=headers, params=params, timeout=10)
+        resp = _bybit_signed_get("/v5/account/wallet-balance", params)
         data = resp.json()
         if "result" not in data or "list" not in data["result"]:
             if LOG_DEBUG_PORTFOLIO:
@@ -746,17 +740,11 @@ def market_long(symbol: str, usdt_amount: float):
             "side": "Buy",
             "orderType": "Market",
             "qty": qty_str,
-            "positionIdx": 1
+            "positionIdx": LONG_IDX
         }
-        ts = str(int(time.time() * 1000))
-        body_json = json.dumps(body, separators=(",", ":"))
-        payload = f"{ts}{KEY}5000{body_json}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {"X-BAPI-API-KEY": KEY, "X-BAPI-SIGN": sign, "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": "5000", "X-BAPI-SIGN-TYPE": "2", "Content-Type": "application/json"}
-
-        response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+        response = _bybit_signed_post("/v5/order/create", body)
         if LOG_DEBUG_STRATEGY:
-            log(f"[LONG][{symbol}] attempt {attempt}/{max_retries} BODY={body_json}")
+            log(f"[LONG][{symbol}] attempt {attempt}/{max_retries} BODY={json.dumps(body, separators=(',', ':'))}")
 
         try:
             resp_json = response.json()
@@ -771,7 +759,9 @@ def market_long(symbol: str, usdt_amount: float):
         ret_code = resp_json.get("retCode")
         if ret_code == 170137:
             log(f"[RETRY][{symbol}] 170137 → refresh instrument e rifloor")
-            try: _instrument_cache.pop(symbol, None)
+            try:
+                with _instr_lock:
+                    _instrument_cache.pop(symbol, None)
             except Exception: pass
             info = get_instrument_info(symbol)
             qty_step = float(info.get("qty_step", qty_step))
@@ -813,21 +803,9 @@ def place_trailing_stop_long(symbol: str, trailing_dist: float):
         "category": "linear",
         "symbol": symbol,
         "trailingStop": str(trailing_dist),
-        "positionIdx": 1
+        "positionIdx": LONG_IDX
     }
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
-    resp = requests.post(f"{BYBIT_BASE_URL}/v5/position/trading-stop", headers=headers, data=body_json, timeout=10)
+    resp = _bybit_signed_post("/v5/position/trading-stop", body)
     try:
         data = resp.json()
     except:
@@ -859,17 +837,11 @@ def market_close_long(symbol: str, qty: float):
             "orderType": "Market",
             "qty": qty_str,
             "reduceOnly": True,          # <--- FIX
-            "positionIdx": 1
+            "positionIdx": LONG_IDX
         }
-        ts = str(int(time.time() * 1000))
-        body_json = json.dumps(body, separators=(",", ":"))
-        payload = f"{ts}{KEY}5000{body_json}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {"X-BAPI-API-KEY": KEY, "X-BAPI-SIGN": sign, "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": "5000", "X-BAPI-SIGN-TYPE": "2", "Content-Type": "application/json"}
-
-        response = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json)
+        response = _bybit_signed_post("/v5/order/create", body)
         if LOG_DEBUG_STRATEGY:
-            log(f"[CLOSE-LONG][{symbol}] attempt {attempt}/{max_retries} BODY={body_json}")
+            log(f"[CLOSE-LONG][{symbol}] attempt {attempt}/{max_retries} BODY={json.dumps(body, separators=(',', ':'))}")
 
         try:
             resp_json = response.json()
@@ -884,7 +856,9 @@ def market_close_long(symbol: str, qty: float):
         ret_code = resp_json.get("retCode")
         if ret_code == 170137:
             log(f"[RETRY-CLOSE][{symbol}] 170137 → refresh instrument e rifloor")
-            try: _instrument_cache.pop(symbol, None)
+            try:
+                with _instr_lock:
+                    _instrument_cache.pop(symbol, None)
             except Exception: pass
             info = get_instrument_info(symbol)
             qty_step = float(info.get("qty_step", qty_step))
@@ -900,20 +874,8 @@ def cancel_all_orders(symbol: str, order_filter: Optional[str] = None) -> bool:
     body = {"category": "linear", "symbol": symbol}
     if order_filter:
         body["orderFilter"] = order_filter  # es: "StopOrder"
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
     try:
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/cancel-all", headers=headers, data=body_json, timeout=10)
+        resp = _bybit_signed_post("/v5/order/cancel-all", body)
         ok = resp.json().get("retCode") == 0
         if not ok:
             tlog(f"cancel_all_err:{symbol}", f"[CANCEL-ALL] {symbol} resp={resp.text}", 300)
@@ -929,18 +891,10 @@ def set_position_stoploss_long(symbol: str, sl_price: float) -> bool:
         "symbol": symbol,
         "stopLoss": f"{sl_price:.8f}",
         "slTriggerBy": "MarkPrice",   # <<< FIX: allinea al conditional
-        "positionIdx": 1
-    }
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY": KEY, "X-BAPI-SIGN": sign, "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000", "X-BAPI-SIGN-TYPE": "2", "Content-Type": "application/json"
+        "positionIdx": LONG_IDX
     }
     try:
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/position/trading-stop", headers=headers, data=body_json, timeout=10)
+        resp = _bybit_signed_post("/v5/position/trading-stop", body)
         data = resp.json()
         ok = data.get("retCode") == 0
         if not ok:
@@ -954,8 +908,10 @@ def breakeven_lock_worker_long():
     # Porta lo stop della POSIZIONE a breakeven e piazza anche uno Stop-Market a BE
     while True:
         for symbol in list(open_positions):
-            entry = position_data.get(symbol)
-            if not entry or entry.get("be_locked"):
+            with _state_lock:
+                entry = position_data.get(symbol)
+                be_locked = entry.get("be_locked") if entry else False
+            if not entry or be_locked:
                 continue
 
             price_now = get_last_price(symbol)
@@ -963,21 +919,43 @@ def breakeven_lock_worker_long():
                 continue
 
             entry_price = entry.get("entry_price", price_now)
-            # Trigger BE quando il prezzo è salito almeno dell’1% (≈ +10% PnL a 10x)
-            if price_now >= entry_price * (1.0 + BREAKEVEN_LOCK_PCT):
-                # Long: copertura a BE con piccolo buffer di profitto
-                be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
-
-                # 2) piazza Stop-Market reduceOnly a BE (sul book)
+            # Attiva trailing-stop oltre soglia di R
+            try:
+                trailing_active = entry.get("trailing_active", False)
+                r_dist = entry.get("r_dist")
+                if (r_dist is not None) and (not trailing_active) and price_now >= entry_price + (TRAIL_START_R * r_dist):
+                    df_hist = fetch_history(symbol, interval=INTERVAL_MINUTES)
+                    atr_val = None
+                    if df_hist is not None and "Close" in df_hist.columns and len(df_hist) > ATR_WINDOW + 2:
+                        atr_series = AverageTrueRange(high=df_hist["High"], low=df_hist["Low"], close=df_hist["Close"], window=ATR_WINDOW).average_true_range()
+                        last_atr = float(atr_series.iloc[-1]) if not pd.isna(atr_series.iloc[-1]) else 0.0
+                        atr_val = last_atr
+                    if atr_val is None or atr_val <= 0:
+                        atr_val = float(r_dist) / max(1e-9, SL_ATR_MULT)
+                    trailing_base = atr_val * TRAIL_ATR_MULT
+                    trailing_dist = compute_trailing_distance(symbol, trailing_base)
+                    if place_trailing_stop_long(symbol, trailing_dist):
+                        entry["trailing_active"] = True
+                        with _state_lock:
+                            position_data[symbol] = entry
+                        tlog(f"trail_on_long:{symbol}", f"[TRAIL-ON][LONG] {symbol} attivo dist={trailing_dist:.6f}", 60)
+            except Exception as _e:
+                if LOG_DEBUG_STRATEGY:
+                    tlog(f"trail_on_exc_long:{symbol}", f"[TRAIL-ON-EXC][LONG] {symbol} exc={_e}", 300)
+            r_dist = entry.get("r_dist")
+            cond_be = (r_dist is not None and price_now >= entry_price + (BE_AT_R * r_dist))
+            if r_dist is None:
+                cond_be = price_now >= entry_price * (1.0 + BREAKEVEN_LOCK_PCT)
+            if cond_be:
+                be_price = entry_price
                 qty_live = get_open_long_qty(symbol)
                 if qty_live and qty_live > 0:
-                    place_conditional_sl_long(symbol, be_price, qty_live, trigger_by="MarkPrice")
-
-                # 3) aggiorna anche lo stopLoss della POSIZIONE (trading-stop)
-                set_position_stoploss_long(symbol, be_price)
+                    set_position_stoploss_long(symbol, be_price)
 
                 entry["be_locked"] = True
                 entry["be_price"] = be_price
+                with _state_lock:
+                    position_data[symbol] = entry
                 tlog(f"be_lock:{symbol}", f"[BE-LOCK][LONG] {symbol} SL→BE {be_price:.6f}", 60)
         time.sleep(5)
 
@@ -1011,6 +989,11 @@ def profit_floor_worker_long():
             if not entry_price or not qty_live or qty_live <= 0:
                 continue
 
+            # Se il trailing Bybit è attivo, non alziamo più lo stop manualmente
+            if entry.get("trailing_active", False):
+                set_position(symbol, entry)
+                continue
+
             price_now = get_last_price(symbol)
             if not price_now:
                 continue
@@ -1029,12 +1012,12 @@ def profit_floor_worker_long():
 
             # Se ancora nessuna soglia valida → non fare nulla
             if target_floor_roi is None:
-                position_data[symbol] = entry
+                set_position(symbol, entry)
                 continue
 
             # Non aggiornare se il floor non cresce
             if prev_floor_roi is not None and target_floor_roi <= prev_floor_roi:
-                position_data[symbol] = entry
+                set_position(symbol, entry)
                 continue
 
             # Rispetta cooldown
@@ -1057,15 +1040,13 @@ def profit_floor_worker_long():
                 entry["floor_roi"] = target_floor_roi
                 entry["floor_price"] = floor_price
                 entry["floor_updated_ts"] = time.time()
-                position_data[symbol] = entry
+                set_position(symbol, entry)
                 tlog(f"floor_up_long_skip:{symbol}",
                      f"[FLOOR-UP-SKIP][LONG] {symbol} MFE={mfe_roi:.1f}% targetROI={target_floor_roi:.1f}% floorPrice={floor_price:.6f} ≥ current={price_now:.6f}", 120)
                 continue
 
-            # Aggiorna trading-stop
+            # Aggiorna trading-stop (niente Stop-Market backup)
             set_ok = set_position_stoploss_long(symbol, floor_price)
-            # Stop-Market backup
-            place_conditional_sl_long(symbol, floor_price, qty_live, trigger_by=FLOOR_TRIGGER_BY)
 
             entry["floor_roi"] = target_floor_roi
             entry["floor_price"] = floor_price
@@ -1073,7 +1054,7 @@ def profit_floor_worker_long():
 
             tlog(f"floor_up_long:{symbol}",
                  f"[FLOOR-UP][LONG] {symbol} MFE={mfe_roi:.1f}% → FloorROI={target_floor_roi:.1f}% → SL={floor_price:.6f} set={set_ok}", 30)
-            position_data[symbol] = entry
+            set_position(symbol, entry)
 
         time.sleep(3)
 
@@ -1086,9 +1067,9 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
     try:
         info = get_instrument_info(symbol)
         qty_step = info.get("qty_step", 0.01)
-        price_step = info.get("price_step", 0.01)  # <-- aggiungi
+        price_step = info.get("price_step", 0.01)
         qty_str = _format_qty_with_step(float(qty), qty_step)
-        stop_str = format_price_bybit(stop_price, price_step)  # <-- aggiungi
+        stop_str = format_price_bybit(stop_price, price_step)
         body = {
             "category": "linear",
             "symbol": symbol,
@@ -1096,81 +1077,63 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
             "orderType": "Market",
             "qty": qty_str,
             "reduceOnly": True,
-            "positionIdx": 1,
+            "positionIdx": LONG_IDX,
             "triggerBy": trigger_by,
-            "triggerPrice": stop_str,  # <-- sostituisci
+            "triggerPrice": stop_str,
             "triggerDirection": 2,
             "closeOnTrigger": True
         }
-        # DEBUG: log body json (temporaneo)
         if LOG_DEBUG_STRATEGY:
             log(f"[SL-DEBUG-BODY][LONG] {json.dumps(body)}")
-        ts = str(int(time.time() * 1000))
-        recv_window = "5000"
-        body_json = json.dumps(body, separators=(",", ":"))
-        payload = f"{ts}{KEY}{recv_window}{body_json}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": recv_window,
-            "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json"
-        }
-        resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json, timeout=10)
-        try:
-            data = resp.json()
-        except:
-            data = {}
+        resp = _bybit_signed_post("/v5/position/trading-stop", body)
+        data = resp.json()
         if data.get("retCode") == 0:
             return True
-        # Log completo (response + body) per debug
-        tlog(f"sl_create_err:{symbol}", f"[SL-PLACE][LONG] retCode={data.get('retCode')} msg={data.get('retMsg')} resp={json.dumps(data)} body={body}", 300)
+        tlog(
+            f"sl_create_err:{symbol}",
+            f"[SL-PLACE][LONG] retCode={data.get('retCode')} msg={data.get('retMsg')}",
+            300,
+        )
         return False
     except Exception as e:
         tlog(f"sl_create_exc:{symbol}", f"[SL-PLACE][LONG] eccezione: {e}", 300)
         return False
 
-def place_takeprofit_long(symbol: str, tp_price: float, qty: float) -> (bool, str):
+def place_takeprofit_long(symbol: str, tp_price: float, qty: float) -> tuple[bool, str]:
     info = get_instrument_info(symbol)
     qty_step = info.get("qty_step", 0.01)
     price_step = info.get("price_step", 0.01)
     qty_str = _format_qty_with_step(float(qty), qty_step)
-    tp_str = format_price_bybit(tp_price, price_step)   # <<< allinea al tick
+    tp_str = format_price_bybit(tp_price, price_step)
     body = {
         "category": "linear",
         "symbol": symbol,
         "side": "Sell",
         "orderType": "Limit",
         "qty": qty_str,
-        "price": tp_str,                                  # <<< usa prezzo allineato
+        "price": tp_str,
         "timeInForce": "PostOnly",
         "reduceOnly": True,
-        "positionIdx": 1
+        "positionIdx": LONG_IDX,
     }
-    ts = str(int(time.time() * 1000))
-    body_json = json.dumps(body, separators=(",", ":"))
-    payload = f"{ts}{KEY}5000{body_json}"
-    sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN-TYPE": "2",
-        "Content-Type": "application/json"
-    }
-    resp = requests.post(f"{BYBIT_BASE_URL}/v5/order/create", headers=headers, data=body_json, timeout=10)
     try:
+        resp = _bybit_signed_post("/v5/order/create", body)
         data = resp.json()
-    except:
+    except Exception:
         data = {}
     if data.get("retCode") == 0:
         oid = data.get("result", {}).get("orderId", "") or ""
-        tlog(f"tp_place:{symbol}", f"[TP-PLACE] {symbol} tp={tp_price:.6f} qty={qty_str} orderId={oid}", 30)
+        tlog(
+            f"tp_place:{symbol}",
+            f"[TP-PLACE] {symbol} tp={tp_price:.6f} qty={qty_str} orderId={oid}",
+            30,
+        )
         return True, oid
-    tlog(f"tp_create_err:{symbol}", f"[TP-PLACE][LONG] retCode={data.get('retCode')} msg={data.get('retMsg')}", 300)
+    tlog(
+        f"tp_create_err:{symbol}",
+        f"[TP-PLACE][LONG] retCode={data.get('retCode')} msg={data.get('retMsg')}",
+        300,
+    )
     return False, ""
 
 def fetch_history(symbol: str, interval=INTERVAL_MINUTES, limit=400):
@@ -1239,7 +1202,6 @@ def record_exit(symbol: str, entry_price: float, exit_price: float, side: str):
         recent_losses[symbol] = recent_losses.get(symbol, 0) + 1
     else:
         recent_losses[symbol] = 0
-    last_entry_side[symbol] = side
     
 def analyze_asset(symbol: str):
     # Trend filter configurabile
@@ -1467,7 +1429,7 @@ def sync_positions_from_wallet():
             except StopIteration:
                 entry_price = price
             entry_cost = qty * entry_price
-            # Calcola ATR e SL/TP corretti per LONG
+            # Calcola ATR e parametri coerenti con la nuova gestione (r_dist, tp1)
             df = fetch_history(symbol)
             if df is not None and "Close" in df.columns:
                 try:
@@ -1478,11 +1440,14 @@ def sync_positions_from_wallet():
             else:
                 atr_val = price * 0.02
 
-            tp = price + (atr_val * TP_FACTOR)
-            sl_atr = entry_price - (atr_val * SL_FACTOR)      # usa entry_price come riferimento
-            sl_cap = entry_price * (1.0 - MAX_LOSS_CAP_PCT)   # cap 3% sotto entry
+            # Nuovi parametri locali coerenti con R-based: r_dist e tp1
+            r_dist = atr_val * SL_ATR_MULT
+            tp = entry_price + (TP1_R * r_dist)
+            # SL locale informativo; non modifichiamo ordini a sync
+            sl_atr = entry_price - r_dist
+            sl_cap = entry_price * (1.0 - MAX_LOSS_CAP_PCT)
             final_sl = max(sl_atr, sl_cap)
-            position_data[symbol] = {
+            set_position(symbol, {
                 "entry_price": entry_price,
                 "tp": tp,
                 "sl": final_sl,
@@ -1490,15 +1455,16 @@ def sync_positions_from_wallet():
                 "qty": qty,
                 "entry_time": time.time(),
                 "trailing_active": False,
-                "p_max": price
-            }
+                "p_max": price,
+                "r_dist": r_dist
+            })
             trovate += 1
             log(f"[SYNC] Posizione LONG trovata: {symbol} qty={qty} entry={entry_price:.4f} SL={final_sl:.4f} TP={tp:.4f}")
             # Piazza subito stop di posizione + conditional (backup) col CAP
             set_position_stoploss_long(symbol, final_sl)
             place_conditional_sl_long(symbol, final_sl, qty, trigger_by="MarkPrice")
             # Marca come già in posizione per evitare nuovi entry
-            open_positions.add(symbol)
+            add_open(symbol)
 
             # >>> PATCH: BE-LOCK immediato se già oltre soglia al riavvio
             try:
@@ -1508,8 +1474,10 @@ def sync_positions_from_wallet():
                     if qty_live and qty_live > 0:
                         place_conditional_sl_long(symbol, be_price, qty_live, trigger_by="MarkPrice")
                         set_position_stoploss_long(symbol, be_price)
-                        position_data[symbol]["be_locked"] = True
-                        position_data[symbol]["be_price"] = be_price
+                        entry_pd = get_position(symbol) or {}
+                        entry_pd["be_locked"] = True
+                        entry_pd["be_price"] = be_price
+                        set_position(symbol, entry_pd)
                         tlog(f"be_lock_sync:{symbol}", f"[BE-LOCK-SYNC][LONG] SL→BE {be_price:.6f}", 300)
             except Exception as e:
                 tlog(f"be_lock_sync_exc:{symbol}", f"[BE-LOCK-SYNC][LONG] exc: {e}", 300)
@@ -1525,85 +1493,9 @@ sync_positions_from_wallet()
 def get_usdt_balance() -> float:
     return get_free_qty("USDT")
 
-def calculate_stop_loss(entry_price, current_price, p_max, trailing_active):
-    # LONG: SL iniziale sotto l’entry; in trailing segue p_max
-    if not trailing_active:
-        return entry_price * (1 - INITIAL_STOP_LOSS_PCT)
-    else:
-        return p_max * (1 - TRAILING_DISTANCE)
-
 import threading
-import gspread
-from google.oauth2.service_account import Credentials
 
-# Config
-SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"  # copia da URL: https://docs.google.com/spreadsheets/d/<QUESTO>/edit
-SHEET_NAME = "Long"  # o quello che hai scelto
-
-# Setup una sola volta
-def setup_gspread():
-    scope = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_file("gspread-creds.json", scopes=scope)
-    client = gspread.authorize(creds)
-    return client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
-
-# Salva una riga nel foglio
-def log_trade_to_google(symbol, entry_price, exit_price, pnl_pct, strategy, result_type,
-                        usdt_entry=None, usdt_exit=None, holding_time_min=None, 
-                        mfe_r=None, mae_r=None, r_multiple=None, market_condition=None):
-    """
-    Registra trade sul foglio Google.
-    Colonne: Timestamp | Symbol | Entry | Exit | PnL % | Strategia | Tipo | USDT Enter | USDT Exit | 
-             Delta USD | Holding Min | MFE R | MAE R | R Multiple | Market Condition
-    """
-    try:
-        import base64
-
-        SHEET_ID = "1KF4wPfewt5oBXbUaaoXOW5GKMqRk02ZMA94TlVkXzXg"
-        SHEET_NAME = "Long"
-
-        encoded = os.getenv("GSPREAD_CREDS_B64")
-        if not encoded:
-            log("❌ Variabile GSPREAD_CREDS_B64 non trovata")
-            return
-
-        # Path portabile anche su Windows
-        creds_path = os.path.join(os.getcwd(), "gspread-creds-runtime.json")
-        with open(creds_path, "wb") as f:
-            f.write(base64.b64decode(encoded))
-
-        scope = ["https://www.googleapis.com/auth/spreadsheets"]
-        creds = Credentials.from_service_account_file(creds_path, scopes=scope)
-        client = gspread.authorize(creds)
-        sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
-
-        # Se non forniti li calcoliamo come fallback
-        if usdt_entry is None:
-            usdt_entry = entry_price
-        if usdt_exit is None:
-            usdt_exit = exit_price
-        delta_usd = usdt_exit - usdt_entry
-
-        # Append row (15 colonne ora)
-        sheet.append_row([
-            time.strftime("%Y-%m-%d %H:%M:%S"),
-            symbol,
-            round(entry_price, 6),
-            round(exit_price, 6),
-            f"{pnl_pct:.2f}%",
-            strategy,
-            result_type,
-            f"{usdt_entry:.2f}",
-            f"{usdt_exit:.2f}",
-            f"{delta_usd:.2f}",
-            f"{holding_time_min:.1f}" if holding_time_min else "",
-            f"{mfe_r:.2f}" if mfe_r else "",
-            f"{mae_r:.2f}" if mae_r else "",
-            f"{r_multiple:.2f}" if r_multiple else "",
-            market_condition or ""
-        ])
-    except Exception as e:
-        log(f"❌ Errore log su Google Sheets: {e}")
+ 
 
 # --- LOGICA 70/30 SU VALORE TOTALE PORTAFOGLIO (USDT + coin) ---
 def get_portfolio_value():
@@ -1623,7 +1515,7 @@ def get_portfolio_value():
                 total += value
     return total, usdt_balance, coin_values
 
-low_balance_alerted = False  # Deve essere fuori dal ciclo per persistere tra i cicli
+ 
 # >>> PATCH: avvio worker di breakeven lock (LONG)
 be_lock_thread_long = threading.Thread(target=breakeven_lock_worker_long, daemon=True)
 be_lock_thread_long.start()
@@ -1745,20 +1637,32 @@ while True:
                 except Exception:
                     pass
 
+            # --- Sizing basato sul rischio (ATR e R) ---
+            price_now_calc = get_last_price(symbol) or price
+            df = fetch_history(symbol, interval=INTERVAL_MINUTES)
+            if df is None or len(df) < max(ATR_WINDOW+2, 50):
+                tlog(f"no_hist:{symbol}", f"[SKIP] Storico insufficiente per sizing ATR su {symbol}", 600)
+                continue
+            atr_series = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
+            atr_val = float(atr_series.iloc[-1]) if not pd.isna(atr_series.iloc[-1]) else 0.0
+            if atr_val <= 0:
+                tlog(f"atr_zero:{symbol}", f"[SKIP] ATR nullo per {symbol}", 600)
+                continue
+            r_dist = atr_val * SL_ATR_MULT
+            risk_usdt = max(0.0, float(portfolio_value) * RISK_PCT)
+            qty_target = risk_usdt / max(1e-9, r_dist)
+            notional_target = qty_target * price_now_calc
             max_notional_by_margin = usdt_balance * DEFAULT_LEVERAGE * MARGIN_USE_PCT
-            base_target = min(TARGET_NOTIONAL_PER_TRADE, group_available, max_notional_by_margin)
-            order_amount = min(max(0.0, base_target * strength), group_available, max_notional_by_margin, 1000.0)
+            order_amount = min(notional_target * max(0.5, min(1.0, strength)), group_available, max_notional_by_margin, 1000.0)
             info_i = get_instrument_info(symbol)
             min_order_amt = float(info_i.get("min_order_amt", 5))
             min_qty = float(info_i.get("min_qty", 0.0))
-            price_now_chk = get_last_price(symbol) or 0.0
+            price_now_chk = price_now_calc
             min_notional = max(min_order_amt, (min_qty or 0.0) * price_now_chk)
-            # PATCH: se order_amount < min_notional, prova ad alzarlo al minimo richiesto
             if order_amount < min_notional:
-                bump = min_notional * 1.01  # +1% cuscinetto
+                bump = min_notional * 1.01
                 max_by_margin = max_notional_by_margin
                 if symbol in LARGE_CAPS and max_by_margin >= bump:
-                    # Consenti override del budget di gruppo per rispettare minQty/minNotional
                     old = order_amount
                     order_amount = min(bump, max_by_margin, 1000.0)
                     log(f"[BUMP-NOTIONAL][{symbol}] alzato notional da {old:.2f} a {order_amount:.2f} per rispettare min_qty/min_notional")
@@ -1779,7 +1683,7 @@ while True:
             df = fetch_history(symbol)
             if df is not None and "Close" in df.columns:
                 atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
-                atr_val = atr.iloc[-1]
+                atr_val = float(atr.iloc[-1])
             else:
                 atr_val = price_now * 0.02
 
@@ -1788,71 +1692,40 @@ while True:
                     log(f"❌ LONG non aperto per {symbol}")
                 continue
 
-            tp_price = price_now + (atr_val * TP_FACTOR)
-            ok_tp, tp_oid = place_takeprofit_long(symbol, tp_price, qty)
-            if ok_tp:
-                tlog(f"tp_init_ok:{symbol}", f"[TP-PLACE-INIT] {symbol} tp={tp_price:.6f} orderId={tp_oid}", 30)
-            else:
-                tlog(f"tp_init_fail:{symbol}", f"[TP-PLACE-INIT] {symbol} tp={tp_price:.6f} ok=False", 30)
+            # TP1 a 1R (parziale) e SL con trading-stop
+            tp1_price = price_now + (TP1_R * r_dist)
+            qty_tp1 = max(0.0, qty * TP1_PARTIAL)
+            tp_oid = None
+            if qty_tp1 > 0:
+                ok_tp, tp_oid = place_takeprofit_long(symbol, tp1_price, qty_tp1)
+                if ok_tp:
+                    tlog(f"tp1_long:{symbol}", f"[TP1] {symbol} tp1={tp1_price:.6f} qty={qty_tp1}", 60)
 
             actual_cost = qty * price_now
             
-            atr_ratio = atr_val / price_now if price_now > 0 else 0
-            tp_factor = min(TP_MAX, max(TP_MIN, TP_FACTOR + atr_ratio * 5))
-            sl_factor = min(SL_MAX, max(SL_MIN, SL_FACTOR + atr_ratio * 3))
-            
-            tp = price_now + (atr_val * tp_factor)
-            sl_atr = price_now - (atr_val * sl_factor)
-            # CAP di perdita: non permettere SL oltre MAX_LOSS_CAP_PCT
-            sl_cap = price_now * (1.0 - MAX_LOSS_CAP_PCT)
-            final_sl = max(sl_atr, sl_cap)  # LONG: più vicino all'entry = max tra due prezzi sotto l'entry
-            
-            # >>> PIAZZA SUBITO LO STOP LOSS CONDITIONAL (reduceOnly) ALL'APERTURA
-            sl_order_id = None
-            try:
-                qty_for_sl = qty
-                # prima prova con MarkPrice (più robusto), fallback su LastPrice se retCode==10001
-                ok_sl = place_conditional_sl_long(symbol, final_sl, qty_for_sl, trigger_by="MarkPrice")
-                if ok_sl:
-                    sl_order_id = "placed_mark"
-                else:
-                    # retry con LastPrice
-                    ok_sl2 = place_conditional_sl_long(symbol, final_sl, qty_for_sl, trigger_by="LastPrice")
-                    if ok_sl2:
-                        sl_order_id = "placed_last"
-                    else:
-                        tlog(f"sl_init_fail:{symbol}", f"[SL-INIT-FAIL] {symbol} sl={final_sl:.6f} qty={qty_for_sl} (Mark/Last failed)", 30)
-                # Backup: imposta anche lo stopLoss della POSIZIONE (lato exchange)
-                set_position_stoploss_long(symbol, final_sl)
-            except Exception as e:
-                tlog(f"sl_init_exc:{symbol}", f"[SL-INIT-EXC] {symbol} exc: {e}", 300)
+            final_sl = price_now - r_dist
+            set_position_stoploss_long(symbol, final_sl)
 
-            try:
-                trailing_dist = compute_trailing_distance(symbol, float(atr_val))  # <<< clamp dinamico
-                ok_trailing = place_trailing_stop_long(symbol, trailing_dist)
-                if ok_trailing:
-                    tlog(f"trailing_init_ok:{symbol}", f"[TRAILING-INIT-LONG] {symbol} trailing={trailing_dist:.6f}", 30)
-                else:
-                    tlog(f"trailing_init_fail:{symbol}", f"[TRAILING-INIT-LONG] {symbol} trailing={trailing_dist:.6f} FAILED", 30)
-            except Exception as e:
-                tlog(f"trailing_init_exc:{symbol}", f"[TRAILING-INIT-EXC-LONG] {symbol} exc: {e}", 300)
+            # Niente trailing immediato; sarà attivato sopra 2R
+            log(f"[ENTRY-DETAIL] {symbol} | Entry: {price_now:.4f} | SL: {final_sl:.4f} | TP1: {tp1_price:.4f} | ATR: {atr_val:.4f}")
+            _trade_log("entry", symbol, "LONG", entry_price=price_now, qty=qty, sl=final_sl, tp=tp1_price, r_dist=r_dist,
+                       extra={"tp1_qty": qty_tp1})
 
-            log(f"[ENTRY-DETAIL] {symbol} | Entry: {price_now:.4f} | SL: {final_sl:.4f} | TP: {tp:.4f} | ATR: {atr_val:.4f}")
-
-            position_data[symbol] = {
+            set_position(symbol, {
                 "entry_price": price_now,
-                "tp": tp,
+                "tp": tp1_price,
                 "tp_order_id": tp_oid if 'tp_oid' in locals() else None,
-                "sl_order_id": sl_order_id,
+                "sl_order_id": None,
                 "sl": final_sl,
                 "entry_cost": actual_cost,
                 "qty": qty,
                 "entry_time": time.time(),
                 "trailing_active": False,
-                "p_max": price_now
-            }
-            open_positions.add(symbol)
-            notify_telegram(f"🟢📈 LONG aperto {symbol}\nPrezzo: {price_now:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f}\nSL: {final_sl:.4f}\nTP: {tp:.4f}")
+                "p_max": price_now,
+                "r_dist": r_dist
+            })
+            add_open(symbol)
+            notify_telegram(f"🟢📈 LONG aperto {symbol}\nPrezzo: {price_now:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f}\nSL: {final_sl:.4f}\nTP1: {tp1_price:.4f}")
             time.sleep(3)
 
         # EXIT LONG (segnale di uscita strategico)
@@ -1864,7 +1737,10 @@ while True:
             qty = get_open_long_qty(symbol)
             log(f"[EXIT-SIGNAL LONG][{symbol}] qty={qty} | entry={entry_price} | now={price}")
             if not qty or qty <= 0:
-                open_positions.discard(symbol); position_data.pop(symbol, None); continue
+                discard_open(symbol)
+                with _state_lock:
+                    position_data.pop(symbol, None)
+                continue
 
             resp = market_close_long(symbol, qty)
             if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
@@ -1873,14 +1749,11 @@ while True:
                 pnl = ((current_price - entry_price) / entry_price) * 100.0
                 notify_telegram(f"✅ Exit LONG {symbol} a {current_price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}%")
                 record_exit(symbol, entry_price, current_price, "LONG")
-                log_trade_to_google(symbol, entry_price, current_price, pnl, strategy, "Exit Signal",
-                                    usdt_entry=entry_cost, usdt_exit=exit_value,
-                                    holding_time_min=(time.time() - entry.get("entry_time", 0)) / 60,
-                                    mfe_r=entry.get('mfe', 0), mae_r=entry.get('mae', 0),
-                                    r_multiple=None, market_condition="exit_signal_long")
-                open_positions.discard(symbol)
+                # (Report Google Sheets rimosso)
+                discard_open(symbol)
                 last_exit_time[symbol] = time.time()
-                position_data.pop(symbol, None)
+                with _state_lock:
+                    position_data.pop(symbol, None)
                 if get_open_short_qty(symbol) == 0:
                     cancel_all_orders(symbol)
 
@@ -1892,12 +1765,13 @@ while True:
         # cleanup SOLO se lettura qty è valida e < min_qty
         if (saldo is not None) and (saldo < min_qty):
             tlog(f"ext_close:{symbol}", f"[CLEANUP][LONG] {symbol} chiusa lato exchange (qty={saldo}). Cancello TP/SL.", 60)
-            open_positions.discard(symbol)
+            discard_open(symbol)
             entry = position_data.get(symbol, {})
             entry_price = entry.get("entry_price", get_last_price(symbol) or 0.0)
             exit_price = get_last_price(symbol) or 0.0
             record_exit(symbol, entry_price, exit_price, "LONG")
-            position_data.pop(symbol, None)
+            with _state_lock:
+                position_data.pop(symbol, None)
             if get_open_short_qty(symbol) == 0:
                 cancel_all_orders(symbol)
     
