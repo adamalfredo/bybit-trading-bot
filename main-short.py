@@ -1123,9 +1123,21 @@ def place_takeprofit_short(symbol: str, tp_price: float, qty: float) -> tuple[bo
     try:
         info = get_instrument_info(symbol)
         qty_step = info.get("qty_step", 0.01)
-        price_step = info.get("price_step", 0.01)              # <<< aggiunto
-        qty_str = _format_qty_with_step(float(qty), qty_step)
-        tp_str = format_price_bybit(tp_price, price_step)      # <<< aggiunto
+        min_qty = float(info.get("min_qty", 0.0))
+        price_step = info.get("price_step", 0.01)
+        qty_f = float(qty)
+        if qty_f < max(min_qty, float(qty_step)):
+            tlog(f"tp_skip_min_short:{symbol}", f"[TP-SKIP][SHORT] qty parziale {qty_f} < min_qty {min_qty} (step {qty_step})", 120)
+            return False, ""
+        qty_str = _format_qty_with_step(qty_f, qty_step)
+        try:
+            from decimal import Decimal
+            if Decimal(qty_str) <= 0:
+                tlog(f"tp_skip_zero_short:{symbol}", f"[TP-SKIP][SHORT] qty_str={qty_str} non valido (≤0)", 120)
+                return False, ""
+        except Exception:
+            pass
+        tp_str = format_price_bybit(tp_price, price_step)
 
         body = {
             "category": "linear",

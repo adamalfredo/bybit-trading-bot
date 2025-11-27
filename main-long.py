@@ -1102,8 +1102,21 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
 def place_takeprofit_long(symbol: str, tp_price: float, qty: float) -> tuple[bool, str]:
     info = get_instrument_info(symbol)
     qty_step = info.get("qty_step", 0.01)
+    min_qty = float(info.get("min_qty", 0.0))
     price_step = info.get("price_step", 0.01)
-    qty_str = _format_qty_with_step(float(qty), qty_step)
+    qty_f = float(qty)
+    # Guard: se la quantità parziale è sotto min_qty, salta TP1
+    if qty_f < max(min_qty, float(qty_step)):
+        tlog(f"tp_skip_min:{symbol}", f"[TP-SKIP][LONG] qty parziale {qty_f} < min_qty {min_qty} (step {qty_step})", 120)
+        return False, ""
+    qty_str = _format_qty_with_step(qty_f, qty_step)
+    try:
+        from decimal import Decimal
+        if Decimal(qty_str) <= 0:
+            tlog(f"tp_skip_zero:{symbol}", f"[TP-SKIP][LONG] qty_str={qty_str} non valido (≤0)", 120)
+            return False, ""
+    except Exception:
+        pass
     tp_str = format_price_bybit(tp_price, price_step)
     body = {
         "category": "linear",
