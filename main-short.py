@@ -119,6 +119,11 @@ BE_AT_R = float(os.getenv("BE_AT_R", "1.0"))
 TRAIL_START_R = float(os.getenv("TRAIL_START_R", "2.0"))
 TRAIL_ATR_MULT = float(os.getenv("TRAIL_ATR_MULT", "1.0"))
 
+# --- Cassaforte in USDT (lock minimo di profitto) ---
+PNL_TRIGGER_USDT = 3.5   # quando l'Unrealized >= 3.5 USDT
+PNL_LOCK_USDT    = 3.2   # fissa uno SL che garantisca ≳ 3.2 USDT
+PNL_LOCK_BUFFER_PCT = 0.001  # 0.1% buffer per evitare SL sopra/sotto il prezzo attuale
+
 # Cache leggera prezzo (TTL in secondi)
 LAST_PRICE_TTL_SEC = 2
 _last_price_cache = {}
@@ -976,7 +981,7 @@ def breakeven_lock_worker_short():
                 entry["be_price"] = be_price
                 set_position(symbol, entry)
                 tlog(f"be_lock:{symbol}", f"[BE-LOCK][SHORT] {symbol} SL→BE {be_price:.6f}", 60)
-        time.sleep(5)
+        time.sleep(2)
 
 def _pick_floor_roi_short(mfe_roi: float) -> Optional[float]:
     """
@@ -1006,6 +1011,30 @@ def profit_floor_worker_short():
             qty_live = get_open_short_qty(symbol)
             if not entry_price or not qty_live or qty_live <= 0:
                 continue
+
+            # Cassaforte in USDT: se trailing non attivo e non già lockato, fissa SL che garantisca ≳ PNL_LOCK_USDT
+            trailing_active = entry.get("trailing_active", False)
+            usdt_floor_locked = entry.get("usdt_floor_locked", False)
+            price_now = get_last_price(symbol)
+            if price_now and (not trailing_active) and (not usdt_floor_locked):
+                unrealized = (float(entry_price) - price_now) * float(qty_live)
+                if unrealized >= PNL_TRIGGER_USDT:
+                    try:
+                        target_sl = float(entry_price) - (float(PNL_LOCK_USDT) / max(1e-9, float(qty_live)))
+                        # SHORT: stop sopra il prezzo attuale; applica buffer
+                        target_sl = max(target_sl, price_now * (1.0 + PNL_LOCK_BUFFER_PCT))
+                        if target_sl < float(entry_price):
+                            set_ok = set_position_stoploss_short(symbol, target_sl)
+                            entry["usdt_floor_locked"] = True
+                            entry["usdt_floor_price"] = target_sl
+                            entry["usdt_floor_pnl"] = PNL_LOCK_USDT
+                            entry["floor_updated_ts"] = time.time()
+                            tlog(f"usdt_floor_short:{symbol}", f"[USDT-FLOOR][SHORT] {symbol} SL→{target_sl:.6f} (lock≈{PNL_LOCK_USDT} USDT) set={set_ok}", 30)
+                            set_position(symbol, entry)
+                            continue
+                    except Exception as _e:
+                        if LOG_DEBUG_STRATEGY:
+                            tlog(f"usdt_floor_exc_short:{symbol}", f"[USDT-FLOOR-EXC][SHORT] {symbol} exc={_e}", 180)
 
             # Se il trailing Bybit è attivo, non alziamo più lo stop manualmente
             if entry.get("trailing_active", False):
@@ -1773,7 +1802,8 @@ while True:
 
             # Niente conditional SL duplicati e niente trailing immediato; trailing sarà attivato più avanti se > 2R
 
-            log(f"[ENTRY-DETAIL] {symbol} | Entry: {price_now:.4f} | SL: {final_sl:.4f} | TP1: {tp1_price:.4f} | ATR: {atr_val:.4f}")
+            trail_threshold = price_now - (TRAIL_START_R * r_dist)
+            log(f"[ENTRY-DETAIL] {symbol} | Entry: {price_now:.4f} | SL: {final_sl:.4f} | TP1: {tp1_price:.4f} | ATR: {atr_val:.4f} | Trail@≤{trail_threshold:.4f}")
             _trade_log("entry", symbol, "SHORT", entry_price=price_now, qty=qty, sl=final_sl, tp=tp1_price, r_dist=r_dist,
                        extra={"tp1_qty": qty_tp1})
             
