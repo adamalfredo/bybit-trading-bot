@@ -73,7 +73,7 @@ DD_PAUSE_MINUTES = int(os.getenv("DD_PAUSE_MINUTES", "120"))
 RISK_THROTTLE_LEVEL = 0  # 0=off, 1=DD > cap, 2=DD > 2*cap
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
 ORDER_USDT = 50.0
-ENABLE_BREAKOUT_FILTER = False  # rende opzionale il filtro breakout 6h
+ENABLE_BREAKOUT_FILTER = True  # rende opzionale il filtro breakout 6h
 # --- MTF entry: segnali su 15m, trend su 4h/1h ---
 USE_MTF_ENTRY = True
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
@@ -95,13 +95,13 @@ LOG_DEBUG_STRATEGY   = os.getenv("LOG_DEBUG_STRATEGY", "0") == "1"
 LOG_DEBUG_PORTFOLIO  = os.getenv("LOG_DEBUG_PORTFOLIO", "0") == "1"
 # --- Loosening via env (ingressi più frequenti) ---
 MIN_CONFLUENCE = 1
-TREND_MODE = "LOOSE_4H"
+TREND_MODE = "STRICT"
 ENTRY_TF_VOLATILE = 30
 ENTRY_TF_STABLE = 30
-ENTRY_ADX_VOLATILE = 22        # fisso
-ENTRY_ADX_STABLE = 20          # fisso
+ENTRY_ADX_VOLATILE = 27        # fisso
+ENTRY_ADX_STABLE = 24          # fisso
 ADX_RELAX_EVENT = 3.0
-RSI_LONG_THRESHOLD = 52.0
+RSI_LONG_THRESHOLD = 54.0
 COOLDOWN_MINUTES = 60          # fisso (non usare os.getenv)
 MAX_CONSEC_LOSSES = 2          # fisso
  
@@ -112,15 +112,15 @@ LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 RISK_PCT = float(os.getenv("RISK_PCT", "0.0075"))   # 0.75% equity per trade
 SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "1.4"))
 TP1_R = float(os.getenv("TP1_R", "1.0"))
-TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.4"))  # 40% posizione al primo TP
-BE_AT_R = float(os.getenv("BE_AT_R", "1.0"))
-TRAIL_START_R = float(os.getenv("TRAIL_START_R", "2.0"))
-TRAIL_ATR_MULT = float(os.getenv("TRAIL_ATR_MULT", "1.0"))
+TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.3"))  # 30% posizione al primo TP
+BE_AT_R = float(os.getenv("BE_AT_R", "1.2"))
+TRAIL_START_R = float(os.getenv("TRAIL_START_R", "1.5"))
+TRAIL_ATR_MULT = float(os.getenv("TRAIL_ATR_MULT", "1.3"))
 
 # --- Cassaforte in USDT (lock minimo di profitto) ---
 # Nota: per tua richiesta, trattiamo questi come default di codice
-PNL_TRIGGER_USDT = 3.5   # quando l'Unrealized >= 3.5 USDT
-PNL_LOCK_USDT    = 3.2   # fissa uno SL che garantisca ≳ 3.2 USDT
+PNL_TRIGGER_USDT = 3.2   # quando l'Unrealized >= 3.2 USDT
+PNL_LOCK_USDT    = 3.0   # fissa uno SL che garantisca ≳ 3.0 USDT
 PNL_LOCK_BUFFER_PCT = 0.001  # 0.1% buffer per evitare SL sopra/sotto il prezzo attuale
 # --- BLACKLIST STABLECOIN ---
 STABLECOIN_BLACKLIST = [
@@ -1246,6 +1246,52 @@ def record_exit(symbol: str, entry_price: float, exit_price: float, side: str):
         recent_losses[symbol] = 0
     
 def analyze_asset(symbol: str):
+    # Telemetria ingresso (ADX/EMA slopes/RSI/breakout/24h change)
+    try:
+        resp1 = requests.get(f"{BYBIT_BASE_URL}/v5/market/kline", params={"category":"linear","symbol":symbol,"interval":"60","limit":120}, timeout=10)
+        d1 = resp1.json()
+        adx1h = None
+        ema100_slope = None
+        if d1.get("retCode") == 0 and d1.get("result",{}).get("list"):
+            raw1 = d1["result"]["list"]
+            df1 = pd.DataFrame(raw1, columns=["timestamp","Open","High","Low","Close","Volume","turnover"])
+            df1["Close"] = pd.to_numeric(df1["Close"], errors="coerce")
+            df1.dropna(subset=["Close"], inplace=True)
+            if len(df1) >= 100:
+                adx1h = ADXIndicator(high=df1["High"].astype(float), low=df1["Low"].astype(float), close=df1["Close"].astype(float), window=14).adx()[-1]
+                ema100 = EMAIndicator(close=df1["Close"], window=100).ema_indicator()
+                ema100_slope = float(ema100.iloc[-1] - ema100.iloc[-2]) if len(ema100) >= 2 else None
+        resp4 = requests.get(f"{BYBIT_BASE_URL}/v5/market/kline", params={"category":"linear","symbol":symbol,"interval":"240","limit":220}, timeout=10)
+        d4 = resp4.json()
+        ema200_slope = None
+        if d4.get("retCode") == 0 and d4.get("result",{}).get("list"):
+            raw4 = d4["result"]["list"]
+            df4 = pd.DataFrame(raw4, columns=["timestamp","Open","High","Low","Close","Volume","turnover"])
+            df4["Close"] = pd.to_numeric(df4["Close"], errors="coerce")
+            df4.dropna(subset=["Close"], inplace=True)
+            if len(df4) >= 200:
+                ema200 = EMAIndicator(close=df4["Close"], window=200).ema_indicator()
+                ema200_slope = float(ema200.iloc[-1] - ema200.iloc[-2]) if len(ema200) >= 2 else None
+        rsi1h = None
+        if d1.get("retCode") == 0 and d1.get("result",{}).get("list"):
+            try:
+                rsi1h = float(RSIIndicator(close=df1["Close"], window=14).rsi().iloc[-1]) if len(df1) >= 15 else None
+            except:
+                rsi1h = None
+        breakout_ok = is_breaking_weekly_low(symbol) if ENABLE_BREAKOUT_FILTER else None
+        chg = None
+        try:
+            tick = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category":"linear","symbol":symbol}, timeout=10).json()
+            if tick.get("retCode") == 0:
+                chg = float(tick["result"]["list"][0].get("price24hPcnt", 0.0))
+        except:
+            chg = None
+        if LOG_DEBUG_STRATEGY:
+            log(f"[TELEM][LONG][{symbol}] adx1h={adx1h} ema100_slope={ema100_slope} ema200_slope={ema200_slope} rsi1h={rsi1h} breakout={breakout_ok} chg24h={chg}")
+    except Exception as e:
+        if LOG_DEBUG_STRATEGY:
+            log(f"[TELEM][LONG][{symbol}] errore telemetria: {e}")
+
     # Trend filter configurabile
     up_4h = is_trending_up(symbol, "240")
     up_1h = is_trending_up_1h(symbol, "60")
