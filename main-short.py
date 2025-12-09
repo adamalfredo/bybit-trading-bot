@@ -114,9 +114,9 @@ LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 RISK_PCT = float(os.getenv("RISK_PCT", "0.0075"))   # 0.75% equity per trade
 SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "1.4"))
 TP1_R = float(os.getenv("TP1_R", "1.0"))
-TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.3"))  # 30% posizione al primo TP
-BE_AT_R = float(os.getenv("BE_AT_R", "1.2"))
-TRAIL_START_R = float(os.getenv("TRAIL_START_R", "1.5"))
+TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.5"))  # 50% posizione al primo TP
+BE_AT_R = float(os.getenv("BE_AT_R", "1.0"))
+TRAIL_START_R = float(os.getenv("TRAIL_START_R", "1.2"))
 TRAIL_ATR_MULT = float(os.getenv("TRAIL_ATR_MULT", "1.3"))
 
 # --- Cassaforte in USDT (lock minimo di profitto) ---
@@ -154,7 +154,7 @@ def discard_open(symbol: str) -> None:
 STABLECOIN_BLACKLIST = [
     "USDCUSDT", "USDEUSDT", "TUSDUSDT", "USDPUSDT", "BUSDUSDT", "FDUSDUSDT", "DAIUSDT", "EURUSDT", "USDTUSDT"
 ]
-EXCLUSION_LIST = ["FUSDT", "YBUSDT", "ZBTUSDT", "RECALLUSDT", "XPLUSDT", "BRETTUSDT"]
+EXCLUSION_LIST = ["FUSDT", "YBUSDT", "ZBTUSDT", "RECALLUSDT", "XPLUSDT", "BRETTUSDT", "STABLEUSDT"]
 
 def is_trending_down(symbol: str, tf: str = "240"):
     """
@@ -1331,6 +1331,18 @@ def analyze_asset(symbol: str):
         if LOG_DEBUG_STRATEGY:
             log(f"[TELEM][SHORT][{symbol}] errore telemetria: {e}")
 
+    # Momentum 24h coerente al lato: per SHORT richiedi variazione 24h negativa (se disponibile)
+    try:
+        tick = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category":"linear","symbol":symbol}, timeout=10).json()
+        if tick.get("retCode") == 0:
+            chg = float(tick["result"]["list"][0].get("price24hPcnt", 0.0))
+            if chg >= 0:
+                if LOG_DEBUG_STRATEGY:
+                    tlog(f"mom_short:{symbol}", f"[MOMENTUM][{symbol}] price24hPcnt={chg:.2f}% non coerente con SHORT → skip", 600)
+                return None, None, None
+    except Exception:
+        pass
+
     # Filtro trend configurabile (SHORT)
     down_4h = is_trending_down(symbol, "240")
     down_1h = is_trending_down_1h(symbol, "60")
@@ -1351,10 +1363,11 @@ def analyze_asset(symbol: str):
             tlog(f"trend_short:{symbol}", f"[TREND-FILTER][{symbol}] Regime={CURRENT_REGIME}, trend non idoneo (mode={TREND_MODE})", 600)
         return None, None, None
 
-    # Breakout (solo log informativo, non blocca)
+    # Breakout hard filter: richiedi breakdown 6h per SHORT
     if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_low(symbol):
         if LOG_DEBUG_STRATEGY:
-            tlog(f"breakout_short:{symbol}", f"[BREAKOUT-FILTER][{symbol}] Non in breakdown 6h (info)", 1800)
+            tlog(f"breakout_short:{symbol}", f"[BREAKOUT-FILTER][{symbol}] Non in breakdown 6h → skip ingresso", 600)
+        return None, None, None
 
     try:
         is_volatile = symbol in VOLATILE_ASSETS
@@ -1847,8 +1860,15 @@ while True:
                 ok_tp, tp_oid = place_takeprofit_short(symbol, tp1_price, qty_tp1)
                 if ok_tp:
                     tlog(f"tp1_short:{symbol}", f"[TP1] {symbol} tp1={tp1_price:.6f} qty={qty_tp1}", 60)
-            final_sl = price_now + r_dist
+            # APPLICA CAP PERDITA: non oltre MAX_LOSS_CAP_PCT sopra l'entry
+            sl_cap = price_now * (1.0 + MAX_LOSS_CAP_PCT)
+            final_sl = min(price_now + r_dist, sl_cap)
             set_position_stoploss_short(symbol, final_sl)
+            # Backup: piazza anche uno Stop-Market reduceOnly
+            try:
+                place_conditional_sl_short(symbol, final_sl, qty, trigger_by="MarkPrice")
+            except Exception:
+                pass
             actual_cost = qty * price_now
             log(f"🟢 SHORT aperto per {symbol}. Investito effettivo: {actual_cost:.2f} USDT")
 

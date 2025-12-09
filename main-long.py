@@ -73,7 +73,7 @@ DD_PAUSE_MINUTES = int(os.getenv("DD_PAUSE_MINUTES", "120"))
 RISK_THROTTLE_LEVEL = 0  # 0=off, 1=DD > cap, 2=DD > 2*cap
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
 ORDER_USDT = 50.0
-ENABLE_BREAKOUT_FILTER = True  # rende opzionale il filtro breakout 6h
+ENABLE_BREAKOUT_FILTER = True  # rende obbligatorio il breakout 6h
 # --- MTF entry: segnali su 15m, trend su 4h/1h ---
 USE_MTF_ENTRY = True
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
@@ -112,9 +112,9 @@ LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 RISK_PCT = float(os.getenv("RISK_PCT", "0.0075"))   # 0.75% equity per trade
 SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "1.4"))
 TP1_R = float(os.getenv("TP1_R", "1.0"))
-TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.3"))  # 30% posizione al primo TP
-BE_AT_R = float(os.getenv("BE_AT_R", "1.2"))
-TRAIL_START_R = float(os.getenv("TRAIL_START_R", "1.5"))
+TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.5"))  # 50% posizione al primo TP
+BE_AT_R = float(os.getenv("BE_AT_R", "1.0"))
+TRAIL_START_R = float(os.getenv("TRAIL_START_R", "1.2"))
 TRAIL_ATR_MULT = float(os.getenv("TRAIL_ATR_MULT", "1.3"))
 
 # --- Cassaforte in USDT (lock minimo di profitto) ---
@@ -126,7 +126,7 @@ PNL_LOCK_BUFFER_PCT = 0.001  # 0.1% buffer per evitare SL sopra/sotto il prezzo 
 STABLECOIN_BLACKLIST = [
     "USDCUSDT", "USDEUSDT", "TUSDUSDT", "USDPUSDT", "BUSDUSDT", "FDUSDUSDT", "DAIUSDT", "EURUSDT", "USDTUSDT"
 ]
-EXCLUSION_LIST = ["FUSDT", "YBUSDT", "ZBTUSDT", "RECALLUSDT", "XPLUSDT", "BRETTUSDT"]
+EXCLUSION_LIST = ["FUSDT", "YBUSDT", "ZBTUSDT", "RECALLUSDT", "XPLUSDT", "BRETTUSDT", "STABLEUSDT"]
 
 # Cache leggera prezzo (TTL in secondi)
 LAST_PRICE_TTL_SEC = 2
@@ -260,6 +260,18 @@ def is_breaking_weekly_low(symbol: str):
     last_close = df["Close"].iloc[-1]
     low = df["Low"].iloc[-bars:].min()
     return last_close <= low * 0.995  # tolleranza 0.5% sotto il minimo
+
+def is_breaking_weekly_high(symbol: str):
+    """
+    True se il prezzo attuale è sopra il massimo delle ultime 6 ore (breakout).
+    """
+    df = fetch_history(symbol, interval=INTERVAL_MINUTES)
+    bars = int(6 * 60 / INTERVAL_MINUTES)
+    if df is None or len(df) < bars:
+        return False
+    last_close = df["Close"].iloc[-1]
+    high = df["High"].iloc[-bars:].max()
+    return last_close >= high * 1.005  # tolleranza +0.5% sopra il massimo
 
 def update_assets(top_n=18, n_stable=7):
     """
@@ -1292,6 +1304,18 @@ def analyze_asset(symbol: str):
         if LOG_DEBUG_STRATEGY:
             log(f"[TELEM][LONG][{symbol}] errore telemetria: {e}")
 
+    # Momentum 24h coerente al lato: per LONG richiedi variazione 24h positiva (se disponibile)
+    try:
+        tick = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category":"linear","symbol":symbol}, timeout=10).json()
+        if tick.get("retCode") == 0:
+            chg = float(tick["result"]["list"][0].get("price24hPcnt", 0.0))
+            if chg <= 0:
+                if LOG_DEBUG_STRATEGY:
+                    tlog(f"mom_long:{symbol}", f"[MOMENTUM][{symbol}] price24hPcnt={chg:.2f}% non coerente con LONG → skip", 600)
+                return None, None, None
+    except Exception:
+        pass
+
     # Trend filter configurabile
     up_4h = is_trending_up(symbol, "240")
     up_1h = is_trending_up_1h(symbol, "60")
@@ -1312,10 +1336,11 @@ def analyze_asset(symbol: str):
             tlog(f"trend_long:{symbol}", f"[TREND-FILTER][{symbol}] Regime={CURRENT_REGIME}, trend non idoneo (mode={TREND_MODE}), skip.", 600)
         return None, None, None
 
-    # Non blocca: solo log informativo
-    if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_low(symbol):
+    # Breakout hard filter: richiedi breakout 6h (massimo rotto)
+    if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_high(symbol):
         if LOG_DEBUG_STRATEGY:
-            tlog(f"breakout_long:{symbol}", f"[BREAKOUT-FILTER][{symbol}] Non in breakout 6h (info).", 1800)
+            tlog(f"breakout_long:{symbol}", f"[BREAKOUT-FILTER][{symbol}] Non in breakout 6h → skip ingresso.", 600)
+        return None, None, None
 
     try:
         is_volatile = symbol in VOLATILE_ASSETS
@@ -1791,8 +1816,15 @@ while True:
 
             actual_cost = qty * price_now
             
-            final_sl = price_now - r_dist
+            # APPPLICA CAP PERDITA: non oltre MAX_LOSS_CAP_PCT sotto l'entry
+            sl_cap = price_now * (1.0 - MAX_LOSS_CAP_PCT)
+            final_sl = max(price_now - r_dist, sl_cap)
             set_position_stoploss_long(symbol, final_sl)
+            # Backup: piazza anche uno Stop-Market reduceOnly
+            try:
+                place_conditional_sl_long(symbol, final_sl, qty, trigger_by="MarkPrice")
+            except Exception:
+                pass
 
             # Niente trailing immediato; sarà attivato sopra 2R
             trail_threshold = price_now + (TRAIL_START_R * r_dist)
