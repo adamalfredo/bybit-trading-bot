@@ -1267,7 +1267,9 @@ def analyze_asset(symbol: str):
         if d1.get("retCode") == 0 and d1.get("result",{}).get("list"):
             raw1 = d1["result"]["list"]
             df1 = pd.DataFrame(raw1, columns=["timestamp","Open","High","Low","Close","Volume","turnover"])
-            df1["Close"] = pd.to_numeric(df1["Close"], errors="coerce")
+            # Convertiamo numerici per evitare errori nelle librerie ta
+            for col in ("Open","High","Low","Close"):
+                df1[col] = pd.to_numeric(df1[col], errors="coerce")
             df1.dropna(subset=["Close"], inplace=True)
             if len(df1) >= 100:
                 adx1h = ADXIndicator(high=df1["High"].astype(float), low=df1["Low"].astype(float), close=df1["Close"].astype(float), window=14).adx()[-1]
@@ -1279,7 +1281,8 @@ def analyze_asset(symbol: str):
         if d4.get("retCode") == 0 and d4.get("result",{}).get("list"):
             raw4 = d4["result"]["list"]
             df4 = pd.DataFrame(raw4, columns=["timestamp","Open","High","Low","Close","Volume","turnover"])
-            df4["Close"] = pd.to_numeric(df4["Close"], errors="coerce")
+            for col in ("Open","High","Low","Close"):
+                df4[col] = pd.to_numeric(df4[col], errors="coerce")
             df4.dropna(subset=["Close"], inplace=True)
             if len(df4) >= 200:
                 ema200 = EMAIndicator(close=df4["Close"], window=200).ema_indicator()
