@@ -1294,7 +1294,9 @@ def analyze_asset(symbol: str):
                 df1[col] = pd.to_numeric(df1[col], errors="coerce")
             df1.dropna(subset=["Close"], inplace=True)
             if len(df1) >= 100:
-                adx1h = ADXIndicator(high=df1["High"].astype(float), low=df1["Low"].astype(float), close=df1["Close"].astype(float), window=14).adx()[-1]
+                adx_series = ADXIndicator(high=df1["High"].astype(float), low=df1["Low"].astype(float), close=df1["Close"].astype(float), window=14).adx()
+                if len(adx_series) > 0:
+                    adx1h = float(adx_series.iloc[-1])
                 ema100 = EMAIndicator(close=df1["Close"], window=100).ema_indicator()
                 ema100_slope = float(ema100.iloc[-1] - ema100.iloc[-2]) if len(ema100) >= 2 else None
         # Kline 4h per EMA200
