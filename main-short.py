@@ -1321,8 +1321,9 @@ def analyze_asset(symbol: str):
         chg = None
         try:
             tick = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category":"linear","symbol":symbol}, timeout=10).json()
-            if tick.get("retCode") == 0:
-                chg = float(tick["result"]["list"][0].get("price24hPcnt", 0.0))
+            if tick.get("retCode") == 0 and tick.get("result", {}).get("list"):
+                lst = tick["result"]["list"]
+                chg = float(lst[0].get("price24hPcnt", 0.0))
         except:
             chg = None
         if LOG_DEBUG_STRATEGY:
@@ -1334,8 +1335,9 @@ def analyze_asset(symbol: str):
     # Momentum 24h coerente al lato: per SHORT richiedi variazione 24h negativa (se disponibile)
     try:
         tick = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category":"linear","symbol":symbol}, timeout=10).json()
-        if tick.get("retCode") == 0:
-            chg = float(tick["result"]["list"][0].get("price24hPcnt", 0.0))
+        if tick.get("retCode") == 0 and tick.get("result", {}).get("list"):
+            lst = tick["result"]["list"]
+            chg = float(lst[0].get("price24hPcnt", 0.0))
             if chg >= 0:
                 if LOG_DEBUG_STRATEGY:
                     tlog(f"mom_short:{symbol}", f"[MOMENTUM][{symbol}] price24hPcnt={chg:.2f}% non coerente con SHORT → skip", 600)

@@ -1290,12 +1290,13 @@ def analyze_asset(symbol: str):
                 rsi1h = float(RSIIndicator(close=df1["Close"], window=14).rsi().iloc[-1]) if len(df1) >= 15 else None
             except:
                 rsi1h = None
-        breakout_ok = is_breaking_weekly_low(symbol) if ENABLE_BREAKOUT_FILTER else None
+        breakout_ok = is_breaking_weekly_high(symbol) if ENABLE_BREAKOUT_FILTER else None
         chg = None
         try:
             tick = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category":"linear","symbol":symbol}, timeout=10).json()
-            if tick.get("retCode") == 0:
-                chg = float(tick["result"]["list"][0].get("price24hPcnt", 0.0))
+            if tick.get("retCode") == 0 and tick.get("result", {}).get("list"):
+                lst = tick["result"]["list"]
+                chg = float(lst[0].get("price24hPcnt", 0.0))
         except:
             chg = None
         if LOG_DEBUG_STRATEGY:
@@ -1307,8 +1308,9 @@ def analyze_asset(symbol: str):
     # Momentum 24h coerente al lato: per LONG richiedi variazione 24h positiva (se disponibile)
     try:
         tick = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category":"linear","symbol":symbol}, timeout=10).json()
-        if tick.get("retCode") == 0:
-            chg = float(tick["result"]["list"][0].get("price24hPcnt", 0.0))
+        if tick.get("retCode") == 0 and tick.get("result", {}).get("list"):
+            lst = tick["result"]["list"]
+            chg = float(lst[0].get("price24hPcnt", 0.0))
             if chg <= 0:
                 if LOG_DEBUG_STRATEGY:
                     tlog(f"mom_long:{symbol}", f"[MOMENTUM][{symbol}] price24hPcnt={chg:.2f}% non coerente con LONG → skip", 600)
