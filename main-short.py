@@ -2008,4 +2008,3 @@ while True:
     # Sicurezza: attesa tra i cicli principali
     # time.sleep(INTERVAL_MINUTES * 60)
     time.sleep(120)  # analizza ogni 2 minuti (più ingressi)
-    
