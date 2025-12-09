@@ -1369,11 +1369,22 @@ def analyze_asset(symbol: str):
             tlog(f"trend_short:{symbol}", f"[TREND-FILTER][{symbol}] Regime={CURRENT_REGIME}, trend non idoneo (mode={TREND_MODE})", 600)
         return None, None, None
 
-    # Breakout hard filter: richiedi breakdown 6h per SHORT
-    if ENABLE_BREAKOUT_FILTER and not is_breaking_weekly_low(symbol):
-        if LOG_DEBUG_STRATEGY:
-            tlog(f"breakout_short:{symbol}", f"[BREAKOUT-FILTER][{symbol}] Non in breakdown 6h → skip ingresso", 600)
-        return None, None, None
+    # Breakout filter: in BEAR/MIXED permetti fallback se trend è forte anche senza breakdown
+    if ENABLE_BREAKOUT_FILTER:
+        brk = is_breaking_weekly_low(symbol)
+        if not brk:
+            if CURRENT_REGIME in ("BEAR", "MIXED"):
+                adx_thresh = ENTRY_ADX_VOLATILE if (symbol in VOLATILE_ASSETS) else ENTRY_ADX_STABLE
+                ema_down = (ema200_slope is not None and ema200_slope < 0) or (ema100_slope is not None and ema100_slope < 0)
+                strong_trend = trend_ok and (adx1h is not None and adx1h >= adx_thresh) and ema_down
+                if not strong_trend:
+                    if LOG_DEBUG_STRATEGY:
+                        tlog(f"breakout_short:{symbol}", f"[BREAKOUT-FILTER][{symbol}] No breakdown e fallback non soddisfatto → skip", 600)
+                    return None, None, None
+            else:
+                if LOG_DEBUG_STRATEGY:
+                    tlog(f"breakout_short:{symbol}", f"[BREAKOUT-FILTER][{symbol}] Non in breakdown 6h → skip ingresso", 600)
+                return None, None, None
 
     try:
         is_volatile = symbol in VOLATILE_ASSETS
