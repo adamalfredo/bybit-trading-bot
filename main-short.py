@@ -972,9 +972,12 @@ def breakeven_lock_worker_short():
             if r_dist is None:
                 cond_be = price_now <= entry_price * (1.0 - BREAKEVEN_LOCK_PCT)
             if cond_be:
-                be_price = entry_price  # BE sul prezzo di carico
+                # Buffer negativo: BE leggermente sotto l'entry per coprire fee/slippage
+                be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
                 qty_live = get_open_short_qty(symbol)
                 if qty_live and qty_live > 0:
+                    # Piazza sia trading-stop di posizione sia uno stop-market di backup
+                    place_conditional_sl_short(symbol, be_price, qty_live, trigger_by="MarkPrice")
                     set_position_stoploss_short(symbol, be_price)
 
                 entry["be_locked"] = True
@@ -1999,6 +2002,7 @@ while True:
             be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)  # buffer negativo → sotto entry
             qty_live = get_open_short_qty(symbol)
             if qty_live and qty_live > 0:
+                place_conditional_sl_short(symbol, be_price, qty_live, trigger_by="MarkPrice")
                 set_position_stoploss_short(symbol, be_price)
                 entry["be_locked"] = True
                 entry["be_price"] = be_price

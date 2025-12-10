@@ -965,9 +965,11 @@ def breakeven_lock_worker_long():
             if r_dist is None:
                 cond_be = price_now >= entry_price * (1.0 + BREAKEVEN_LOCK_PCT)
             if cond_be:
-                be_price = entry_price
+                be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
                 qty_live = get_open_long_qty(symbol)
                 if qty_live and qty_live > 0:
+                    # Piazza sia trading-stop di posizione sia uno stop-market di backup
+                    place_conditional_sl_long(symbol, be_price, qty_live, trigger_by="MarkPrice")
                     set_position_stoploss_long(symbol, be_price)
 
                 entry["be_locked"] = True
@@ -1102,8 +1104,7 @@ def profit_floor_worker_long():
 def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigger_by: str = TRIGGER_BY) -> bool:
     """
     Piazza/aggiorna uno stop-market reduceOnly per proteggere la posizione LONG.
-    ReduceOnly=True, orderType=Market, triggerPrice = stop_price, triggerBy = trigger_by.
-    Restituisce True se la chiamata API ha retCode==0.
+    Usa l'endpoint order/create (v5) per un ordine condizionale di chiusura.
     """
     try:
         info = get_instrument_info(symbol)
@@ -1122,17 +1123,21 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
             "triggerBy": trigger_by,
             "triggerPrice": stop_str,
             "triggerDirection": 2,
-            "closeOnTrigger": True
+            "closeOnTrigger": True,
+            "timeInForce": "GoodTillCancel"
         }
         if LOG_DEBUG_STRATEGY:
             log(f"[SL-DEBUG-BODY][LONG] {json.dumps(body)}")
-        resp = _bybit_signed_post("/v5/position/trading-stop", body)
-        data = resp.json()
+        resp = _bybit_signed_post("/v5/order/create", body)
+        try:
+            data = resp.json()
+        except:
+            data = {}
         if data.get("retCode") == 0:
             return True
         tlog(
             f"sl_create_err:{symbol}",
-            f"[SL-PLACE][LONG] retCode={data.get('retCode')} msg={data.get('retMsg')}",
+            f"[SL-PLACE][LONG] retCode={data.get('retCode')} msg={data.get('retMsg')} resp={json.dumps(data)} body={body}",
             300,
         )
         return False
