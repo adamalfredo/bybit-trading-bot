@@ -333,6 +333,14 @@ def update_assets(top_n=18, n_stable=7):
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
 
+# Livello log globale: DEBUG/INFO/WARN/ERROR (default INFO)
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+def dlog(msg):
+    # Debug log stampato solo se LOG_LEVEL==DEBUG
+    if LOG_LEVEL == "DEBUG":
+        log(msg)
+
 # Throttling semplice per log ripetitivi
 _last_log_times = {}
 def tlog(key: str, msg: str, interval_sec: int = 60):
@@ -1371,12 +1379,14 @@ def analyze_asset(symbol: str):
 
         df = fetch_history(symbol, interval=tf_minutes)
         if df is None or len(df) < 4:
-            log(f"[ANALYZE] Dati storici insufficienti per {symbol}")
+            # Riduce spam: messaggio ogni 5 minuti per simbolo
+            tlog(f"analyze:data:{symbol}", f"[ANALYZE] Dati storici insufficienti per {symbol}", 300)
             return None, None, None
 
         close = find_close_column(df)
         if close is None:
-            log(f"[ANALYZE] Colonna close non trovata per {symbol}")
+            # Riduce spam: messaggio ogni 5 minuti per simbolo
+            tlog(f"analyze:close:{symbol}", f"[ANALYZE] Colonna close non trovata per {symbol}", 300)
             return None, None, None
 
         # Indicatori

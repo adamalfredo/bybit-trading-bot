@@ -350,6 +350,14 @@ def tlog(key: str, msg: str, interval_sec: int = 60):
         _last_log_times[key] = now
         log(msg)
 
+# Livello log globale: DEBUG/INFO/WARN/ERROR (default INFO)
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+def dlog(msg):
+    # Debug log stampato solo se LOG_LEVEL==DEBUG
+    if LOG_LEVEL == "DEBUG":
+        log(msg)
+
 # --- Logging trade su CSV ---
 def _trade_log(event: str, symbol: str, side: str, entry_price: float = 0.0, qty: float = 0.0,
                sl: float = 0.0, tp: float = 0.0, r_dist: float = 0.0, extra: dict | None = None):
@@ -1395,13 +1403,14 @@ def analyze_asset(symbol: str):
 
         df = fetch_history(symbol, interval=tf_minutes)
         if df is None or len(df) < 4:
-            if LOG_DEBUG_STRATEGY:
-                log(f"[ANALYZE][{symbol}] Dati insufficienti ({tf_minutes}m)")
+            # Riduce spam: messaggio ogni 5 minuti per simbolo
+            tlog(f"analyze:data:{symbol}", f"[ANALYZE][{symbol}] Dati insufficienti ({tf_minutes}m)", 300)
             return None, None, None
 
         close = find_close_column(df)
         if close is None:
-            log(f"[ANALYZE][{symbol}] Colonna Close assente")
+            # Riduce spam: messaggio ogni 5 minuti per simbolo
+            tlog(f"analyze:close:{symbol}", f"[ANALYZE][{symbol}] Colonna Close assente", 300)
             return None, None, None
 
         # Indicatori
