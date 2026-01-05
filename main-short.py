@@ -41,8 +41,8 @@ TP_MIN = 2.0
 TP_MAX = 3.0
 SL_MIN = 1.0
 SL_MAX = 2.0
-TRAILING_MIN = 0.015  # era 0.005, trailing più largo
-TRAILING_MAX = 0.05   # era 0.03, trailing più largo
+TRAILING_MIN = 0.02   # trailing più conservativo
+TRAILING_MAX = 0.08   # trailing più conservativo
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
 COOLDOWN_MINUTES = 60
 # Nuovi parametri protezione guadagni (SHORT)
@@ -56,7 +56,7 @@ RATCHET_TIERS_ROI = [
     (100, 75)
 ]
 FLOOR_BUFFER_PCT = 0.0015          # 0.15% di prezzo per sicurezza esecuzione
-FLOOR_UPDATE_COOLDOWN_SEC = 8      # evita update troppo frequenti
+FLOOR_UPDATE_COOLDOWN_SEC = 45     # cooldown più lungo per evitare rumore
 FLOOR_TRIGGER_BY = "MarkPrice"     # usa Mark per coerenza con SL
 
 # >>> PATCH: parametri breakeven lock (SHORT)
@@ -116,8 +116,12 @@ SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "1.4"))
 TP1_R = float(os.getenv("TP1_R", "1.0"))
 TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.5"))  # 50% posizione al primo TP
 BE_AT_R = float(os.getenv("BE_AT_R", "1.0"))
-TRAIL_START_R = float(os.getenv("TRAIL_START_R", "1.2"))
+TRAIL_START_R = float(os.getenv("TRAIL_START_R", "2.0"))
 TRAIL_ATR_MULT = float(os.getenv("TRAIL_ATR_MULT", "1.3"))
+
+# --- Stima fee per expectancy (percentuali lato notional) ---
+FEES_TAKER_PCT = float(os.getenv("FEES_TAKER_PCT", "0.0006"))  # ~0.06%
+FEES_MAKER_PCT = float(os.getenv("FEES_MAKER_PCT", "0.0001"))  # ~0.01%
 
 # --- Cassaforte in USDT (lock minimo di profitto) ---
 PNL_TRIGGER_USDT = 3.2   # quando l'Unrealized >= 3.2 USDT
@@ -282,7 +286,7 @@ def is_breaking_weekly_low(symbol: str):
     low = df["Low"].iloc[-bars:].min()
     return last_close <= low * 0.995  # tolleranza 0.5% sotto il minimo
 
-def update_assets(top_n=18, n_stable=7):
+def update_assets(top_n=12, n_stable=6):
     """
     Aggiorna ASSETS, LESS_VOLATILE_ASSETS e VOLATILE_ASSETS:
     - Top N per volume 24h su spot (USDT)
@@ -370,6 +374,21 @@ def _trade_log(event: str, symbol: str, side: str, entry_price: float = 0.0, qty
                 f.write("ts,event,symbol,side,entry,qty,sl,tp,r_dist,extra\n")
             jextra = json.dumps(extra or {}, separators=(",", ":"))
             f.write(f"{int(time.time())},{event},{symbol},{side},{entry_price},{qty},{sl},{tp},{r_dist},{jextra}\n")
+    except Exception:
+        pass
+
+def _expectancy_log(pnl_pct: float, entry_notional: float, exit_notional: float,
+                    maker_entry: bool = False, maker_exit: bool = False):
+    try:
+        os.makedirs("logs", exist_ok=True)
+        path = os.path.join("logs", "expectancy.csv")
+        header_needed = not os.path.exists(path)
+        fee_entry = entry_notional * (FEES_MAKER_PCT if maker_entry else FEES_TAKER_PCT)
+        fee_exit = exit_notional * (FEES_MAKER_PCT if maker_exit else FEES_TAKER_PCT)
+        with open(path, "a", encoding="utf-8") as f:
+            if header_needed:
+                f.write("ts,pnl_pct,entry_notional,exit_notional,fee_entry,fee_exit\n")
+            f.write(f"{int(time.time())},{pnl_pct:.6f},{entry_notional:.6f},{exit_notional:.6f},{fee_entry:.6f},{fee_exit:.6f}\n")
     except Exception:
         pass
 
@@ -485,7 +504,7 @@ def get_open_short_qty(symbol):
         if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
             if LOG_DEBUG_SYNC:
                 tlog(f"qty_err:{symbol}", f"[BYBIT-RAW][ERRORE] get_open_short_qty {symbol}: {json.dumps(data)}", 300)
-            return None  # <<< PRIMA era 0.0
+            return 0.0
         for pos in data["result"]["list"]:
             if pos.get("side") == "Sell":
                 qty = float(pos.get("size", 0))
@@ -494,7 +513,7 @@ def get_open_short_qty(symbol):
     except Exception as e:
         if LOG_DEBUG_SYNC:
             tlog(f"qty_exc:{symbol}", f"❌ Errore get_open_short_qty per {symbol}: {e}", 300)
-        return None  # <<< PRIMA era 0.0
+        return 0.0
 
 def get_open_long_qty(symbol):
     try:
@@ -518,7 +537,7 @@ def get_open_long_qty(symbol):
         if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
             if LOG_DEBUG_SYNC:
                 tlog(f"qty_err_long:{symbol}", f"[BYBIT-RAW][ERRORE] get_open_long_qty {symbol}: {json.dumps(data)}", 300)
-            return None  # <<< PRIMA era 0.0
+            return 0.0
         for pos in data["result"]["list"]:
             if pos.get("side") == "Buy":
                 qty = float(pos.get("size", 0))
@@ -527,7 +546,7 @@ def get_open_long_qty(symbol):
     except Exception as e:
         if LOG_DEBUG_SYNC:
             tlog(f"qty_exc_long:{symbol}", f"❌ Errore get_open_long_qty per {symbol}: {e}", 300)
-        return None  # <<< PRIMA era 0.0
+        return 0.0
 
 # --- FUNZIONI DI SUPPORTO BYBIT E TELEGRAM ---
 def get_last_price(symbol):
@@ -748,7 +767,7 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         log(f"❌ Errore calcolo quantità per {symbol}: {e}")
         return None
 
-def market_short(symbol: str, usdt_amount: float):
+def market_short(symbol: str, usdt_amount: float, qty_exact: Optional[str] = None):
     price = get_last_price(symbol)
     if not price:
         log(f"❌ Prezzo non disponibile per {symbol}")
@@ -759,10 +778,17 @@ def market_short(symbol: str, usdt_amount: float):
     min_qty = float(info.get("min_qty", qty_step))
     min_order_amt = float(info.get("min_order_amt", 10.0))
 
-    safe_usdt_amount = usdt_amount * 0.98
-    raw_qty = Decimal(str(safe_usdt_amount)) / Decimal(str(price))
     step_dec = Decimal(str(qty_step))
-    qty_aligned = (raw_qty // step_dec) * step_dec
+    # Se è stata fornita una quantità esatta (già conforme ai passi), usala direttamente
+    if qty_exact is not None:
+        try:
+            qty_aligned = Decimal(str(qty_exact))
+        except Exception:
+            qty_aligned = Decimal("0")
+    else:
+        safe_usdt_amount = usdt_amount * 0.98
+        raw_qty = Decimal(str(safe_usdt_amount)) / Decimal(str(price))
+        qty_aligned = (raw_qty // step_dec) * step_dec
 
     # Guardie: evita qty 0 e rispetta minimi exchange
     if float(qty_aligned) <= 0 or float(qty_aligned) < min_qty:
@@ -1660,21 +1686,35 @@ import threading
 
 # --- LOGICA 70/30 SU VALORE TOTALE PORTAFOGLIO (USDT + coin) ---
 def get_portfolio_value():
-    usdt_balance = get_usdt_balance()
-    total = usdt_balance
+    """
+    Restituisce (equity totale reale, saldo USDT disponibile, esposizione per simbolo).
+    Equity viene presa da /v5/account/wallet-balance per evitare gonfiaggi dovuti al notional.
+    """
+    try:
+        resp = _bybit_signed_get("/v5/account/wallet-balance", {"accountType": BYBIT_ACCOUNT_TYPE})
+        data = resp.json()
+        acct = data.get("result", {}).get("list", [{}])[0]
+        total_equity = float(acct.get("totalEquity") or acct.get("totalAvailableBalance") or 0.0)
+        usdt_balance = 0.0
+        for c in acct.get("coin", []):
+            if c.get("coin") == "USDT":
+                usdt_balance = float(c.get("availableToWithdraw") or c.get("availableBalance") or c.get("walletBalance") or 0.0)
+                break
+    except Exception:
+        total_equity = get_usdt_balance() or 0.0
+        usdt_balance = total_equity
+
     coin_values = {}
-    symbols = set(ASSETS) | set(open_positions)  # includi sempre gli short aperti
+    symbols = set(ASSETS) | set(open_positions)
     for symbol in symbols:
         if symbol == "USDT":
             continue
         qty = get_open_short_qty(symbol)
-        if qty and qty > 0:
-            price = get_last_price(symbol)
-            if price:
-                value = qty * price
-                coin_values[symbol] = value
-                total += value
-    return total, usdt_balance, coin_values
+        price = get_last_price(symbol)
+        if qty and qty > 0 and price:
+            coin_values[symbol] = qty * price
+
+    return total_equity, usdt_balance, coin_values
 
  
 
@@ -1876,7 +1916,7 @@ while True:
                 continue
 
             # APERTURA SHORT
-            qty = market_short(symbol, order_amount)
+            qty = market_short(symbol, order_amount, qty_exact=qty_str)
             if not qty or qty == 0:
                 log(f"❌ Nessuna quantità shortata per {symbol}. Non registro la posizione.")
                 continue
@@ -1964,6 +2004,10 @@ while True:
                 log(f"[EXIT-OK] Ricopertura completata per {symbol} | PnL: {pnl:.2f}%")
                 notify_telegram(f"✅ Exit Signal: ricopertura SHORT per {symbol} a {current_price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}%")
                 record_exit(symbol, entry_price, current_price, "SHORT")
+                try:
+                    _expectancy_log(pnl, qty * entry_price, exit_value, maker_entry=False, maker_exit=False)
+                except Exception:
+                    pass
                 _trade_log("exit", symbol, "SHORT", entry_price=entry_price, qty=qty, sl=entry.get("sl", 0.0), tp=entry.get("tp", 0.0), r_dist=entry.get("r_dist", 0.0), extra={"pnl_pct": pnl})
                 # (Report Google Sheets rimosso)
                 
@@ -2020,4 +2064,4 @@ while True:
 
     # Sicurezza: attesa tra i cicli principali
     # time.sleep(INTERVAL_MINUTES * 60)
-    time.sleep(120)  # analizza ogni 2 minuti (più ingressi)
+    time.sleep(180)  # analizza ogni 3 minuti per ridurre carico API

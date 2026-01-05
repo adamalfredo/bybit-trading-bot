@@ -39,6 +39,14 @@ LOG_DEBUG_STRATEGY = os.getenv("LOG_DEBUG_STRATEGY", "0") == "1"
 LOG_DEBUG_TRAILING = os.getenv("LOG_DEBUG_TRAILING", "0") == "1"  
 LOG_DEBUG_PORTFOLIO = os.getenv("LOG_DEBUG_PORTFOLIO", "0") == "1"  
 
+## 📋 Debug 2
+LOG_LEVEL=INFO  
+LOG_DEBUG_ASSETS=0  
+LOG_DEBUG_DECIMALS=0  
+LOG_DEBUG_SYNC=0  
+LOG_DEBUG_STRATEGY=0  
+LOG_DEBUG_PORTFOLIO=0  
+
 Per un’analisi efficace delle cause di perdita dopo 48h:
 - ⚙️ LOG_DEBUG_STRATEGY = 1  
 Così vedo tutti i segnali, le strategie scelte, le condizioni di entry/exit e i motivi per cui un trade viene tentato o saltato.
