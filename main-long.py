@@ -11,6 +11,9 @@ from ta.volatility import BollingerBands, AverageTrueRange
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD, ADXIndicator, SMAIndicator
 import threading
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Env vars (Railway)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -165,7 +168,7 @@ def is_trending_up(symbol: str, tf: str = "240"):
     endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
     params = {"category": "linear", "symbol": symbol, "interval": tf, "limit": 220}
     try:
-        resp = requests.get(endpoint, params=params, timeout=10)
+        resp = SESSION.get(endpoint, params=params, timeout=10)
         data = resp.json()
         if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
             return False
@@ -187,7 +190,7 @@ def is_trending_up_1h(symbol: str, tf: str = "60"):
     endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
     params = {"category": "linear", "symbol": symbol, "interval": tf, "limit": 120}
     try:
-        resp = requests.get(endpoint, params=params, timeout=10)
+        resp = SESSION.get(endpoint, params=params, timeout=10)
         data = resp.json()
         if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
             return False
@@ -205,7 +208,7 @@ def is_trending_up_1h(symbol: str, tf: str = "60"):
 def _get_market_breadth():
     """Breadth futures linear: quota di simboli con price24hPcnt < 0."""
     try:
-        resp = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category": "linear"}, timeout=10)
+        resp = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category": "linear"}, timeout=10)
         data = resp.json()
         lst = data.get("result", {}).get("list", [])
         if not lst:
@@ -287,7 +290,7 @@ def update_assets(top_n=12, n_stable=6):
     global ASSETS, LESS_VOLATILE_ASSETS, VOLATILE_ASSETS
     try:
         # Ranking spot
-        resp_spot = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category": "spot"}, timeout=10)
+        resp_spot = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category": "spot"}, timeout=10)
         data_spot = resp_spot.json()
         if data_spot.get("retCode") != 0:
             log(f"[ASSETS] Errore API spot: {data_spot}")
@@ -305,7 +308,7 @@ def update_assets(top_n=12, n_stable=6):
         pre = [t["symbol"] for t in top]
 
         # Liquidità futures linear
-        resp_lin = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category": "linear"}, timeout=10)
+        resp_lin = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category": "linear"}, timeout=10)
         data_lin = resp_lin.json()
         if data_lin.get("retCode") != 0:
             log(f"[ASSETS] Errore API linear: {data_lin}")
@@ -344,6 +347,18 @@ def dlog(msg):
     # Debug log stampato solo se LOG_LEVEL==DEBUG
     if LOG_LEVEL == "DEBUG":
         log(msg)
+
+# --- HTTP sessione condivisa con retry/backoff ---
+RETRY_STRATEGY = Retry(
+    total=3,
+    backoff_factor=0.5,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET", "POST"],
+)
+SESSION = requests.Session()
+ADAPTER = HTTPAdapter(max_retries=RETRY_STRATEGY, pool_maxsize=50)
+SESSION.mount("https://", ADAPTER)
+SESSION.mount("http://", ADAPTER)
 
 # Throttling semplice per log ripetitivi
 _last_log_times = {}
@@ -400,7 +415,7 @@ def _bybit_signed_get(path: str, params: dict):
             "X-BAPI-RECV-WINDOW": recv_window
         }
         url = f"{BYBIT_BASE_URL}{path}"
-        return requests.get(url, headers=headers, params=params, timeout=10)
+        return SESSION.get(url, headers=headers, params=params, timeout=10)
     except Exception as e:
         tlog("signed_get_exc", f"[SIGNED-GET][{path}] exc: {e}", 300)
         raise
@@ -421,7 +436,7 @@ def _bybit_signed_post(path: str, body: dict):
             "Content-Type": "application/json"
         }
         url = f"{BYBIT_BASE_URL}{path}"
-        return requests.post(url, headers=headers, data=body_json, timeout=10)
+        return SESSION.post(url, headers=headers, data=body_json, timeout=10)
     except Exception as e:
         tlog("signed_post_exc", f"[SIGNED-POST][{path}] exc: {e}", 300)
         raise
@@ -521,7 +536,7 @@ def get_last_price(symbol):
                 return cached.get("price")
         endpoint = f"{BYBIT_BASE_URL}/v5/market/tickers"
         params = {"category": "linear", "symbol": symbol}  # PATCH: era "spot"
-        resp = requests.get(endpoint, params=params, timeout=10)
+        resp = SESSION.get(endpoint, params=params, timeout=10)
         data = resp.json()
         if data.get("retCode") == 0:
             price = float(data["result"]["list"][0]["lastPrice"])
@@ -553,7 +568,7 @@ def get_instrument_info(symbol: str) -> dict:
     try:
         endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
         params = {"category": "linear", "symbol": symbol}
-        resp = requests.get(endpoint, params=params, timeout=10)
+        resp = SESSION.get(endpoint, params=params, timeout=10)
         data = resp.json()
         if data.get("retCode") != 0:
             log(f"❌ get_instrument_info retCode {data.get('retCode')} → fallback {symbol}")
@@ -1241,7 +1256,7 @@ def fetch_history(symbol: str, interval=INTERVAL_MINUTES, limit=400):
             "interval": str(interval),
             "limit": limit
         }
-        resp = requests.get(endpoint, params=params, timeout=10)
+        resp = SESSION.get(endpoint, params=params, timeout=10)
         data = resp.json()
         if data.get("retCode") == 10006:
             tlog(f"fetch_rl:{symbol}", f"[BYBIT] Rate limit su {symbol}, piccolo backoff...", 10)
@@ -1736,19 +1751,24 @@ while True:
     if LOG_DEBUG_PORTFOLIO:
         tlog("portfolio", f"[PORTAFOGLIO] Totale: {portfolio_value:.2f} | Volatili: {volatile_invested:.2f} | Meno volatili: {stable_invested:.2f} | USDT: {usdt_balance:.2f}", 120)
 
-    for symbol in ASSETS:
-        if symbol in STABLECOIN_BLACKLIST:
+    # Analisi in parallelo con prefiltraggio
+    eligible_symbols = [s for s in ASSETS if s not in STABLECOIN_BLACKLIST and is_symbol_linear(s)]
+    results = {}
+    if eligible_symbols:
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            future_map = {ex.submit(analyze_asset, s): s for s in eligible_symbols}
+            for fut in as_completed(future_map):
+                s = future_map[fut]
+                try:
+                    results[s] = fut.result()
+                except Exception as e:
+                    tlog(f"analyze_exc:{s}", f"[ANALYZE-EXC] {s} {e}", 300)
+    for symbol in eligible_symbols:
+        signal, strategy, price = results.get(symbol, (None, None, None))
+        if signal is None or strategy is None or price is None:
             continue
-        if not is_symbol_linear(symbol):
-            continue
-
-        signal, strategy, price = analyze_asset(symbol)
-        if signal is not None and strategy is not None and price is not None:
-            if LOG_DEBUG_STRATEGY:
-                log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
-        else:
-            # nessun segnale → skip
-            continue
+        if LOG_DEBUG_STRATEGY:
+            log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
 
         # ✅ ENTRATA LONG
         if signal == "entry":
