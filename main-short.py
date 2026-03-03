@@ -63,8 +63,8 @@ FLOOR_UPDATE_COOLDOWN_SEC = 45     # cooldown più lungo per evitare rumore
 FLOOR_TRIGGER_BY = "MarkPrice"     # usa Mark per coerenza con SL
 
 # >>> PATCH: parametri breakeven lock (SHORT)
-BREAKEVEN_LOCK_PCT = 0.015     # FIX: era 0.01, attiva BE al -1.5% di prezzo
-BREAKEVEN_BUFFER   = -0.006   # FIX: era -0.0015, buffer piu largo per evitare noise-stop su BE
+BREAKEVEN_LOCK_PCT = 0.025     # FIX2: era 0.015, attiva BE al -2.5% di prezzo (più respiro prima del lock)
+BREAKEVEN_BUFFER   = -0.012   # FIX2: era -0.006, buffer più largo per evitare noise-stop su BE
 MAX_LOSS_CAP_PCT = 0.03   # FIX: era 0.015, cap alzato a 3% per non bloccare SL_ATR_MULT=2.0
 
 # >>> NEW: regime + drawdown giornaliero (SHORT)
@@ -79,7 +79,7 @@ ENABLE_DD_PAUSE = os.getenv("ENABLE_DD_PAUSE", "0") == "1"
 DD_PAUSE_MINUTES = int(os.getenv("DD_PAUSE_MINUTES", "120"))
 RISK_THROTTLE_LEVEL = 0  # 0=off, 1=DD > cap, 2=DD > 2*cap
 ORDER_USDT = 50.0
-ENABLE_BREAKOUT_FILTER = True  # rende opzionale il filtro breakout 6h
+ENABLE_BREAKOUT_FILTER = False  # FIX2: disabilitato - il breakdown obbligatorio causa late-entry dopo il minimo
 # --- MTF entry: segnali su 15m, trend su 4h/1h ---
 USE_MTF_ENTRY = True
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
@@ -102,8 +102,8 @@ LOG_DEBUG_PORTFOLIO  = os.getenv("LOG_DEBUG_PORTFOLIO", "0") == "1"
 # --- Loosening via env ---
 MIN_CONFLUENCE = 2   # FIX: era 1, richiede almeno 2 indicatori allineati
 TREND_MODE = "STRICT"
-ENTRY_TF_VOLATILE = 30
-ENTRY_TF_STABLE = 30
+ENTRY_TF_VOLATILE = 60  # FIX2: allineato al loop principale (60m) per evitare segnali stantii
+ENTRY_TF_STABLE = 60   # FIX2: allineato al loop principale (60m)
 ENTRY_ADX_VOLATILE = 27       # fisso
 ENTRY_ADX_STABLE = 24         # fisso
 ADX_RELAX_EVENT = 3.0
@@ -1382,25 +1382,9 @@ def analyze_asset(symbol: str):
                 chg = float(lst[0].get("price24hPcnt", 0.0))
         except:
             chg = None
-        if LOG_DEBUG_STRATEGY:
-            log(f"[TELEM][SHORT][{symbol}] adx1h={adx1h} ema100_slope={ema100_slope} ema200_slope={ema200_slope} rsi1h={rsi1h} breakout={breakout_ok} chg24h={chg}")
+        tlog(f"telem_short:{symbol}", f"[TELEM][SHORT][{symbol}] adx1h={adx1h} ema100_slope={ema100_slope} ema200_slope={ema200_slope} rsi1h={rsi1h} breakout={breakout_ok} chg24h={chg}", 300)
     except Exception as e:
-        if LOG_DEBUG_STRATEGY:
-            log(f"[TELEM][SHORT][{symbol}] errore telemetria: {e}")
-
-    # FIX: filtro momentum 24h rimosso - entrava solo su asset già molto scesi (ipervenduto)
-    # Il trend multi-timeframe (4h/1h) è sufficiente a filtrare la direzione
-    # try:
-    #     tick = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category":"linear","symbol":symbol}, timeout=10).json()
-    #     if tick.get("retCode") == 0 and tick.get("result", {}).get("list"):
-    #         lst = tick["result"]["list"]
-    #         chg = float(lst[0].get("price24hPcnt", 0.0))
-    #         if chg >= 0:
-    #             if LOG_DEBUG_STRATEGY:
-    #                 tlog(f"mom_short:{symbol}", f"[MOMENTUM][{symbol}] price24hPcnt={chg:.2f}% non coerente con SHORT → skip", 600)
-    #             return None, None, None
-    # except Exception:
-    #     pass
+        log(f"[TELEM][SHORT][{symbol}] errore telemetria: {e}")
 
     # Filtro trend configurabile (SHORT)
     down_4h = is_trending_down(symbol, "240")
@@ -1418,8 +1402,7 @@ def analyze_asset(symbol: str):
     # - BULL: obbligatorio (short solo se asset in downtrend)
     # - MIXED: obbligatorio
     if CURRENT_REGIME in ("BULL", "MIXED") and not trend_ok:
-        if LOG_DEBUG_STRATEGY:
-            tlog(f"trend_short:{symbol}", f"[TREND-FILTER][{symbol}] Regime={CURRENT_REGIME}, trend non idoneo (mode={TREND_MODE})", 600)
+        tlog(f"trend_short:{symbol}", f"[TREND-FILTER][{symbol}] Regime={CURRENT_REGIME}, trend non idoneo (mode={TREND_MODE})", 600)
         return None, None, None
 
     # Breakout filter: in BEAR/MIXED permetti fallback se trend è forte anche senza breakdown
@@ -1524,12 +1507,11 @@ def analyze_asset(symbol: str):
         if RISK_THROTTLE_LEVEL >= 1 and not event_triggered:
             return None, None, None
 
-        if LOG_DEBUG_STRATEGY:
-            tlog(
-                f"entry_chk_short:{symbol}",
-                f"[ENTRY-CHECK][SHORT] conf={conf_count}/{required_confluence} | ADX={last['adx']:.1f}>{adx_needed:.1f} | event={event_triggered} | regime={CURRENT_REGIME} | tf={tf_tag}",
-                300
-            )
+        tlog(
+            f"entry_chk_short:{symbol}",
+            f"[ENTRY-CHECK][SHORT] conf={conf_count}/{required_confluence} | ADX={last['adx']:.1f}>{adx_needed:.1f} | event={event_triggered} | regime={CURRENT_REGIME} | tf={tf_tag}",
+            300
+        )
 
         # Guardrail loss consecutivi (SHORT): se troppe perdite recenti e prezzo sopra ema50 → aspetta
         if recent_losses.get(symbol, 0) >= MAX_CONSEC_LOSSES:
@@ -1565,8 +1547,8 @@ def analyze_asset(symbol: str):
                 return True
             r = abs(current_price - entry_price) / (entry_price * INITIAL_STOP_LOSS_PCT)
             holding_min = (time.time() - entry_time) / 60
-            # Uscita più reattiva: se |R|>0.5 oppure dopo 20 minuti
-            return (r > 0.5) or (holding_min > 20)
+            # FIX2: uscita solo dopo 90 minuti (allineato a candele 60m) o se molto in perdita
+            return (r > 0.5) or (holding_min > 90)
 
         if cond_exit1 and can_exit(symbol, price):
             return "exit", "Breakout BB + RSI (bullish)", price
@@ -1782,6 +1764,7 @@ while True:
 
     # Analisi in parallelo con prefiltraggio
     eligible_symbols = [s for s in ASSETS if s not in STABLECOIN_BLACKLIST and is_symbol_linear(s)]
+    log(f"[CICLO][SHORT] simboli={len(eligible_symbols)} | pos_aperte={len(open_positions)} | regime={CURRENT_REGIME} | equity={portfolio_value:.2f}")
     results = {}
     if eligible_symbols:
         with ThreadPoolExecutor(max_workers=4) as ex:
@@ -1796,8 +1779,7 @@ while True:
         signal, strategy, price = results.get(symbol, (None, None, None))
         if signal is None or strategy is None or price is None:
             continue
-        if LOG_DEBUG_STRATEGY:
-            log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
+        log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
 
         # ✅ ENTRATA SHORT
         if signal == "entry":
