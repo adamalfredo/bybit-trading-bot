@@ -48,20 +48,20 @@ SL_MAX = 2.0
 # Nuovi parametri per protezione guadagni (stop_floor)
 TRIGGER_BY = "LastPrice"    # "LastPrice" o "MarkPrice" per trigger degli stop exchange
 RATCHET_TIERS_ROI = [
-    (30, 15),   # superato 30% ROI → garantisci 15%
-    (45, 30),
-    (60, 45),
-    (80, 60),
-    (100, 75)
+    (15, 7),    # FIX: era (30,15) → soglie realistiche a leva 10x
+    (25, 15),
+    (40, 25),
+    (60, 40),
+    (80, 60)
 ]
 FLOOR_BUFFER_PCT = 0.0015          # 0.15% di prezzo per sicurezza esecuzione
 FLOOR_UPDATE_COOLDOWN_SEC = 45     # cooldown più lungo per evitare rumore
 FLOOR_TRIGGER_BY = "MarkPrice"     # usa Mark per coerenza con SL
 
 # >>> PATCH: parametri breakeven lock (LONG)
-BREAKEVEN_LOCK_PCT = 0.01   # attiva BE al +1% di prezzo (~+10% PnL con leva 10x)
-BREAKEVEN_BUFFER   = 0.0015  # stop a BE + 0.15% per evitare micro-slippage
-MAX_LOSS_CAP_PCT = 0.015  # CAP perdita sul prezzo: 1.5% sotto l'entry (SL non oltre questo)
+BREAKEVEN_LOCK_PCT = 0.015  # FIX: era 0.01, attiva BE al +1.5% di prezzo
+BREAKEVEN_BUFFER   = 0.006  # FIX: era 0.0015, buffer più largo per evitare noise-stop su BE
+MAX_LOSS_CAP_PCT = 0.03   # FIX: era 0.015, cap alzato a 3% per non bloccare SL_ATR_MULT=2.0
 
 # >>> NEW: regime + drawdown giornaliero (LONG)
 DAILY_DD_CAP_PCT = 0.04
@@ -97,7 +97,7 @@ LOG_DEBUG_SYNC       = os.getenv("LOG_DEBUG_SYNC", "0") == "1"
 LOG_DEBUG_STRATEGY   = os.getenv("LOG_DEBUG_STRATEGY", "0") == "1"
 LOG_DEBUG_PORTFOLIO  = os.getenv("LOG_DEBUG_PORTFOLIO", "0") == "1"
 # --- Loosening via env (ingressi più frequenti) ---
-MIN_CONFLUENCE = 1
+MIN_CONFLUENCE = 2   # FIX: era 1, richiede almeno 2 indicatori allineati
 TREND_MODE = "STRICT"
 ENTRY_TF_VOLATILE = 30
 ENTRY_TF_STABLE = 30
@@ -113,11 +113,11 @@ LINEAR_MIN_TURNOVER = 5_000_000
 LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 # --- Nuova gestione rischio e R-multipli ---
 RISK_PCT = float(os.getenv("RISK_PCT", "0.0075"))   # 0.75% equity per trade
-SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "1.4"))
-TP1_R = float(os.getenv("TP1_R", "1.0"))
+SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "2.0"))   # FIX: era 1.4, SL più largo per ridurre noise-stop
+TP1_R = float(os.getenv("TP1_R", "2.5"))             # FIX: era 1.0, R:R almeno 2.5:1
 TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.5"))  # 50% posizione al primo TP
 BE_AT_R = float(os.getenv("BE_AT_R", "1.0"))
-TRAIL_START_R = float(os.getenv("TRAIL_START_R", "2.0"))
+TRAIL_START_R = float(os.getenv("TRAIL_START_R", "1.5"))  # FIX: era 2.0, trailing attivo prima
 TRAIL_ATR_MULT = float(os.getenv("TRAIL_ATR_MULT", "1.3"))
 
 # --- Stima fee per expectancy (percentuali lato notional) ---
@@ -544,10 +544,10 @@ def get_last_price(symbol):
                 _last_price_cache[symbol] = {"price": price, "ts": now}
             return price
         else:
-            log(f"[BYBIT] Errore get_last_price {symbol}: {data}")
+            tlog(f"lp_err:{symbol}", f"[BYBIT] Errore get_last_price {symbol}: {data}", 300)
             return None
     except Exception as e:
-        log(f"[BYBIT] Errore get_last_price {symbol}: {e}")
+        tlog(f"lp_exc:{symbol}", f"[BYBIT] Errore get_last_price {symbol}: {e}", 300)
         return None
 
 def get_instrument_info(symbol: str) -> dict:
@@ -571,7 +571,7 @@ def get_instrument_info(symbol: str) -> dict:
         resp = SESSION.get(endpoint, params=params, timeout=10)
         data = resp.json()
         if data.get("retCode") != 0:
-            log(f"❌ get_instrument_info retCode {data.get('retCode')} → fallback {symbol}")
+            tlog(f"instr_err:{symbol}", f"❌ get_instrument_info retCode {data.get('retCode')} → fallback {symbol}", 600)
             parsed = {
                 "min_qty": 0.01,
                 "qty_step": 0.01,
@@ -585,7 +585,7 @@ def get_instrument_info(symbol: str) -> dict:
         
         lst = data.get("result", {}).get("list", [])
         if not lst:
-            log(f"❌ get_instrument_info lista vuota → fallback {symbol}")
+            tlog(f"instr_empty:{symbol}", f"❌ get_instrument_info lista vuota → fallback {symbol}", 600)
             parsed = {
                 "min_qty": 0.01,
                 "qty_step": 0.01,
@@ -619,7 +619,7 @@ def get_instrument_info(symbol: str) -> dict:
         return parsed
         
     except Exception as e:
-        log(f"❌ Errore get_instrument_info eccezione → fallback {symbol}: {e}")
+        tlog(f"instr_exc:{symbol}", f"❌ Errore get_instrument_info eccezione → fallback {symbol}: {e}", 600)
         parsed = {
             "min_qty": 0.01,
             "qty_step": 0.01,
@@ -773,7 +773,7 @@ def market_long(symbol: str, usdt_amount: float, qty_exact: Optional[str] = None
     # Guardie: evita qty 0 e rispetta minimi exchange
     if float(qty_aligned) <= 0 or float(qty_aligned) < min_qty:
         qty_aligned = Decimal(str(min_qty))
-        log(f"[QTY-GUARD][{symbol}] qty riallineata a min_qty={float(qty_aligned)}")
+        tlog(f"qty_guard:{symbol}", f"[QTY-GUARD][{symbol}] qty riallineata a min_qty={float(qty_aligned)}", 600)
 
     # Rispetta min notional (min_order_amt)
     needed = Decimal(str(min_order_amt)) / Decimal(str(price))
@@ -782,7 +782,7 @@ def market_long(symbol: str, usdt_amount: float, qty_exact: Optional[str] = None
     min_notional_qty = multiples * step_dec
     if qty_aligned * Decimal(str(price)) < Decimal(str(min_order_amt)):
         qty_aligned = max(qty_aligned, min_notional_qty)
-        log(f"[NOTIONAL-GUARD][{symbol}] qty alzata per min_order_amt → {float(qty_aligned)}")
+        tlog(f"notional_guard:{symbol}", f"[NOTIONAL-GUARD][{symbol}] qty alzata per min_order_amt → {float(qty_aligned)}", 600)
 
     # NEW: limita il notional all'effettivo margine disponibile adesso
     avail_now = get_usdt_balance() or 0.0
@@ -825,7 +825,7 @@ def market_long(symbol: str, usdt_amount: float, qty_exact: Optional[str] = None
 
         ret_code = resp_json.get("retCode")
         if ret_code == 170137:
-            log(f"[RETRY][{symbol}] 170137 → refresh instrument e rifloor")
+            tlog(f"retry_137:{symbol}", f"[RETRY][{symbol}] 170137 → refresh instrument e rifloor", 120)
             try:
                 with _instr_lock:
                     _instrument_cache.pop(symbol, None)
@@ -843,10 +843,10 @@ def market_long(symbol: str, usdt_amount: float, qty_exact: Optional[str] = None
             needed_qty = max(Decimal(str(min_qty)), Decimal(str(min_order_amt)) / Decimal(str(price)))
             multiples = (needed_qty / step_dec).quantize(Decimal('1'), rounding=ROUND_UP)
             qty_aligned = multiples * step_dec
-            log(f"[RETRY][{symbol}] 170140 → qty bump a {float(qty_aligned)} (min_notional)")
+            tlog(f"retry_140:{symbol}", f"[RETRY][{symbol}] 170140 → qty bump a {float(qty_aligned)} (min_notional)", 120)
             continue
         if ret_code == 170131:
-            log(f"[RETRY][{symbol}] 170131 → riduco qty del 10%")
+            tlog(f"retry_131:{symbol}", f"[RETRY][{symbol}] 170131 → riduco qty del 10%", 120)
             qty_aligned = (qty_aligned * Decimal("0.9")) // step_dec * step_dec
             if qty_aligned <= 0:
                 return None
@@ -922,7 +922,7 @@ def market_close_long(symbol: str, qty: float):
 
         ret_code = resp_json.get("retCode")
         if ret_code == 170137:
-            log(f"[RETRY-CLOSE][{symbol}] 170137 → refresh instrument e rifloor")
+            tlog(f"retry_close_137:{symbol}", f"[RETRY-CLOSE][{symbol}] 170137 → refresh instrument e rifloor", 120)
             try:
                 with _instr_lock:
                     _instrument_cache.pop(symbol, None)
@@ -933,7 +933,7 @@ def market_close_long(symbol: str, qty: float):
             qty_aligned = (Decimal(str(qty)) // step_dec) * step_dec
             continue
 
-        log(f"[ERROR-CLOSE][{symbol}] Errore non gestito: {ret_code}")
+        tlog(f"err_close:{symbol}:{ret_code}", f"[ERROR-CLOSE][{symbol}] Errore non gestito: {ret_code}", 300)
         break
     return None
 
@@ -1364,18 +1364,19 @@ def analyze_asset(symbol: str):
         if LOG_DEBUG_STRATEGY:
             log(f"[TELEM][LONG][{symbol}] errore telemetria: {e}")
 
-    # Momentum 24h coerente al lato: per LONG richiedi variazione 24h positiva (se disponibile)
-    try:
-        tick = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category":"linear","symbol":symbol}, timeout=10).json()
-        if tick.get("retCode") == 0 and tick.get("result", {}).get("list"):
-            lst = tick["result"]["list"]
-            chg = float(lst[0].get("price24hPcnt", 0.0))
-            if chg <= 0:
-                if LOG_DEBUG_STRATEGY:
-                    tlog(f"mom_long:{symbol}", f"[MOMENTUM][{symbol}] price24hPcnt={chg:.2f}% non coerente con LONG → skip", 600)
-                return None, None, None
-    except Exception:
-        pass
+    # FIX: filtro momentum 24h rimosso - entrava solo su asset già molto saliti (ipercomprato)
+    # Il trend multi-timeframe (4h/1h) è sufficiente a filtrare la direzione
+    # try:
+    #     tick = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category":"linear","symbol":symbol}, timeout=10).json()
+    #     if tick.get("retCode") == 0 and tick.get("result", {}).get("list"):
+    #         lst = tick["result"]["list"]
+    #         chg = float(lst[0].get("price24hPcnt", 0.0))
+    #         if chg <= 0:
+    #             if LOG_DEBUG_STRATEGY:
+    #                 tlog(f"mom_long:{symbol}", f"[MOMENTUM][{symbol}] price24hPcnt={chg:.2f}% non coerente con LONG → skip", 600)
+    #             return None, None, None
+    # except Exception:
+    #     pass
 
     # Trend filter configurabile
     up_4h = is_trending_up(symbol, "240")
@@ -1519,8 +1520,11 @@ def analyze_asset(symbol: str):
                     tlog(f"loss_guard:{symbol}", f"[LOSS-GUARD] Blocco LONG {symbol} (loss={recent_losses.get(symbol)}) sotto EMA50, wait {wait_min:.1f}m", 300)
                 return None, None, None
 
-        # Segnale ingresso
-        if (((conf_count >= required_confluence) or event_triggered) and float(last["adx"]) > adx_needed):
+        # Segnale ingresso LONG: richiede evento fresco E confluenza minima
+        # FIX: rimosso "OR event_triggered" che permetteva ingressi con un solo cross
+        min_conf_with_event = max(1, required_confluence - 1)  # evento = bonus -1 di confluenza
+        entry_condition = (event_triggered and conf_count >= min_conf_with_event) or (conf_count >= required_confluence)
+        if (entry_condition and float(last["adx"]) > adx_needed):
             entry_strategies = []
             if ema_state: entry_strategies.append(f"EMA Bullish {tf_tag}")
             if macd_state: entry_strategies.append(f"MACD Bullish {tf_tag}")
@@ -1748,8 +1752,7 @@ while True:
     stable_budget = portfolio_value * 0.6
     volatile_invested = sum(coin_values.get(s, 0) for s in open_positions if s in VOLATILE_ASSETS)
     stable_invested = sum(coin_values.get(s, 0) for s in open_positions if s in LESS_VOLATILE_ASSETS)
-    if LOG_DEBUG_PORTFOLIO:
-        tlog("portfolio", f"[PORTAFOGLIO] Totale: {portfolio_value:.2f} | Volatili: {volatile_invested:.2f} | Meno volatili: {stable_invested:.2f} | USDT: {usdt_balance:.2f}", 120)
+    tlog("portfolio_long", f"[PORTAFOGLIO] equity={portfolio_value:.2f} USDT | pos={len(open_positions)} | liberi={usdt_balance:.2f} | regime={CURRENT_REGIME}", 900)
 
     # Analisi in parallelo con prefiltraggio
     eligible_symbols = [s for s in ASSETS if s not in STABLECOIN_BLACKLIST and is_symbol_linear(s)]
@@ -1873,7 +1876,7 @@ while True:
                 if symbol in LARGE_CAPS and max_by_margin >= bump:
                     old = order_amount
                     order_amount = min(bump, max_by_margin, 1000.0)
-                    log(f"[BUMP-NOTIONAL][{symbol}] alzato notional da {old:.2f} a {order_amount:.2f} per rispettare min_qty/min_notional")
+                    tlog(f"bump_notional:{symbol}", f"[BUMP-NOTIONAL][{symbol}] alzato notional da {old:.2f} a {order_amount:.2f} per rispettare min_qty/min_notional", 600)
                 else:
                     tlog(f"min_notional:{symbol}", f"❌ Notional richiesto {order_amount:.2f} < minimo {min_notional:.2f} per {symbol} (min_qty={min_qty}, price={price_now_chk})", 300)
                     continue
@@ -1956,7 +1959,6 @@ while True:
             entry_cost = entry.get("entry_cost", ORDER_USDT)
             
             qty = get_open_long_qty(symbol)
-            log(f"[EXIT-SIGNAL LONG][{symbol}] qty={qty} | entry={entry_price} | now={price}")
             if not qty or qty <= 0:
                 discard_open(symbol)
                 with _state_lock:

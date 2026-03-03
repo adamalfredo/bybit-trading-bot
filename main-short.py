@@ -52,20 +52,20 @@ COOLDOWN_MINUTES = 60
 TRIGGER_BY = "LastPrice"
 
 RATCHET_TIERS_ROI = [
-    (30, 15),
-    (45, 30),
-    (60, 45),
-    (80, 60),
-    (100, 75)
+    (15, 7),    # FIX: era (30,15) → soglie realistiche a leva 10x
+    (25, 15),
+    (40, 25),
+    (60, 40),
+    (80, 60)
 ]
 FLOOR_BUFFER_PCT = 0.0015          # 0.15% di prezzo per sicurezza esecuzione
 FLOOR_UPDATE_COOLDOWN_SEC = 45     # cooldown più lungo per evitare rumore
 FLOOR_TRIGGER_BY = "MarkPrice"     # usa Mark per coerenza con SL
 
 # >>> PATCH: parametri breakeven lock (SHORT)
-BREAKEVEN_LOCK_PCT = 0.01     # -1% di prezzo ≈ +10% PnL a 10x
-BREAKEVEN_BUFFER   = -0.0015  # buffer SOTTO l’entry (chiusura sempre ≥ BE)
-MAX_LOSS_CAP_PCT = 0.015  # CAP perdita sul prezzo: 1.5% sopra l'entry
+BREAKEVEN_LOCK_PCT = 0.015     # FIX: era 0.01, attiva BE al -1.5% di prezzo
+BREAKEVEN_BUFFER   = -0.006   # FIX: era -0.0015, buffer piu largo per evitare noise-stop su BE
+MAX_LOSS_CAP_PCT = 0.03   # FIX: era 0.015, cap alzato a 3% per non bloccare SL_ATR_MULT=2.0
 
 # >>> NEW: regime + drawdown giornaliero (SHORT)
 DAILY_DD_CAP_PCT = 0.04         # blocca nuovi ingressi se equity < -4% dal livello di inizio giorno
@@ -100,7 +100,7 @@ LOG_DEBUG_SYNC       = os.getenv("LOG_DEBUG_SYNC", "0") == "1"
 LOG_DEBUG_STRATEGY   = os.getenv("LOG_DEBUG_STRATEGY", "0") == "1"
 LOG_DEBUG_PORTFOLIO  = os.getenv("LOG_DEBUG_PORTFOLIO", "0") == "1"
 # --- Loosening via env ---
-MIN_CONFLUENCE = 1
+MIN_CONFLUENCE = 2   # FIX: era 1, richiede almeno 2 indicatori allineati
 TREND_MODE = "STRICT"
 ENTRY_TF_VOLATILE = 30
 ENTRY_TF_STABLE = 30
@@ -115,11 +115,11 @@ LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 
 # --- Nuova gestione rischio e R-multipli ---
 RISK_PCT = float(os.getenv("RISK_PCT", "0.0075"))   # 0.75% equity per trade
-SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "1.4"))
-TP1_R = float(os.getenv("TP1_R", "1.0"))
+SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "2.0"))   # FIX: era 1.4, SL più largo per ridurre noise-stop
+TP1_R = float(os.getenv("TP1_R", "2.5"))             # FIX: era 1.0, R:R almeno 2.5:1
 TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.5"))  # 50% posizione al primo TP
 BE_AT_R = float(os.getenv("BE_AT_R", "1.0"))
-TRAIL_START_R = float(os.getenv("TRAIL_START_R", "2.0"))
+TRAIL_START_R = float(os.getenv("TRAIL_START_R", "1.5"))  # FIX: era 2.0, trailing attivo prima
 TRAIL_ATR_MULT = float(os.getenv("TRAIL_ATR_MULT", "1.3"))
 
 # --- Stima fee per expectancy (percentuali lato notional) ---
@@ -581,10 +581,10 @@ def get_last_price(symbol):
                 _last_price_cache[symbol] = {"price": price, "ts": now}
             return price
         else:
-            log(f"[BYBIT] Errore get_last_price {symbol}: {data}")
+            tlog(f"lp_err:{symbol}", f"[BYBIT] Errore get_last_price {symbol}: {data}", 300)
             return None
     except Exception as e:
-        log(f"[BYBIT] Errore get_last_price {symbol}: {e}")
+        tlog(f"lp_exc:{symbol}", f"[BYBIT] Errore get_last_price {symbol}: {e}", 300)
         return None
 
 def get_instrument_info(symbol: str) -> dict:
@@ -608,7 +608,7 @@ def get_instrument_info(symbol: str) -> dict:
         resp = SESSION.get(endpoint, params=params, timeout=10)
         data = resp.json()
         if data.get("retCode") != 0:
-            log(f"❌ get_instrument_info retCode {data.get('retCode')} → fallback {symbol}")
+            tlog(f"instr_err:{symbol}", f"❌ get_instrument_info retCode {data.get('retCode')} → fallback {symbol}", 600)
             parsed = {
                 "min_qty": 0.01,
                 "qty_step": 0.01,
@@ -622,7 +622,7 @@ def get_instrument_info(symbol: str) -> dict:
         
         lst = data.get("result", {}).get("list", [])
         if not lst:
-            log(f"❌ get_instrument_info lista vuota → fallback {symbol}")
+            tlog(f"instr_empty:{symbol}", f"❌ get_instrument_info lista vuota → fallback {symbol}", 600)
             parsed = {
                 "min_qty": 0.01,
                 "qty_step": 0.01,
@@ -656,7 +656,7 @@ def get_instrument_info(symbol: str) -> dict:
         return parsed
         
     except Exception as e:
-        log(f"❌ Errore get_instrument_info eccezione → fallback {symbol}: {e}")
+        tlog(f"instr_exc:{symbol}", f"❌ Errore get_instrument_info eccezione → fallback {symbol}: {e}", 600)
         parsed = {
             "min_qty": 0.01,
             "qty_step": 0.01,
@@ -1388,18 +1388,19 @@ def analyze_asset(symbol: str):
         if LOG_DEBUG_STRATEGY:
             log(f"[TELEM][SHORT][{symbol}] errore telemetria: {e}")
 
-    # Momentum 24h coerente al lato: per SHORT richiedi variazione 24h negativa (se disponibile)
-    try:
-        tick = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category":"linear","symbol":symbol}, timeout=10).json()
-        if tick.get("retCode") == 0 and tick.get("result", {}).get("list"):
-            lst = tick["result"]["list"]
-            chg = float(lst[0].get("price24hPcnt", 0.0))
-            if chg >= 0:
-                if LOG_DEBUG_STRATEGY:
-                    tlog(f"mom_short:{symbol}", f"[MOMENTUM][{symbol}] price24hPcnt={chg:.2f}% non coerente con SHORT → skip", 600)
-                return None, None, None
-    except Exception:
-        pass
+    # FIX: filtro momentum 24h rimosso - entrava solo su asset già molto scesi (ipervenduto)
+    # Il trend multi-timeframe (4h/1h) è sufficiente a filtrare la direzione
+    # try:
+    #     tick = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category":"linear","symbol":symbol}, timeout=10).json()
+    #     if tick.get("retCode") == 0 and tick.get("result", {}).get("list"):
+    #         lst = tick["result"]["list"]
+    #         chg = float(lst[0].get("price24hPcnt", 0.0))
+    #         if chg >= 0:
+    #             if LOG_DEBUG_STRATEGY:
+    #                 tlog(f"mom_short:{symbol}", f"[MOMENTUM][{symbol}] price24hPcnt={chg:.2f}% non coerente con SHORT → skip", 600)
+    #             return None, None, None
+    # except Exception:
+    #     pass
 
     # Filtro trend configurabile (SHORT)
     down_4h = is_trending_down(symbol, "240")
@@ -1540,8 +1541,11 @@ def analyze_asset(symbol: str):
                          300)
                 return None, None, None
 
-        # Segnale ingresso SHORT
-        if (((conf_count >= required_confluence) or event_triggered) and float(last["adx"]) > adx_needed):
+        # Segnale ingresso SHORT: richiede evento fresco E confluenza minima
+        # FIX: rimosso "OR event_triggered" che permetteva ingressi con un solo cross
+        min_conf_with_event = max(1, required_confluence - 1)  # evento = bonus -1 di confluenza
+        entry_condition = (event_triggered and conf_count >= min_conf_with_event) or (conf_count >= required_confluence)
+        if (entry_condition and float(last["adx"]) > adx_needed):
             entry_strategies = []
             if ema_state: entry_strategies.append(f"EMA Bearish {tf_tag}")
             if macd_state: entry_strategies.append(f"MACD Bearish {tf_tag}")
@@ -1774,6 +1778,7 @@ while True:
     perc_stable = (stable_invested / portfolio_value * 100) if portfolio_value > 0 else 0
     if LOG_DEBUG_PORTFOLIO:
         tlog("portfolio", f"[PORTAFOGLIO] Totale: {portfolio_value:.2f} USDT | Volatili: {volatile_invested:.2f} ({perc_volatile:.1f}%) | Meno volatili: {stable_invested:.2f} ({perc_stable:.1f}%) | USDT: {usdt_balance:.2f}", 900)
+    tlog("portfolio_short", f"[PORTAFOGLIO] equity={portfolio_value:.2f} USDT | pos={len(open_positions)} | liberi={usdt_balance:.2f} | regime={CURRENT_REGIME}", 900)
 
     # Analisi in parallelo con prefiltraggio
     eligible_symbols = [s for s in ASSETS if s not in STABLECOIN_BLACKLIST and is_symbol_linear(s)]
@@ -1833,7 +1838,7 @@ while True:
                 group_label = "MENO VOLATILE"
 
             group_available = max(0.0, group_budget - group_invested)
-            tlog(f"budget_detail:{symbol}", f"[BUDGET] {symbol} ({group_label}) - Budget: {group_budget:.2f} | Investito: {group_invested:.2f} | Disp: {group_available:.2f}", 300)
+            # [BUDGET] rimosso per ridurre rumore log: usare LOG_DEBUG_PORTFOLIO per dettagli
 
             # 📊 Valuta la forza del segnale in base alla strategia (usata solo come attenuatore 0.5-1.0)
             weights_no_tf = {
@@ -1993,21 +1998,19 @@ while True:
             # Verifica holding time minimo
             
             qty = get_open_short_qty(symbol)
-            log(f"[EXIT-SIGNAL][{symbol}] qty effettiva: {qty} | entry_price: {entry_price} | current_price: {price}")
-            
             info = get_instrument_info(symbol)
             min_qty = info.get("min_qty", 0.0)
             qty_step = info.get("qty_step", 0.0)
             
             if qty is None or qty < min_qty or qty < qty_step:
-                log(f"[CLEANUP][EXIT] {symbol}: quantità troppo piccola per ricopertura ({qty} < min_qty {min_qty})")
+                tlog(f"exit_cleanup:{symbol}", f"[CLEANUP][EXIT] {symbol}: qty troppo piccola ({qty} < min {min_qty})", 120)
                 discard_open(symbol)
                 with _state_lock:
                     position_data.pop(symbol, None)
                 continue
             
             if qty <= 0:
-                log(f"[EXIT-FAIL] Nessuna quantità short effettiva da ricoprire per {symbol}")
+                tlog(f"exit_fail_qty:{symbol}", f"[EXIT-FAIL] Nessuna qty short effettiva da ricoprire per {symbol}", 120)
                 discard_open(symbol)
                 with _state_lock:
                     position_data.pop(symbol, None)
