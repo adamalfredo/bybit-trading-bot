@@ -1367,7 +1367,9 @@ def analyze_asset(symbol: str):
     up_1h = is_trending_up_1h(symbol, "60")
 
     if TREND_MODE == "STRICT":
-        trend_ok = up_4h and up_1h
+        # FIX2: in MIXED usa solo 4h (meno restrittivo per aumentare opportunità)
+        # In BULL/BEAR richiede entrambi 4h+1h confermati (STRICT pieno)
+        trend_ok = up_4h if CURRENT_REGIME == "MIXED" else (up_4h and up_1h)
     elif TREND_MODE == "LOOSE_4H":
         trend_ok = up_4h
     else:  # ANY
