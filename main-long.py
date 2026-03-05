@@ -1518,6 +1518,20 @@ def analyze_asset(symbol: str):
                 log(f"[ENTRY-LONG][{symbol}] EVENTO/CONFLUENZA → {entry_strategies}")
             return "entry", ", ".join(entry_strategies), price
 
+        # OVERRIDE: pullback su trend BULL (mean reversion)
+        # Attivo solo in BULL con 4h ancora up e RSI 1h fortemente ipervenduto
+        # Cattura i ritracciamenti profondi senza aspettare la conferma lagging degli EMA/MACD
+        if (CURRENT_REGIME == "BULL"
+                and ema200_slope is not None and ema200_slope > 0   # 4h ancora in uptrend
+                and rsi1h is not None and rsi1h < 32                # RSI 1h ipervenduto
+                and adx1h is not None and adx1h > 18                # trend ancora attivo su 1h
+                and price > last["ema200"]                          # prezzo sopra EMA200 60m (non in crash)
+                and RISK_THROTTLE_LEVEL == 0):                      # nessun drawdown attivo
+            tlog(f"pullback_long:{symbol}",
+                 f"[PULLBACK-OVERRIDE][LONG] {symbol} | rsi1h={rsi1h:.1f} adx1h={adx1h:.1f} ema200_slope={ema200_slope:.4f} → ingresso pullback BULL",
+                 300)
+            return "entry", f"Pullback BULL RSI{rsi1h:.0f} (1h)", price
+
         # Segnali uscita
         cond_exit1 = last["Close"] < last["bb_lower"] and last["rsi"] < 45
         def can_exit(symbol, current_price):

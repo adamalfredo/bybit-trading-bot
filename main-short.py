@@ -1539,6 +1539,20 @@ def analyze_asset(symbol: str):
                 log(f"[ENTRY-SHORT][{symbol}] EVENTO/CONFLUENZA → {entry_strategies}")
             return "entry", ", ".join(entry_strategies), price
 
+        # OVERRIDE: rimbalzo su trend BEAR (mean reversion speculare al LONG)
+        # Attivo solo in BEAR con 4h ancora down e RSI 1h fortemente ipercomprato
+        # Cattura i rimbalzi tecnici senza aspettare la conferma lagging degli EMA/MACD
+        if (CURRENT_REGIME == "BEAR"
+                and ema200_slope is not None and ema200_slope < 0   # 4h ancora in downtrend
+                and rsi1h is not None and rsi1h > 68                # RSI 1h ipercomprato
+                and adx1h is not None and adx1h > 18                # il movimento ha forza, non è rumore
+                and price < last["ema200"]                          # prezzo sotto EMA200 60m (non in recupero strutturale)
+                and RISK_THROTTLE_LEVEL == 0):                      # nessun drawdown attivo
+            tlog(f"pullback_short:{symbol}",
+                 f"[PULLBACK-OVERRIDE][SHORT] {symbol} | rsi1h={rsi1h:.1f} adx1h={adx1h:.1f} ema200_slope={ema200_slope:.4f} → ingresso rimbalzo BEAR",
+                 300)
+            return "entry", f"Rimbalzo BEAR RSI{rsi1h:.0f} (1h)", price
+
         # Segnale uscita (chiudi SHORT se eccesso di compressione)
         cond_exit1 = last["Close"] > last["bb_upper"] and last["rsi"] > 55
         def can_exit(symbol, current_price):
