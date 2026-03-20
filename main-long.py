@@ -1,3 +1,4 @@
+# STRATEGIA MIGLIORATA NEL TIMEFRAME 5/3/2026 AL 20/3/2026
 from typing import Optional
 import os
 import time
@@ -106,6 +107,7 @@ ENTRY_ADX_STABLE = 24          # fisso
 ADX_RELAX_EVENT = 3.0
 RSI_LONG_THRESHOLD = 54.0
 COOLDOWN_MINUTES = 60          # fisso (non usare os.getenv)
+MAX_OPEN_POSITIONS = 3         # massimo posizioni simultanee (leva 10x su ~50 USDT = rischio elevato)
 MAX_CONSEC_LOSSES = 2          # fisso
  
 LINEAR_MIN_TURNOVER = 5_000_000
@@ -1788,6 +1790,9 @@ while True:
                     if LOG_DEBUG_STRATEGY:
                         tlog(f"cooldown:{symbol}", f"⏳ Cooldown attivo per {symbol}, salto ingresso", 300)
                     continue
+            if len(open_positions) >= MAX_OPEN_POSITIONS:
+                tlog(f"maxpos", f"[MAX-POS] {len(open_positions)}/{MAX_OPEN_POSITIONS} posizioni aperte, skip {symbol}", 300)
+                continue
             if symbol in open_positions:
                 if LOG_DEBUG_STRATEGY:
                     tlog(f"inpos:{symbol}", f"⏩ Ignoro apertura LONG: già in posizione su {symbol}", 1800)
@@ -1871,7 +1876,7 @@ while True:
             if order_amount < min_notional:
                 bump = min_notional * 1.01
                 max_by_margin = max_notional_by_margin
-                if symbol in LARGE_CAPS and max_by_margin >= bump:
+                if max_by_margin >= bump:
                     old = order_amount
                     order_amount = min(bump, max_by_margin, 1000.0)
                     tlog(f"bump_notional:{symbol}", f"[BUMP-NOTIONAL][{symbol}] alzato notional da {old:.2f} a {order_amount:.2f} per rispettare min_qty/min_notional", 600)
@@ -1959,6 +1964,7 @@ while True:
             qty = get_open_long_qty(symbol)
             if not qty or qty <= 0:
                 discard_open(symbol)
+                last_exit_time[symbol] = time.time()  # cooldown anche se già chiusa dall'exchange
                 with _state_lock:
                     position_data.pop(symbol, None)
                 continue

@@ -1,3 +1,4 @@
+# STRATEGIA MIGLIORATA NEL TIMEFRAME 5/3/2026 AL 20/3/2026
 from typing import Optional
 import os
 import time
@@ -48,6 +49,7 @@ TRAILING_MIN = 0.02   # trailing più conservativo
 TRAILING_MAX = 0.08   # trailing più conservativo
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
 COOLDOWN_MINUTES = 60
+MAX_OPEN_POSITIONS = 3         # massimo posizioni simultanee (leva 10x su ~50 USDT = rischio elevato)
 # Nuovi parametri protezione guadagni (SHORT)
 TRIGGER_BY = "LastPrice"
 
@@ -1496,6 +1498,10 @@ def analyze_asset(symbol: str):
         else:  # BEAR
             required_confluence = MIN_CONFLUENCE
 
+        # In regime MIXED richiedi SEMPRE un evento reale (cross/break)
+        if CURRENT_REGIME == "MIXED" and not event_triggered:
+            return None, None, None
+
         # ADX richiesto + bonus per regime
         adx_needed = max(0.0, adx_threshold - (ADX_RELAX_EVENT if event_triggered else 0.0))
         if CURRENT_REGIME == "MIXED":
@@ -1815,6 +1821,9 @@ while True:
                     tlog(f"cooldown:{symbol}", f"⏳ Cooldown attivo per {symbol} ({elapsed:.0f}s), salto ingresso", 300)
                     continue
 
+            if len(open_positions) >= MAX_OPEN_POSITIONS:
+                tlog(f"maxpos", f"[MAX-POS] {len(open_positions)}/{MAX_OPEN_POSITIONS} posizioni aperte, skip {symbol}", 300)
+                continue
             if symbol in open_positions:
                 tlog(f"inpos:{symbol}", f"⏩ Ignoro apertura short: già in posizione su {symbol}", 600)
                 continue
@@ -1916,10 +1925,10 @@ while True:
             if order_amount < min_notional:
                 bump = min_notional * 1.01  # +1% cuscinetto
                 max_by_margin = max_notional_by_margin
-                if symbol in LARGE_CAPS and max_by_margin >= bump:
+                if max_by_margin >= bump:
                     old = order_amount
                     order_amount = min(bump, max_by_margin, 1000.0)
-                    log(f"[BUMP-NOTIONAL][{symbol}] alzato notional da {old:.2f} a {order_amount:.2f} per rispettare min_qty/min_notional")
+                    tlog(f"bump_notional:{symbol}", f"[BUMP-NOTIONAL][{symbol}] alzato notional da {old:.2f} a {order_amount:.2f} per rispettare min_qty/min_notional", 600)
                 else:
                     tlog(f"min_notional:{symbol}", f"❌ Notional richiesto {order_amount:.2f} < minimo {min_notional:.2f} per {symbol} (min_qty={min_qty}, price={price_now_chk})", 300)
                     continue
@@ -2003,6 +2012,7 @@ while True:
             if qty is None or qty < min_qty or qty < qty_step:
                 tlog(f"exit_cleanup:{symbol}", f"[CLEANUP][EXIT] {symbol}: qty troppo piccola ({qty} < min {min_qty})", 120)
                 discard_open(symbol)
+                last_exit_time[symbol] = time.time()  # cooldown anche se già chiusa dall'exchange
                 with _state_lock:
                     position_data.pop(symbol, None)
                 continue
@@ -2010,6 +2020,7 @@ while True:
             if qty <= 0:
                 tlog(f"exit_fail_qty:{symbol}", f"[EXIT-FAIL] Nessuna qty short effettiva da ricoprire per {symbol}", 120)
                 discard_open(symbol)
+                last_exit_time[symbol] = time.time()  # cooldown anche se già chiusa dall'exchange
                 with _state_lock:
                     position_data.pop(symbol, None)
                 continue
