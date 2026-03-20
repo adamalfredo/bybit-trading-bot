@@ -50,6 +50,7 @@ TRAILING_MAX = 0.08   # trailing più conservativo
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
 COOLDOWN_MINUTES = 60
 MAX_OPEN_POSITIONS = 3         # massimo posizioni simultanee (leva 10x su ~50 USDT = rischio elevato)
+FUNDING_SHORT_MIN = -0.0005    # blocca nuovi SHORT se funding < -0.05% (shorts sovraccaricati = pressione rialzista)
 # Nuovi parametri protezione guadagni (SHORT)
 TRIGGER_BY = "LastPrice"
 
@@ -1322,6 +1323,7 @@ def record_exit(symbol: str, entry_price: float, exit_price: float, side: str):
         recent_losses[symbol] = 0
 
 def analyze_asset(symbol: str):
+    funding_rate = None  # funding rate corrente (da tickers API), usato come filtro
     # Telemetria: raccogliamo segnali e contesto per misurare l'edge
     # (ADX 1h/4h, slope EMA, RSI, breakout, price24hPcnt)
     try:
@@ -1364,16 +1366,17 @@ def analyze_asset(symbol: str):
                 rsi1h = None
         # Breakout flag
         breakout_ok = is_breaking_weekly_low(symbol) if ENABLE_BREAKOUT_FILTER else None
-        # price24hPcnt
+        # price24hPcnt e funding rate
         chg = None
         try:
             tick = requests.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category":"linear","symbol":symbol}, timeout=10).json()
             if tick.get("retCode") == 0 and tick.get("result", {}).get("list"):
                 lst = tick["result"]["list"]
                 chg = float(lst[0].get("price24hPcnt", 0.0))
+                funding_rate = float(lst[0].get("fundingRate") or 0.0)
         except:
             chg = None
-        tlog(f"telem_short:{symbol}", f"[TELEM][SHORT][{symbol}] adx1h={adx1h} ema100_slope={ema100_slope} ema200_slope={ema200_slope} rsi1h={rsi1h} breakout={breakout_ok} chg24h={chg}", 300)
+        tlog(f"telem_short:{symbol}", f"[TELEM][SHORT][{symbol}] adx1h={adx1h} ema100_slope={ema100_slope} ema200_slope={ema200_slope} rsi1h={rsi1h} chg24h={chg} funding={funding_rate}", 300)
     except Exception as e:
         log(f"[TELEM][SHORT][{symbol}] errore telemetria: {e}")
 
@@ -1525,6 +1528,18 @@ def analyze_asset(symbol: str):
         min_conf_with_event = max(1, required_confluence - 1)  # evento = bonus -1 di confluenza
         entry_condition = (event_triggered and conf_count >= min_conf_with_event) or (conf_count >= required_confluence)
         if (entry_condition and float(last["adx"]) > adx_needed):
+            # Filtro volume: segnale deve avere almeno 60% del volume medio (ultimi 20 periodi chiusi)
+            vol_series = pd.to_numeric(df["Volume"], errors="coerce")
+            vol_avg20 = vol_series.iloc[-22:-2].mean() if len(vol_series) >= 22 else 0.0
+            vol_last = float(vol_series.iloc[-2])
+            vol_ratio = vol_last / vol_avg20 if vol_avg20 > 0 else 1.0
+            if vol_ratio < 0.6:
+                tlog(f"vol_low:{symbol}", f"[VOL-FILTER][SHORT] {symbol} volume={vol_ratio:.2f}x media, segnale debole, skip", 300)
+                return None, None, None
+            # Filtro funding: se shorts sovraccaricati (funding negativo) → pressione rialzista
+            if funding_rate is not None and funding_rate < FUNDING_SHORT_MIN:
+                tlog(f"funding:{symbol}", f"[FUNDING-FILTER][SHORT] {symbol} funding={funding_rate:.4%} < min {FUNDING_SHORT_MIN:.4%}, skip", 300)
+                return None, None, None
             entry_strategies = []
             if ema_state: entry_strategies.append(f"EMA Bearish {tf_tag}")
             if macd_state: entry_strategies.append(f"MACD Bearish {tf_tag}")
@@ -1542,7 +1557,8 @@ def analyze_asset(symbol: str):
                 and rsi1h is not None and rsi1h > 68                # RSI 1h ipercomprato
                 and adx1h is not None and adx1h > 18                # il movimento ha forza, non è rumore
                 and price < last["ema200"]                          # prezzo sotto EMA200 60m (non in recupero strutturale)
-                and RISK_THROTTLE_LEVEL == 0):                      # nessun drawdown attivo
+                and RISK_THROTTLE_LEVEL == 0                        # nessun drawdown attivo
+                and (funding_rate is None or funding_rate >= FUNDING_SHORT_MIN)):  # no funding estremo
             tlog(f"pullback_short:{symbol}",
                  f"[PULLBACK-OVERRIDE][SHORT] {symbol} | rsi1h={rsi1h:.1f} adx1h={adx1h:.1f} ema200_slope={ema200_slope:.4f} → ingresso rimbalzo BEAR",
                  300)

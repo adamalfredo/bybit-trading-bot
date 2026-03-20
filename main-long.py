@@ -106,6 +106,7 @@ ADX_RELAX_EVENT = 3.0
 RSI_LONG_THRESHOLD = 54.0
 COOLDOWN_MINUTES = 60          # fisso (non usare os.getenv)
 MAX_OPEN_POSITIONS = 3         # massimo posizioni simultanee (leva 10x su ~50 USDT = rischio elevato)
+FUNDING_LONG_MAX = 0.0005      # blocca nuovi LONG se funding > +0.05% (longs sovraccarichi = pressione ribassista)
 MAX_CONSEC_LOSSES = 2          # fisso
  
 LINEAR_MIN_TURNOVER = 5_000_000
@@ -1295,6 +1296,7 @@ def record_exit(symbol: str, entry_price: float, exit_price: float, side: str):
         recent_losses[symbol] = 0
     
 def analyze_asset(symbol: str):
+    funding_rate = None  # funding rate corrente (da tickers API), usato come filtro
     # Telemetria ingresso (ADX/EMA slopes/RSI/breakout/24h change)
     try:
         resp1 = requests.get(f"{BYBIT_BASE_URL}/v5/market/kline", params={"category":"linear","symbol":symbol,"interval":"60","limit":120}, timeout=10)
@@ -1339,9 +1341,10 @@ def analyze_asset(symbol: str):
             if tick.get("retCode") == 0 and tick.get("result", {}).get("list"):
                 lst = tick["result"]["list"]
                 chg = float(lst[0].get("price24hPcnt", 0.0))
+                funding_rate = float(lst[0].get("fundingRate") or 0.0)
         except:
             chg = None
-        tlog(f"telem_long:{symbol}", f"[TELEM][LONG][{symbol}] adx1h={adx1h} ema100_slope={ema100_slope} ema200_slope={ema200_slope} rsi1h={rsi1h} breakout={breakout_ok} chg24h={chg}", 300)
+        tlog(f"telem_long:{symbol}", f"[TELEM][LONG][{symbol}] adx1h={adx1h} ema100_slope={ema100_slope} ema200_slope={ema200_slope} rsi1h={rsi1h} chg24h={chg} funding={funding_rate}", 300)
     except Exception as e:
         log(f"[TELEM][LONG][{symbol}] errore telemetria: {e}")
 
@@ -1492,6 +1495,18 @@ def analyze_asset(symbol: str):
         min_conf_with_event = max(1, required_confluence - 1)  # evento = bonus -1 di confluenza
         entry_condition = (event_triggered and conf_count >= min_conf_with_event) or (conf_count >= required_confluence)
         if (entry_condition and float(last["adx"]) > adx_needed):
+            # Filtro volume: segnale deve avere almeno 60% del volume medio (ultimi 20 periodi chiusi)
+            vol_series = pd.to_numeric(df["Volume"], errors="coerce")
+            vol_avg20 = vol_series.iloc[-22:-2].mean() if len(vol_series) >= 22 else 0.0
+            vol_last = float(vol_series.iloc[-2])
+            vol_ratio = vol_last / vol_avg20 if vol_avg20 > 0 else 1.0
+            if vol_ratio < 0.6:
+                tlog(f"vol_low:{symbol}", f"[VOL-FILTER][LONG] {symbol} volume={vol_ratio:.2f}x media, segnale debole, skip", 300)
+                return None, None, None
+            # Filtro funding: se longs sovraccaricati (funding alto) → pressione ribassista
+            if funding_rate is not None and funding_rate > FUNDING_LONG_MAX:
+                tlog(f"funding:{symbol}", f"[FUNDING-FILTER][LONG] {symbol} funding={funding_rate:.4%} > max {FUNDING_LONG_MAX:.4%}, skip", 300)
+                return None, None, None
             entry_strategies = []
             if ema_state: entry_strategies.append(f"EMA Bullish {tf_tag}")
             if macd_state: entry_strategies.append(f"MACD Bullish {tf_tag}")
@@ -1509,7 +1524,8 @@ def analyze_asset(symbol: str):
                 and rsi1h is not None and rsi1h < 32                # RSI 1h ipervenduto
                 and adx1h is not None and adx1h > 18                # trend ancora attivo su 1h
                 and price > last["ema200"]                          # prezzo sopra EMA200 60m (non in crash)
-                and RISK_THROTTLE_LEVEL == 0):                      # nessun drawdown attivo
+                and RISK_THROTTLE_LEVEL == 0                        # nessun drawdown attivo
+                and (funding_rate is None or funding_rate <= FUNDING_LONG_MAX)):  # no funding estremo
             tlog(f"pullback_long:{symbol}",
                  f"[PULLBACK-OVERRIDE][LONG] {symbol} | rsi1h={rsi1h:.1f} adx1h={adx1h:.1f} ema200_slope={ema200_slope:.4f} → ingresso pullback BULL",
                  300)
