@@ -78,8 +78,6 @@ RISK_THROTTLE_LEVEL = 0  # 0=off, 1=DD > cap, 2=DD > 2*cap
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
 ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # FIX2: disabilitato - il breakout obbligatorio causa late-entry dopo il massimo
-# --- MTF entry: segnali su 15m, trend su 4h/1h ---
-USE_MTF_ENTRY = True
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
 ASSETS = []
 LESS_VOLATILE_ASSETS = []
@@ -258,18 +256,6 @@ def _update_daily_anchor_and_regime():
         _last_regime_ts = time.time()
         tlog("regime", f"[REGIME] mercato={CURRENT_REGIME}", 180)
 
-def is_breaking_weekly_low(symbol: str):
-    """
-    True se il prezzo attuale è sotto il minimo delle ultime 6 ore.
-    """
-    df = fetch_history(symbol, interval=INTERVAL_MINUTES)
-    bars = int(6 * 60 / INTERVAL_MINUTES)
-    if df is None or len(df) < bars:
-        return False
-    last_close = df["Close"].iloc[-1]
-    low = df["Low"].iloc[-bars:].min()
-    return last_close <= low * 0.995  # tolleranza 0.5% sotto il minimo
-
 def is_breaking_weekly_high(symbol: str):
     """
     True se il prezzo attuale è sopra il massimo delle ultime 6 ore (breakout).
@@ -344,11 +330,6 @@ def log(msg):
 
 # Livello log globale: DEBUG/INFO/WARN/ERROR (default INFO)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-
-def dlog(msg):
-    # Debug log stampato solo se LOG_LEVEL==DEBUG
-    if LOG_LEVEL == "DEBUG":
-        log(msg)
 
 # --- HTTP sessione condivisa con retry/backoff ---
 RETRY_STRATEGY = Retry(
@@ -1404,7 +1385,7 @@ def analyze_asset(symbol: str):
 
     try:
         is_volatile = symbol in VOLATILE_ASSETS
-        tf_minutes = ENTRY_TF_VOLATILE if (USE_MTF_ENTRY and is_volatile) else ENTRY_TF_STABLE
+        tf_minutes = ENTRY_TF_VOLATILE if is_volatile else ENTRY_TF_STABLE
 
         df = fetch_history(symbol, interval=tf_minutes)
         if df is None or len(df) < 4:

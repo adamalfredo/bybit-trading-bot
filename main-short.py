@@ -82,8 +82,6 @@ DD_PAUSE_MINUTES = int(os.getenv("DD_PAUSE_MINUTES", "120"))
 RISK_THROTTLE_LEVEL = 0  # 0=off, 1=DD > cap, 2=DD > 2*cap
 ORDER_USDT = 50.0
 ENABLE_BREAKOUT_FILTER = False  # FIX2: disabilitato - il breakdown obbligatorio causa late-entry dopo il minimo
-# --- MTF entry: segnali su 15m, trend su 4h/1h ---
-USE_MTF_ENTRY = True
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
 ASSETS = []
 LESS_VOLATILE_ASSETS = []
@@ -143,10 +141,6 @@ _instr_lock = threading.RLock()
 _price_lock = threading.RLock()
 
 # Helpers atomici per lo stato
-def get_position(symbol: str):
-    with _state_lock:
-        return position_data.get(symbol)
-
 def set_position(symbol: str, entry: dict) -> None:
     with _state_lock:
         position_data[symbol] = entry
@@ -361,11 +355,6 @@ def tlog(key: str, msg: str, interval_sec: int = 60):
 
 # Livello log globale: DEBUG/INFO/WARN/ERROR (default INFO)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-
-def dlog(msg):
-    # Debug log stampato solo se LOG_LEVEL==DEBUG
-    if LOG_LEVEL == "DEBUG":
-        log(msg)
 
 # --- HTTP sessione condivisa con retry/backoff ---
 RETRY_STRATEGY = Retry(
@@ -1428,7 +1417,7 @@ def analyze_asset(symbol: str):
 
     try:
         is_volatile = symbol in VOLATILE_ASSETS
-        tf_minutes = ENTRY_TF_VOLATILE if (USE_MTF_ENTRY and is_volatile) else ENTRY_TF_STABLE
+        tf_minutes = ENTRY_TF_VOLATILE if is_volatile else ENTRY_TF_STABLE
 
         df = fetch_history(symbol, interval=tf_minutes)
         if df is None or len(df) < 4:
