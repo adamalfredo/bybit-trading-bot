@@ -1003,6 +1003,7 @@ def breakeven_lock_worker_short():
                         entry["trailing_active"] = True
                         set_position(symbol, entry)
                         tlog(f"trail_on_short:{symbol}", f"[TRAIL-ON][SHORT] {symbol} attivo dist={trailing_dist:.6f}", 60)
+                        notify_telegram(f"🎯 Trailing attivato SHORT {symbol}\nPrezzo: {price_now:.4f}\nDistanza trailing: {trailing_dist:.6f}")
             except Exception as _e:
                 if LOG_DEBUG_STRATEGY:
                     tlog(f"trail_on_exc_short:{symbol}", f"[TRAIL-ON-EXC][SHORT] {symbol} exc={_e}", 300)
