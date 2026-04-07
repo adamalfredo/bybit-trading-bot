@@ -975,10 +975,10 @@ def breakeven_lock_worker_short():
         for symbol in list(open_positions):
             with _state_lock:
                 entry = position_data.get(symbol)
-                be_locked = entry.get("be_locked") if entry else False
-            if not entry or be_locked:
+            if not entry:
                 continue
 
+            be_locked = entry.get("be_locked", False)
             price_now = get_last_price(symbol)
             if not price_now:
                 continue
@@ -1006,6 +1006,9 @@ def breakeven_lock_worker_short():
             except Exception as _e:
                 if LOG_DEBUG_STRATEGY:
                     tlog(f"trail_on_exc_short:{symbol}", f"[TRAIL-ON-EXC][SHORT] {symbol} exc={_e}", 300)
+            if be_locked:
+                continue
+
             r_dist = entry.get("r_dist")  # distanza 1R in prezzo
             # Se abbiamo r_dist, be quando prezzo ha guadagnato 1R
             cond_be = (r_dist is not None and price_now <= entry_price - (BE_AT_R * r_dist))
@@ -1455,7 +1458,13 @@ def analyze_asset(symbol: str):
         if len(df) < 4:
             return None, None, None
 
-        adx_threshold = ENTRY_ADX_VOLATILE if is_volatile else ENTRY_ADX_STABLE
+        # ADX base regime-aware: permissivo con trend (BEAR), neutro in MIXED, strict in BULL
+        if CURRENT_REGIME == "BEAR":
+            adx_threshold = (ENTRY_ADX_VOLATILE - 6) if is_volatile else (ENTRY_ADX_STABLE - 6)  # 21 / 18
+        elif CURRENT_REGIME == "MIXED":
+            adx_threshold = (ENTRY_ADX_VOLATILE - 3) if is_volatile else (ENTRY_ADX_STABLE - 3)  # 24 / 21
+        else:  # BULL - contro trend
+            adx_threshold = ENTRY_ADX_VOLATILE if is_volatile else ENTRY_ADX_STABLE               # 27 / 24
         # Usa SOLO candele chiuse per i segnali (evita repaint)
         last = df.iloc[-2]       # candela appena chiusa
         prev = df.iloc[-3]       # candela chiusa precedente
@@ -1957,9 +1966,11 @@ while True:
                 log(f"❌ Nessuna quantità shortata per {symbol}. Non registro la posizione.")
                 continue
             # >>> TP1 a 1R (parziale) e SL tramite trading-stop
+            # TP1_R regime-aware: in BEAR lascia correre (2.5R), in BULL/MIXED prende profitto prima
+            _tp1_r = TP1_R if CURRENT_REGIME == "BEAR" else (1.8 if CURRENT_REGIME == "MIXED" else 1.5)
             tp_oid = None
             price_now = get_last_price(symbol) or price
-            tp1_price = price_now - (TP1_R * r_dist)
+            tp1_price = price_now - (_tp1_r * r_dist)
             qty_tp1 = max(0.0, qty * TP1_PARTIAL)
             if qty_tp1 > 0:
                 ok_tp, tp_oid = place_takeprofit_short(symbol, tp1_price, qty_tp1)

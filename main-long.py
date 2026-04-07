@@ -961,10 +961,10 @@ def breakeven_lock_worker_long():
         for symbol in list(open_positions):
             with _state_lock:
                 entry = position_data.get(symbol)
-                be_locked = entry.get("be_locked") if entry else False
-            if not entry or be_locked:
+            if not entry:
                 continue
 
+            be_locked = entry.get("be_locked", False)
             price_now = get_last_price(symbol)
             if not price_now:
                 continue
@@ -993,6 +993,9 @@ def breakeven_lock_worker_long():
             except Exception as _e:
                 if LOG_DEBUG_STRATEGY:
                     tlog(f"trail_on_exc_long:{symbol}", f"[TRAIL-ON-EXC][LONG] {symbol} exc={_e}", 300)
+            if be_locked:
+                continue
+
             r_dist = entry.get("r_dist")
             cond_be = (r_dist is not None and price_now >= entry_price + (BE_AT_R * r_dist))
             if r_dist is None:
@@ -1423,7 +1426,13 @@ def analyze_asset(symbol: str):
         if len(df) < 4:
             return None, None, None
 
-        adx_threshold = ENTRY_ADX_VOLATILE if is_volatile else ENTRY_ADX_STABLE
+        # ADX base regime-aware: permissivo con trend (BULL), neutro in MIXED, strict in BEAR
+        if CURRENT_REGIME == "BULL":
+            adx_threshold = (ENTRY_ADX_VOLATILE - 6) if is_volatile else (ENTRY_ADX_STABLE - 6)  # 21 / 18
+        elif CURRENT_REGIME == "MIXED":
+            adx_threshold = (ENTRY_ADX_VOLATILE - 3) if is_volatile else (ENTRY_ADX_STABLE - 3)  # 24 / 21
+        else:  # BEAR - contro trend
+            adx_threshold = ENTRY_ADX_VOLATILE if is_volatile else ENTRY_ADX_STABLE               # 27 / 24
 
         # Usa SOLO candele chiuse per i segnali (evita repaint)
         last = df.iloc[-2]       # candela appena chiusa
@@ -1776,10 +1785,9 @@ while True:
             if ENABLE_DD_PAUSE and time.time() < _trading_paused_until:
                 tlog(f"paused:{symbol}", f"[PAUSE] trading sospeso (DD cap), skip LONG {symbol}", 600)
                 continue
-            # if CURRENT_REGIME == "BEAR":
-            #     tlog(f"reg_gate:{symbol}", f"[REGIME-GATE] BEAR → skip LONG {symbol}", 600)
-            #     continue
-            #     Nessun blocco regime: in BEAR i filtri sono irrigiditi in analyze_asset.
+            if CURRENT_REGIME == "BEAR":
+                tlog(f"reg_gate:{symbol}", f"[REGIME-GATE] BEAR → skip LONG {symbol}", 600)
+                continue
 
             if symbol in last_exit_time:
                 elapsed = time.time() - last_exit_time[symbol]
@@ -1909,7 +1917,9 @@ while True:
                 continue
 
             # TP1 a 1R (parziale) e SL con trading-stop
-            tp1_price = price_now + (TP1_R * r_dist)
+            # TP1_R regime-aware: in BULL lascia correre (2.5R), in BEAR/MIXED prende profitto prima
+            _tp1_r = TP1_R if CURRENT_REGIME == "BULL" else (1.8 if CURRENT_REGIME == "MIXED" else 1.5)
+            tp1_price = price_now + (_tp1_r * r_dist)
             qty_tp1 = max(0.0, qty * TP1_PARTIAL)
             tp_oid = None
             if qty_tp1 > 0:
