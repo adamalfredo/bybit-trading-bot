@@ -109,7 +109,7 @@ MAX_OPEN_POSITIONS = 3         # massimo posizioni simultanee (leva 10x su ~50 U
 FUNDING_LONG_MAX = 0.0005      # blocca nuovi LONG se funding > +0.05% (longs sovraccarichi = pressione ribassista)
 MAX_CONSEC_LOSSES = 2          # fisso
  
-LINEAR_MIN_TURNOVER = 3_000_000  # abbassato da 5M: sufficiente per capital size ~200 USDT notional
+LINEAR_MIN_TURNOVER = 10_000_000  # 10M: esclude micro-cap illiquidi e token manipolati
 # Large-cap con minQty elevata: abilita auto-bump del notional al minimo
 LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 # --- Nuova gestione rischio e R-multipli ---
@@ -289,11 +289,12 @@ def update_assets(top_n=12):
 
         tickers = data["result"]["list"]
 
-        # Pool: tutti i linear USDT liquidi, escluse blacklist
+        # Pool: tutti i linear USDT liquidi, escluse blacklist e funding estremo
         pool = [
             t for t in tickers
             if t["symbol"].endswith("USDT")
             and float(t.get("turnover24h", 0)) >= LINEAR_MIN_TURNOVER
+            and abs(float(t.get("fundingRate", 0))) < 0.003  # esclude asset con funding anomalo (manipolazione)
             and t["symbol"] not in STABLECOIN_BLACKLIST
             and t["symbol"] not in EXCLUSION_LIST
         ]
