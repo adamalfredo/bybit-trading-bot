@@ -665,7 +665,7 @@ def get_instrument_info(symbol: str) -> dict:
             "qty_step": qty_step,
             "precision": int(info.get("priceScale", 4) or 4),
             "price_step": float(price_filter.get("tickSize", "0.01") or "0.01"),
-            "min_order_amt": float(info.get("minOrderAmt", 10) or 10)
+            "min_order_amt": float(lot.get("minNotionalValue", "5") or "5")
         }
         with _instr_lock:
             _instrument_cache[symbol] = {"data": parsed, "ts": now}
