@@ -109,7 +109,7 @@ MAX_OPEN_POSITIONS = 3         # massimo posizioni simultanee (leva 10x su ~50 U
 FUNDING_LONG_MAX = 0.0005      # blocca nuovi LONG se funding > +0.05% (longs sovraccarichi = pressione ribassista)
 MAX_CONSEC_LOSSES = 2          # fisso
  
-LINEAR_MIN_TURNOVER = 5_000_000
+LINEAR_MIN_TURNOVER = 3_000_000  # abbassato da 5M: sufficiente per capital size ~200 USDT notional
 # Large-cap con minQty elevata: abilita auto-bump del notional al minimo
 LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 # --- Nuova gestione rischio e R-multipli ---
@@ -269,58 +269,81 @@ def is_breaking_weekly_high(symbol: str):
     high = df["High"].iloc[-bars:].max()
     return last_close >= high * 1.005  # tolleranza +0.5% sopra il massimo
 
-def update_assets(top_n=12, n_stable=6):
+def update_assets(top_n=12):
     """
-    Aggiorna ASSETS, LESS_VOLATILE_ASSETS e VOLATILE_ASSETS:
-    - Top N per volume 24h su spot (USDT)
-    - Intersezione con futures linear con turnover24h >= LINEAR_MIN_TURNOVER
-    - Esclude STABLECOIN_BLACKLIST e EXCLUSION_LIST
+    Aggiorna ASSETS, LESS_VOLATILE_ASSETS e VOLATILE_ASSETS.
+    Selezione ottimizzata (LONG):
+    - Pool: tutti i futures linear USDT con turnover24h >= LINEAR_MIN_TURNOVER (una sola chiamata API)
+    - Ranking: 25% volume normalizzato + 75% momentum 24h
+    - Bias LONG: sweet spot +1%→+12%; penalizza pump estremi e asset negativi
+    - VOLATILE: |price24hPcnt| > 5% → ADX threshold 27; altrimenti LESS_VOLATILE → ADX 24
     """
     global ASSETS, LESS_VOLATILE_ASSETS, VOLATILE_ASSETS
     try:
-        # Ranking spot
-        resp_spot = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category": "spot"}, timeout=10)
-        data_spot = resp_spot.json()
-        if data_spot.get("retCode") != 0:
-            log(f"[ASSETS] Errore API spot: {data_spot}")
+        # Unica chiamata API: futures linear contengono tutto (liquidità + momentum)
+        resp = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category": "linear"}, timeout=10)
+        data = resp.json()
+        if data.get("retCode") != 0:
+            log(f"[ASSETS] Errore API linear: {data}")
             return
-        spot = data_spot["result"]["list"]
-        spot_usdt = [
-            t for t in spot
+
+        tickers = data["result"]["list"]
+
+        # Pool: tutti i linear USDT liquidi, escluse blacklist
+        pool = [
+            t for t in tickers
             if t["symbol"].endswith("USDT")
-            and float(t.get("turnover24h", 0)) >= LIQUIDITY_MIN_VOLUME
+            and float(t.get("turnover24h", 0)) >= LINEAR_MIN_TURNOVER
             and t["symbol"] not in STABLECOIN_BLACKLIST
             and t["symbol"] not in EXCLUSION_LIST
         ]
-        spot_usdt.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
-        top = spot_usdt[:top_n]
-        pre = [t["symbol"] for t in top]
 
-        # Liquidità futures linear
-        resp_lin = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category": "linear"}, timeout=10)
-        data_lin = resp_lin.json()
-        if data_lin.get("retCode") != 0:
-            log(f"[ASSETS] Errore API linear: {data_lin}")
+        if not pool:
             return
-        linear = data_lin["result"]["list"]
-        linear_liquid = {
-            t["symbol"] for t in linear
-            if float(t.get("turnover24h", 0)) >= LINEAR_MIN_TURNOVER
-        }
 
-        # Intersezione + esclusioni
+        def _momentum_score_long(pct: float) -> float:
+            """Punteggio 0-1: favorisce momentum moderatamente positivo, penalizza estremi."""
+            if pct > 20 or pct < -15:
+                return 0.05  # pump/dump estremo: movimento probabilmente esaurito
+            if 1.0 <= pct <= 12.0:
+                return 1.0   # sweet spot: trend iniziato ma non esaurito
+            if 0.0 <= pct < 1.0:
+                return 0.65  # partenza, può ancora svilupparsi
+            if 12.0 < pct <= 20.0:
+                return 0.35  # esteso, rischio reversal imminente
+            return 0.2       # negativo: contro la direzione LONG
+
         prev = set(ASSETS)
-        filtered = [s for s in pre if s in linear_liquid and s not in EXCLUSION_LIST]
-        ASSETS = filtered
-        LESS_VOLATILE_ASSETS = filtered[:n_stable]
-        VOLATILE_ASSETS = [s for s in filtered if s not in LESS_VOLATILE_ASSETS]
-        
+        candidates = []
+        for t in pool:
+            sym = t["symbol"]
+            vol = float(t.get("turnover24h", 0))
+            pct = float(t.get("price24hPcnt", 0)) * 100  # Bybit restituisce valore frazionario
+            mom = _momentum_score_long(pct)
+            candidates.append((sym, vol, pct, mom))
+
+        # Score finale: 25% volume normalizzato + 75% momentum
+        max_vol = max(c[1] for c in candidates) or 1.0
+        scored = sorted(
+            candidates,
+            key=lambda c: 0.25 * (c[1] / max_vol) + 0.75 * c[3],
+            reverse=True
+        )
+
+        top = scored[:top_n]
+        ASSETS = [c[0] for c in top]
+        # VOLATILE = asset che si muovono più del 5% in 24h (in abs) → ADX threshold 27
+        # LESS_VOLATILE = gli altri → ADX threshold 24
+        VOLATILE_ASSETS      = [c[0] for c in top if abs(c[2]) > 5.0]
+        LESS_VOLATILE_ASSETS = [c[0] for c in top if abs(c[2]) <= 5.0]
+
         changed = set(ASSETS) != prev
         if changed or LOG_DEBUG_ASSETS:
-            added = list(set(ASSETS) - prev)
+            added   = list(set(ASSETS) - prev)
             removed = list(prev - set(ASSETS))
             if LOG_DEBUG_ASSETS:
-                log(f"[ASSETS] Aggiornati: {ASSETS}\nMeno volatili: {LESS_VOLATILE_ASSETS}\nVolatili: {VOLATILE_ASSETS}")
+                mom_info = {c[0]: f"{c[2]:+.1f}%" for c in top}
+                log(f"[ASSETS] Aggiornati: {ASSETS}\nMomento 24h: {mom_info}\nVolatili(>5%): {VOLATILE_ASSETS}\nStabili(≤5%): {LESS_VOLATILE_ASSETS}")
             else:
                 log(f"[ASSETS] Totali={len(ASSETS)} (+{len(added)}/-{len(removed)}) | Added={added[:5]} Removed={removed[:5]}")
     except Exception as e:
