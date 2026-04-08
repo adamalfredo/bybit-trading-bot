@@ -139,6 +139,10 @@ EXCLUSION_LIST = ["FUSDT", "YBUSDT", "ZBTUSDT", "RECALLUSDT", "XPLUSDT", "BRETTU
 LAST_PRICE_TTL_SEC = 2
 _last_price_cache = {}
 
+# Cache Open Interest per simbolo (TTL 5 min: OI orario non cambia a ogni tick)
+OI_CACHE_TTL = 300
+_oi_cache: dict = {}  # symbol -> (timestamp, oi_change_pct)
+
 # Locks per strutture condivise
 _state_lock = threading.RLock()
 _instr_lock = threading.RLock()
@@ -215,6 +219,35 @@ def _update_btc_context_long():
             pass
         _btc_ctx_ts = time.time()
         tlog("btc_ctx", f"[CTX] BTC 4h uptrend={_btc_favorable_long}", 180)
+
+def _get_oi_change(symbol: str) -> float | None:
+    """Restituisce la variazione % di Open Interest nell'ultima ora (intervalTime=1h).
+    Positivo = OI cresce (nuove posizioni aperte) = conferma genuinità del trend.
+    Cache TTL 5 min per minimizzare API calls extra durante l'analisi parallela.
+    """
+    now = time.time()
+    cached = _oi_cache.get(symbol)
+    if cached and now - cached[0] < OI_CACHE_TTL:
+        return cached[1]
+    try:
+        resp = SESSION.get(
+            f"{BYBIT_BASE_URL}/v5/market/open-interest",
+            params={"category": "linear", "symbol": symbol, "intervalTime": "1h", "limit": 3},
+            timeout=8
+        )
+        lst = resp.json().get("result", {}).get("list", [])
+        if len(lst) < 2:
+            return None
+        # list è in ordine decrescente (più recente prima)
+        oi_now  = float(lst[0]["openInterest"])
+        oi_prev = float(lst[1]["openInterest"])
+        if oi_prev == 0:
+            return None
+        change_pct = (oi_now - oi_prev) / oi_prev * 100
+        _oi_cache[symbol] = (now, change_pct)
+        return change_pct
+    except:
+        return None
 
 def _equity_now():
     total, usdt_balance, coin_values = get_portfolio_value()
@@ -1518,7 +1551,10 @@ def analyze_asset(symbol: str):
         rsi_state = last["rsi"] > rsi_th
 
         event_triggered = ema_bullish_cross or macd_bullish_cross or rsi_break
-        conf_count = [ema_state, macd_state, rsi_state].count(True)
+        # OI come 4° indicatore: OI crescente con prezzo in salita = nuovi long genuini (non solo short squeeze)
+        oi_change = _get_oi_change(symbol)
+        oi_confirms = oi_change is not None and oi_change > 0.2
+        conf_count = [ema_state, macd_state, rsi_state, oi_confirms].count(True)
         
         # Confluenza richiesta: più alta quando BTC non favorevole
         if not _btc_favorable_long:
@@ -1543,7 +1579,7 @@ def analyze_asset(symbol: str):
 
         tlog(
             f"entry_chk_long:{symbol}",
-            f"[ENTRY-CHECK][LONG] conf={conf_count}/{required_confluence} | ADX={last['adx']:.1f}>{adx_needed:.1f} | event={event_triggered} | btc_fav={_btc_favorable_long} | tf={tf_tag}",
+            f"[ENTRY-CHECK][LONG] conf={conf_count}/{required_confluence} | ADX={last['adx']:.1f}>{adx_needed:.1f} | event={event_triggered} | oi={f'{oi_change:+.2f}%' if oi_change is not None else 'n/a'} | btc_fav={_btc_favorable_long} | tf={tf_tag}",
             300
         )
 
@@ -1576,6 +1612,7 @@ def analyze_asset(symbol: str):
             if ema_state: entry_strategies.append(f"EMA Bullish {tf_tag}")
             if macd_state: entry_strategies.append(f"MACD Bullish {tf_tag}")
             if rsi_state: entry_strategies.append(f"RSI Bullish {tf_tag}")
+            if oi_confirms: entry_strategies.append(f"OI↑{oi_change:+.2f}%")
             entry_strategies.append("ADX Trend")
             if LOG_DEBUG_STRATEGY:
                 log(f"[ENTRY-LONG][{symbol}] EVENTO/CONFLUENZA → {entry_strategies}")
