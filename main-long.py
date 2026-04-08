@@ -1144,8 +1144,10 @@ def profit_floor_worker_long():
     Con trailing attivo: piazza SL manuale floor + stringe la distanza del trailing
     in modo che non possa dare indietro più di (MFE - floor) in ROI.
     """
+    log("[RATCHET-LONG] Worker avviato")
     while True:
-        for symbol in list(open_positions):
+        try:
+         for symbol in list(open_positions):
             entry = position_data.get(symbol) or {}
             entry_price = entry.get("entry_price")
             qty_live = get_open_long_qty(symbol)
@@ -1243,6 +1245,8 @@ def profit_floor_worker_long():
                  f"[FLOOR-UP][LONG] {symbol} MFE={mfe_roi:.1f}% → FloorROI={target_floor_roi:.1f}% → SL={floor_price:.6f} trailing={trailing_active} set={set_ok}", 30)
             set_position(symbol, entry)
 
+        except Exception as _worker_exc:
+            log(f"[RATCHET-LONG][CRASH] Eccezione nel worker: {_worker_exc}")
         time.sleep(3)
 
 def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigger_by: str = TRIGGER_BY) -> bool:
