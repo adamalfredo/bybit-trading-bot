@@ -1776,6 +1776,30 @@ def sync_positions_from_wallet():
             sl_atr = entry_price + (atr_val * SL_FACTOR)       # riferimento entry
             sl_cap = entry_price * (1.0 + MAX_LOSS_CAP_PCT)    # cap 3% sopra entry
             final_sl = min(sl_atr, sl_cap)
+
+            # Recupera MFE ROI dal movimento attuale (entry vs price, SHORT: entry > price = profitto)
+            price_move_pct = ((entry_price - price) / max(1e-9, entry_price)) * 100.0
+            roi_now = price_move_pct * DEFAULT_LEVERAGE
+            recovered_mfe_roi = max(0.0, roi_now)  # stima conservativa: MFE = ROI attuale
+
+            # Stima floor ROI dalla posizione attuale (per non riscrivere SL troppo lontano)
+            recovered_floor_roi = _pick_floor_roi_short(recovered_mfe_roi)
+            if recovered_floor_roi is not None:
+                delta_pct_floor = (recovered_floor_roi / max(1, DEFAULT_LEVERAGE)) / 100.0
+                floor_price_recovered = entry_price * (1.0 - delta_pct_floor) * (1.0 + FLOOR_BUFFER_PCT)
+                # Usa il floor recuperato se è più basso dello SL ATR-based (più protettivo)
+                if floor_price_recovered < final_sl:
+                    final_sl = floor_price_recovered
+
+            # Recupera trailing_active dall'exchange: se Bybit ha un trailing già impostato
+            trailing_already_active = False
+            try:
+                pos_detail = next((p for p in pos_list if p.get("symbol") == symbol and p.get("side") == "Sell"), None)
+                if pos_detail and float(pos_detail.get("trailingStop", 0) or 0) > 0:
+                    trailing_already_active = True
+            except Exception:
+                pass
+
             position_data[symbol] = {
                 "entry_price": entry_price,
                 "tp": tp,
@@ -1783,8 +1807,11 @@ def sync_positions_from_wallet():
                 "entry_cost": entry_cost,
                 "qty": qty,
                 "entry_time": time.time(),
-                "trailing_active": False,
-                "p_min": price
+                "trailing_active": trailing_already_active,
+                "p_min": price,
+                "mfe_roi": recovered_mfe_roi,
+                "floor_roi": recovered_floor_roi,
+                "usdt_floor_locked": recovered_floor_roi is not None,  # non riscrivere cassaforte se ratchet già attivo
             }
             trovate += 1
             log(f"[SYNC] Posizione trovata: {symbol} qty={qty} entry={entry_price:.4f} SL={final_sl:.4f} TP={tp:.4f}")
@@ -1794,7 +1821,7 @@ def sync_positions_from_wallet():
             # >>> PATCH: BE-LOCK immediato se già oltre soglia al riavvio (SHORT)
             try:
                 if price <= entry_price * (1.0 - BREAKEVEN_LOCK_PCT) and not position_data[symbol].get("be_locked"):
-                    be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)  # buffer negativo
+                    be_price = entry_price * (1.0 - BREAKEVEN_BUFFER)  # SHORT: stop SOTTO entry (profitto garantito)
                     qty_live = get_open_short_qty(symbol)
                     if qty_live and qty_live > 0:
                         place_conditional_sl_short(symbol, be_price, qty_live, trigger_by="MarkPrice")
