@@ -91,6 +91,7 @@ VOLATILE_ASSETS = []
 open_positions = set()
 position_data = {}
 last_exit_time = {}
+last_exit_was_loss = {}  # True se l'ultima uscita su quel simbolo era una perdita
 recent_losses = {}          # conteggio loss consecutivi per simbolo
 MAX_CONSEC_LOSSES = 2       # dopo 2 loss consecutivi blocca nuovi ingressi
 FORCED_WAIT_MIN = 90        # attesa minima (minuti) se il contesto resta sfavorevole
@@ -1410,8 +1411,10 @@ def record_exit(symbol: str, entry_price: float, exit_price: float, side: str):
         pnl_pct = ((entry_price - exit_price) / entry_price) * 100.0
     if pnl_pct < 0:
         recent_losses[symbol] = recent_losses.get(symbol, 0) + 1
+        last_exit_was_loss[symbol] = True
     else:
         recent_losses[symbol] = 0
+        last_exit_was_loss[symbol] = False
 
 def analyze_asset(symbol: str):
     funding_rate = None  # funding rate corrente (da tickers API), usato come filtro
@@ -1916,11 +1919,12 @@ while True:
             #     continue
             #     Regime: niente blocco. In BULL verranno già irrigiditi i filtri a monte (analyze_asset).
 
-            # Cooldown
+            # Cooldown: 4h post-loss, 1h post-win
             if symbol in last_exit_time:
                 elapsed = time.time() - last_exit_time[symbol]
-                if elapsed < COOLDOWN_MINUTES * 60:
-                    tlog(f"cooldown:{symbol}", f"⏳ Cooldown attivo per {symbol} ({elapsed:.0f}s), salto ingresso", 300)
+                cd_min = COOLDOWN_MINUTES * 4 if last_exit_was_loss.get(symbol) else COOLDOWN_MINUTES
+                if elapsed < cd_min * 60:
+                    tlog(f"cooldown:{symbol}", f"⏳ Cooldown {'post-loss' if last_exit_was_loss.get(symbol) else 'post-win'} attivo per {symbol} ({elapsed:.0f}s / {cd_min*60:.0f}s), salto ingresso", 300)
                     continue
 
             if len(open_positions) >= MAX_OPEN_POSITIONS:

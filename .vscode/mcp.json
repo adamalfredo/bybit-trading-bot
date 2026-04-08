@@ -1,0 +1,16 @@
+{
+  "servers": {
+    "bybit": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": [
+        "${workspaceFolder}/bybit_mcp_server.py"
+      ],
+      "env": {
+        "BYBIT_API_KEY": "93GlxBPCnXKbwuaT7Z",
+        "BYBIT_API_SECRET": "Udkwu3wGwGNMSBOx5HQftEvPL7DNn5JOCuPs",
+        "BYBIT_BASE_URL": "https://api.bybit.com"
+      }
+    }
+  }
+}
