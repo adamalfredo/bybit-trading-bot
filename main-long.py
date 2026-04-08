@@ -1688,7 +1688,7 @@ def sync_positions_from_wallet():
     log("[SYNC] Avvio scansione posizioni LONG DAL CONTO (tutti i simboli linear)...")
     trovate = 0
     endpoint = f"{BYBIT_BASE_URL}/v5/position/list"
-    params = {"category": "linear"}
+    params = {"category": "linear", "settleCoin": "USDT"}
     from urllib.parse import urlencode
     query_string = urlencode(sorted(params.items()))
     ts = str(int(time.time() * 1000))
