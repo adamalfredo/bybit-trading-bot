@@ -118,7 +118,7 @@ SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "2.0"))   # FIX: era 1.4, SL più l
 TP1_R = float(os.getenv("TP1_R", "2.5"))             # FIX: era 1.0, R:R almeno 2.5:1
 TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.5"))  # 50% posizione al primo TP
 BE_AT_R = float(os.getenv("BE_AT_R", "1.0"))
-TRAIL_START_R = float(os.getenv("TRAIL_START_R", "1.5"))  # FIX: era 2.0, trailing attivo prima
+TRAIL_START_R = float(os.getenv("TRAIL_START_R", "0.5"))  # FIX: abbassato da 1.5 a 0.5 per attivazione trailing prima
 TRAIL_ATR_MULT = float(os.getenv("TRAIL_ATR_MULT", "1.3"))
 
 # --- Stima fee per expectancy (percentuali lato notional) ---
