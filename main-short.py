@@ -70,11 +70,10 @@ BREAKEVEN_LOCK_PCT = 0.025     # FIX2: era 0.015, attiva BE al -2.5% di prezzo (
 BREAKEVEN_BUFFER   = -0.012   # FIX2: era -0.006, buffer più largo per evitare noise-stop su BE
 MAX_LOSS_CAP_PCT = 0.03   # FIX: era 0.015, cap alzato a 3% per non bloccare SL_ATR_MULT=2.0
 
-# >>> NEW: regime + drawdown giornaliero (SHORT)
+# >>> regime semplificato: contesto BTC 4h + drawdown giornaliero
 DAILY_DD_CAP_PCT = 0.04         # blocca nuovi ingressi se equity < -4% dal livello di inizio giorno
-REGIME_REFRESH_SEC = 180        # aggiorna regime ogni 3 minuti
-CURRENT_REGIME = "MIXED"        # BULL / BEAR / MIXED
-_last_regime_ts = 0
+_btc_favorable_short = False    # True se BTC 4h in downtrend → contesto favorevole per SHORT
+_btc_ctx_ts = 0                 # timestamp ultimo aggiornamento contesto BTC
 _daily_start_equity = None
 _trading_paused_until = 0
 # BEGIN PATCH: throttle DD (no pausa forzata di default)
@@ -103,7 +102,6 @@ LOG_DEBUG_STRATEGY   = os.getenv("LOG_DEBUG_STRATEGY", "0") == "1"
 LOG_DEBUG_PORTFOLIO  = os.getenv("LOG_DEBUG_PORTFOLIO", "0") == "1"
 # --- Loosening via env ---
 MIN_CONFLUENCE = 2   # FIX: era 1, richiede almeno 2 indicatori allineati
-TREND_MODE = "STRICT"
 ENTRY_TF_VOLATILE = 60  # FIX2: allineato al loop principale (60m) per evitare segnali stantii
 ENTRY_TF_STABLE = 60   # FIX2: allineato al loop principale (60m)
 ENTRY_ADX_VOLATILE = 27       # fisso
@@ -221,59 +219,27 @@ def is_trending_down_1h(symbol: str, tf: str = "60"):
     except Exception:
         return False
 
-def _get_market_breadth():
-    """Breadth futures linear: quota di simboli con price24hPcnt < 0."""
-    try:
-        resp = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category": "linear"}, timeout=10)
-        data = resp.json()
-        lst = data.get("result", {}).get("list", [])
-        if not lst:
-            return 0.5
-        changes = []
-        for t in lst:
-            try:
-                changes.append(float(t.get("price24hPcnt", 0.0)))
-            except:
-                pass
-        red = sum(1 for c in changes if c < 0)
-        return red / max(1, len(changes))
-    except:
-        return 0.5
-
-def _detect_market_regime():
-    """
-    Regole:
-    - BEAR: BTC/ETH in downtrend su 4h e breadth rossa > 0.6
-    - BULL: BTC/ETH NON in downtrend e breadth rossa < 0.4
-    - MIXED: altrimenti
-    """
-    try:
-        btc_down = is_trending_down("BTCUSDT", "240")
-        eth_down = is_trending_down("ETHUSDT", "240")
-        breadth_red = _get_market_breadth()
-        if btc_down and eth_down and breadth_red > 0.6:
-            return "BEAR"
-        if (not btc_down) and (not eth_down) and breadth_red < 0.4:
-            return "BULL"
-        return "MIXED"
-    except:
-        return "MIXED"
+def _update_btc_context_short():
+    """Aggiorna il contesto BTC ogni 3 min: True se BTC 4h in downtrend (favorevole per SHORT)."""
+    global _btc_favorable_short, _btc_ctx_ts
+    if time.time() - _btc_ctx_ts > 180:
+        try:
+            _btc_favorable_short = is_trending_down("BTCUSDT", "240")
+        except:
+            pass
+        _btc_ctx_ts = time.time()
+        tlog("btc_ctx", f"[CTX] BTC 4h downtrend={_btc_favorable_short}", 180)
 
 def _equity_now():
     total, usdt_balance, coin_values = get_portfolio_value()
     return total
 
-def _update_daily_anchor_and_regime():
-    """Aggiorna ancora giornaliera di equity e regime di mercato con throttling."""
-    global _daily_start_equity, CURRENT_REGIME, _last_regime_ts
-    # reset ancora se cambia il giorno
-    if _daily_start_equity is None or time.strftime("%Y-%m-%d") != time.strftime("%Y-%m-%d", time.localtime(_last_regime_ts or time.time())):
+def _update_daily_anchor_and_btc_context():
+    """Aggiorna ancora giornaliera di equity e contesto BTC."""
+    global _daily_start_equity
+    if _daily_start_equity is None or time.strftime("%Y-%m-%d") != time.strftime("%Y-%m-%d", time.gmtime()):
         _daily_start_equity = _equity_now()
-    # refresh regime
-    if time.time() - _last_regime_ts > REGIME_REFRESH_SEC:
-        CURRENT_REGIME = _detect_market_regime()
-        _last_regime_ts = time.time()
-        tlog("regime", f"[REGIME] mercato={CURRENT_REGIME}", 180)
+    _update_btc_context_short()
 
 def is_breaking_weekly_low(symbol: str):
     """
@@ -292,8 +258,8 @@ def update_assets(top_n=12):
     Aggiorna ASSETS, LESS_VOLATILE_ASSETS e VOLATILE_ASSETS.
     Selezione ottimizzata (SHORT):
     - Pool: tutti i futures linear USDT con turnover24h >= LINEAR_MIN_TURNOVER (una sola chiamata API)
-    - Ranking: 25% volume normalizzato + 75% momentum 24h
-    - Bias SHORT: sweet spot -1%→-12%; penalizza dump estremi e asset positivi
+    - Ranking: 20% volume normalizzato + 55% momentum 24h + 25% debolezza relativa vs BTC
+    - Bias SHORT: sweet spot -1%→-12%; premia coin più deboli di BTC (debolezza idiosincratica)
     - VOLATILE: |price24hPcnt| > 5% → ADX threshold 27; altrimenti LESS_VOLATILE → ADX 24
     """
     global ASSETS, LESS_VOLATILE_ASSETS, VOLATILE_ASSETS
@@ -306,6 +272,10 @@ def update_assets(top_n=12):
             return
 
         tickers = data["result"]["list"]
+
+        # BTC 24h pct per calcolo debolezza relativa (già presente nella stessa risposta)
+        _btc_t = next((t for t in tickers if t["symbol"] == "BTCUSDT"), None)
+        btc_pct = float(_btc_t.get("price24hPcnt", 0)) * 100 if _btc_t else 0.0
 
         # Pool: tutti i linear USDT liquidi, escluse blacklist
         pool = [
@@ -332,20 +302,31 @@ def update_assets(top_n=12):
                 return 0.35  # esteso, rischio rimbalzo imminente
             return 0.2       # positivo: contro la direzione SHORT
 
+        def _relative_score_short(rel: float) -> float:
+            """Punteggio 0-1: premia debolezza relativa vs BTC (rel = coin_pct - btc_pct).
+            Coin più debole di BTC = segnale idiosincratico = migliore candidata SHORT."""
+            if rel <= -4.0: return 1.0   # molto più debole di BTC: ottimo per SHORT
+            if rel <= -1.0: return 0.75  # moderatamente più debole
+            if rel <=  1.0: return 0.5   # in linea con BTC
+            if rel <=  4.0: return 0.25  # più forte di BTC: scarso per SHORT
+            return 0.05                   # molto più forte: da evitare
+
         prev = set(ASSETS)
         candidates = []
         for t in pool:
             sym = t["symbol"]
             vol = float(t.get("turnover24h", 0))
             pct = float(t.get("price24hPcnt", 0)) * 100  # Bybit restituisce valore frazionario
+            rel = pct - btc_pct
             mom = _momentum_score_short(pct)
-            candidates.append((sym, vol, pct, mom))
+            rel_s = _relative_score_short(rel)
+            candidates.append((sym, vol, pct, mom, rel, rel_s))
 
-        # Score finale: 25% volume normalizzato + 75% momentum
+        # Score finale: 20% volume normalizzato + 55% momentum + 25% debolezza relativa vs BTC
         max_vol = max(c[1] for c in candidates) or 1.0
         scored = sorted(
             candidates,
-            key=lambda c: 0.25 * (c[1] / max_vol) + 0.75 * c[3],
+            key=lambda c: 0.20 * (c[1] / max_vol) + 0.55 * c[3] + 0.25 * c[5],
             reverse=True
         )
 
@@ -361,10 +342,10 @@ def update_assets(top_n=12):
             added   = list(set(ASSETS) - prev)
             removed = list(prev - set(ASSETS))
             if LOG_DEBUG_ASSETS:
-                mom_info = {c[0]: f"{c[2]:+.1f}%" for c in top}
-                log(f"[ASSETS] Aggiornati: {ASSETS}\nMomento 24h: {mom_info}\nVolatili(>5%): {VOLATILE_ASSETS}\nStabili(≤5%): {LESS_VOLATILE_ASSETS}")
+                mom_info = {c[0]: f"{c[2]:+.1f}% (rel={c[4]:+.1f}%)" for c in top}
+                log(f"[ASSETS] BTC_24h={btc_pct:+.1f}% | Aggiornati: {ASSETS}\nMomento+Rel: {mom_info}\nVolatili(>5%): {VOLATILE_ASSETS}\nStabili(≤5%): {LESS_VOLATILE_ASSETS}")
             else:
-                log(f"[ASSETS] Totali={len(ASSETS)} (+{len(added)}/-{len(removed)}) | Added={added[:5]} Removed={removed[:5]}")
+                log(f"[ASSETS] Totali={len(ASSETS)} (+{len(added)}/-{len(removed)}) | BTC_24h={btc_pct:+.1f}% | Added={added[:5]} Removed={removed[:5]}")
     except Exception as e:
         log(f"[ASSETS] Errore aggiornamento lista asset: {e}")
 
@@ -1478,38 +1459,24 @@ def analyze_asset(symbol: str):
     down_4h = is_trending_down(symbol, "240")
     down_1h = is_trending_down_1h(symbol, "60")
 
-    if TREND_MODE == "STRICT":
-        # FIX2: in MIXED usa solo 4h (meno restrittivo per aumentare opportunità)
-        # In BULL/BEAR richiede entrambi 4h+1h confermati (STRICT pieno)
-        trend_ok = down_4h if CURRENT_REGIME == "MIXED" else (down_4h and down_1h)
-    elif TREND_MODE == "LOOSE_4H":
-        trend_ok = down_4h
-    else:  # ANY
-        trend_ok = down_4h or down_1h
+    # BTC favorevole (4h downtrend) → accettiamo solo 4h; altrimenti richiediamo 4h+1h
+    trend_ok = down_4h if _btc_favorable_short else (down_4h and down_1h)
 
-    # Filtro trend:
-    # - BEAR: permissivo
-    # - BULL: obbligatorio (short solo se asset in downtrend)
-    # - MIXED: obbligatorio
-    if CURRENT_REGIME in ("BULL", "MIXED") and not trend_ok:
-        tlog(f"trend_short:{symbol}", f"[TREND-FILTER][{symbol}] Regime={CURRENT_REGIME}, trend non idoneo (mode={TREND_MODE})", 600)
+    # Filtro trend: obbligatorio quando BTC non è in downtrend (contesto sfavorevole)
+    if not _btc_favorable_short and not trend_ok:
+        tlog(f"trend_short:{symbol}", f"[TREND-FILTER][{symbol}] BTC sfavorevole, trend non idoneo", 600)
         return None, None, None
 
-    # Breakout filter: in BEAR/MIXED permetti fallback se trend è forte anche senza breakdown
+    # Breakout filter: permetti fallback se trend è forte anche senza breakdown
     if ENABLE_BREAKOUT_FILTER:
         brk = is_breaking_weekly_low(symbol)
         if not brk:
-            if CURRENT_REGIME in ("BEAR", "MIXED"):
-                adx_thresh = ENTRY_ADX_VOLATILE if (symbol in VOLATILE_ASSETS) else ENTRY_ADX_STABLE
-                ema_down = (ema200_slope is not None and ema200_slope < 0) or (ema100_slope is not None and ema100_slope < 0)
-                strong_trend = trend_ok and (adx1h is not None and adx1h >= adx_thresh) and ema_down
-                if not strong_trend:
-                    if LOG_DEBUG_STRATEGY:
-                        tlog(f"breakout_short:{symbol}", f"[BREAKOUT-FILTER][{symbol}] No breakdown e fallback non soddisfatto → skip", 600)
-                    return None, None, None
-            else:
+            adx_thresh = ENTRY_ADX_VOLATILE if (symbol in VOLATILE_ASSETS) else ENTRY_ADX_STABLE
+            ema_down = (ema200_slope is not None and ema200_slope < 0) or (ema100_slope is not None and ema100_slope < 0)
+            strong_trend = trend_ok and (adx1h is not None and adx1h >= adx_thresh) and ema_down
+            if not strong_trend:
                 if LOG_DEBUG_STRATEGY:
-                    tlog(f"breakout_short:{symbol}", f"[BREAKOUT-FILTER][{symbol}] Non in breakdown 6h → skip ingresso", 600)
+                    tlog(f"breakout_short:{symbol}", f"[BREAKOUT-FILTER][{symbol}] No breakdown e fallback non soddisfatto → skip", 600)
                 return None, None, None
 
     try:
@@ -1549,12 +1516,10 @@ def analyze_asset(symbol: str):
         if len(df) < 4:
             return None, None, None
 
-        # ADX base regime-aware: permissivo con trend (BEAR), neutro in MIXED, strict in BULL
-        if CURRENT_REGIME == "BEAR":
-            adx_threshold = (ENTRY_ADX_VOLATILE - 6) if is_volatile else (ENTRY_ADX_STABLE - 6)  # 21 / 18
-        elif CURRENT_REGIME == "MIXED":
+        # ADX base: permissivo quando BTC favorevole (downtrend 4h), standard altrimenti
+        if _btc_favorable_short:
             adx_threshold = (ENTRY_ADX_VOLATILE - 3) if is_volatile else (ENTRY_ADX_STABLE - 3)  # 24 / 21
-        else:  # BULL - contro trend
+        else:
             adx_threshold = ENTRY_ADX_VOLATILE if is_volatile else ENTRY_ADX_STABLE               # 27 / 24
         # Usa SOLO candele chiuse per i segnali (evita repaint)
         last = df.iloc[-2]       # candela appena chiusa
@@ -1584,22 +1549,20 @@ def analyze_asset(symbol: str):
         event_triggered = ema_bearish_cross or macd_bearish_cross or rsi_break
         conf_count = [ema_state, macd_state, rsi_state].count(True)
 
-        # Confluenza richiesta per regime
-        if CURRENT_REGIME in ("BULL", "MIXED"):
+        # Confluenza richiesta: più alta quando BTC non favorevole
+        if not _btc_favorable_short:
             required_confluence = MIN_CONFLUENCE + 1
-        else:  # BEAR
+        else:
             required_confluence = MIN_CONFLUENCE
 
-        # In regime MIXED richiedi SEMPRE un evento reale (cross/break)
-        if CURRENT_REGIME == "MIXED" and not event_triggered:
+        # Quando BTC non favorevole, richiedi SEMPRE un evento reale (cross/break)
+        if not _btc_favorable_short and not event_triggered:
             return None, None, None
 
-        # ADX richiesto + bonus per regime
+        # ADX richiesto + bonus extra quando BTC non favorevole
         adx_needed = max(0.0, adx_threshold - (ADX_RELAX_EVENT if event_triggered else 0.0))
-        if CURRENT_REGIME == "MIXED":
+        if not _btc_favorable_short:
             adx_needed += 1.5
-        elif CURRENT_REGIME == "BULL":
-            adx_needed += 2.0
 
         # >>> PATCH: throttle DD → più conferme, ADX più alto, e richiedi evento se in DD
         required_confluence += RISK_THROTTLE_LEVEL
@@ -1609,7 +1572,7 @@ def analyze_asset(symbol: str):
 
         tlog(
             f"entry_chk_short:{symbol}",
-            f"[ENTRY-CHECK][SHORT] conf={conf_count}/{required_confluence} | ADX={last['adx']:.1f}>{adx_needed:.1f} | event={event_triggered} | regime={CURRENT_REGIME} | tf={tf_tag}",
+            f"[ENTRY-CHECK][SHORT] conf={conf_count}/{required_confluence} | ADX={last['adx']:.1f}>{adx_needed:.1f} | event={event_triggered} | btc_fav={_btc_favorable_short} | tf={tf_tag}",
             300
         )
 
@@ -1652,7 +1615,7 @@ def analyze_asset(symbol: str):
         # OVERRIDE: rimbalzo su trend BEAR (mean reversion speculare al LONG)
         # Attivo solo in BEAR con 4h ancora down e RSI 1h fortemente ipercomprato
         # Cattura i rimbalzi tecnici senza aspettare la conferma lagging degli EMA/MACD
-        if (CURRENT_REGIME == "BEAR"
+        if (_btc_favorable_short
                 and ema200_slope is not None and ema200_slope < 0   # 4h ancora in downtrend
                 and rsi1h is not None and rsi1h > 68                # RSI 1h ipercomprato
                 and adx1h is not None and adx1h > 18                # il movimento ha forza, non è rumore
@@ -1855,7 +1818,7 @@ profit_floor_thread_short.start()
 while True:
     # Aggiorna la lista asset dinamicamente ogni ciclo
     update_assets()
-    _update_daily_anchor_and_regime()
+    _update_daily_anchor_and_btc_context()
     portfolio_value, usdt_balance, coin_values = get_portfolio_value()
 
      # >>> PATCH: throttle DD (selettivo, niente stop forzato salvo ENABLE_DD_PAUSE=1)
@@ -1887,11 +1850,11 @@ while True:
     perc_stable = (stable_invested / portfolio_value * 100) if portfolio_value > 0 else 0
     if LOG_DEBUG_PORTFOLIO:
         tlog("portfolio", f"[PORTAFOGLIO] Totale: {portfolio_value:.2f} USDT | Volatili: {volatile_invested:.2f} ({perc_volatile:.1f}%) | Meno volatili: {stable_invested:.2f} ({perc_stable:.1f}%) | USDT: {usdt_balance:.2f}", 900)
-    tlog("portfolio_short", f"[PORTAFOGLIO] equity={portfolio_value:.2f} USDT | pos={len(open_positions)} | liberi={usdt_balance:.2f} | regime={CURRENT_REGIME}", 900)
+    tlog("portfolio_short", f"[PORTAFOGLIO] equity={portfolio_value:.2f} USDT | pos={len(open_positions)} | liberi={usdt_balance:.2f} | btc_fav={_btc_favorable_short}", 900)
 
     # Analisi in parallelo con prefiltraggio
     eligible_symbols = [s for s in ASSETS if s not in STABLECOIN_BLACKLIST and is_symbol_linear(s)]
-    log(f"[CICLO][SHORT] simboli={len(eligible_symbols)} | pos_aperte={len(open_positions)} | regime={CURRENT_REGIME} | equity={portfolio_value:.2f}")
+    log(f"[CICLO][SHORT] simboli={len(eligible_symbols)} | pos_aperte={len(open_positions)} | btc_fav={_btc_favorable_short} | equity={portfolio_value:.2f}")
     results = {}
     if eligible_symbols:
         with ThreadPoolExecutor(max_workers=4) as ex:
@@ -2058,8 +2021,8 @@ while True:
                 log(f"❌ Nessuna quantità shortata per {symbol}. Non registro la posizione.")
                 continue
             # >>> TP1 a 1R (parziale) e SL tramite trading-stop
-            # TP1_R regime-aware: in BEAR lascia correre (2.5R), in BULL/MIXED prende profitto prima
-            _tp1_r = TP1_R if CURRENT_REGIME == "BEAR" else (1.8 if CURRENT_REGIME == "MIXED" else 1.5)
+            # TP1_R regime-aware: in BTC favorevole lascia correre (2.5R), altrimenti prende profitto prima
+            _tp1_r = TP1_R if _btc_favorable_short else 1.8
             tp_oid = None
             price_now = get_last_price(symbol) or price
             tp1_price = price_now - (_tp1_r * r_dist)

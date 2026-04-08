@@ -9,7 +9,12 @@
       "env": {
         "BYBIT_API_KEY": "93GlxBPCnXKbwuaT7Z",
         "BYBIT_API_SECRET": "Udkwu3wGwGNMSBOx5HQftEvPL7DNn5JOCuPs",
-        "BYBIT_BASE_URL": "https://api.bybit.com"
+        "BYBIT_BASE_URL": "https://api.bybit.com",
+        "RAILWAY_TOKEN": "2c50f7d8-dec8-4596-aef6-bfbea4030331",
+        "RAILWAY_PROJECT_ID": "451a9d49-9127-453a-923d-f7a029c6e620",
+        "RAILWAY_SERVICE_SHORT": "f6cba0a0-0a2e-48c2-85d8-0ed7d2a2d929",
+        "RAILWAY_SERVICE_LONG": "f811c4e1-a6c3-4d50-be9e-c2142a45e09e",
+        "RAILWAY_ENV_ID": "5b608d00-bf69-49bb-9ffb-4e27f262681e"
       }
     }
   }

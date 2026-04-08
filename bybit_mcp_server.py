@@ -24,6 +24,13 @@ API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 TESTNET    = os.getenv("BYBIT_TESTNET", "0") == "1"
 BASE_URL   = "https://api-testnet.bybit.com" if TESTNET else "https://api.bybit.com"
 
+RAILWAY_TOKEN         = os.getenv("RAILWAY_TOKEN", "")
+RAILWAY_PROJECT_ID    = os.getenv("RAILWAY_PROJECT_ID", "")
+RAILWAY_SERVICE_SHORT = os.getenv("RAILWAY_SERVICE_SHORT", "")
+RAILWAY_SERVICE_LONG  = os.getenv("RAILWAY_SERVICE_LONG", "")
+RAILWAY_ENV_ID        = os.getenv("RAILWAY_ENV_ID", "")
+RAILWAY_GQL           = "https://backboard.railway.com/graphql/v2"
+
 mcp = FastMCP("bybit")
 
 
@@ -62,6 +69,25 @@ async def _get(path: str, params: dict, auth: bool = True) -> dict:
             return r.json()
         except Exception as e:
             return {"retCode": -1, "retMsg": f"Risposta non-JSON (HTTP {r.status_code}): {r.text[:300]}"}
+
+
+async def _railway_gql(query: str, variables: dict | None = None) -> dict:
+    """Esegue una query GraphQL sull'API Railway v2."""
+    headers = {
+        "Authorization": f"Bearer {RAILWAY_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload: dict = {"query": query}
+    if variables:
+        payload["variables"] = variables
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(RAILWAY_GQL, json=payload, headers=headers)
+        if not r.text:
+            return {"errors": [{"message": f"Risposta vuota (HTTP {r.status_code})"}]}
+        try:
+            return r.json()
+        except Exception:
+            return {"errors": [{"message": f"Non-JSON: {r.text[:300]}"}]}
 
 
 # ── tools ────────────────────────────────────────────────────────────────────
@@ -370,11 +396,153 @@ async def get_risk_exposure() -> str:
     return "\n\n".join(lines)
 
 
+_DEPLOYMENTS_QUERY = """
+query($input: DeploymentListInput!, $first: Int) {
+  deployments(input: $input, first: $first) {
+    edges {
+      node {
+        id
+        status
+        createdAt
+        updatedAt
+      }
+    }
+  }
+}
+"""
+
+_DEPLOYMENT_QUERY = """
+query($id: String!) {
+  deployment(id: $id) {
+    id
+    status
+    createdAt
+    updatedAt
+    meta
+  }
+}
+"""
+
+_LOGS_QUERY = """
+query($deploymentId: String!, $limit: Int) {
+  deploymentLogs(deploymentId: $deploymentId, limit: $limit) {
+    timestamp
+    message
+    severity
+  }
+}
+"""
+
+async def _get_latest_deployment(service_id: str) -> dict | None:
+    """Ritorna il nodo del deploy più recente per un servizio."""
+    data = await _railway_gql(_DEPLOYMENTS_QUERY, {
+        "input": {
+            "projectId":     RAILWAY_PROJECT_ID,
+            "serviceId":     service_id,
+            "environmentId": RAILWAY_ENV_ID,
+        },
+        "first": 1,
+    })
+    if "errors" in data:
+        return None
+    edges = data.get("data", {}).get("deployments", {}).get("edges", [])
+    if not edges:
+        return None
+    dep_id = edges[0]["node"]["id"]
+    # Fetch deployment completo con meta
+    full = await _railway_gql(_DEPLOYMENT_QUERY, {"id": dep_id})
+    if "errors" in full or not full.get("data", {}).get("deployment"):
+        return edges[0]["node"]
+    return full["data"]["deployment"]
+
+
+@mcp.tool()
+async def get_railway_status() -> str:
+    """
+    Mostra lo stato attuale dei due bot su Railway (SHORT e LONG):
+    ultimo deploy, status (ACTIVE/CRASHED/ecc.), commit e orario.
+    Utile per verificare che entrambi i bot siano running dopo un deploy.
+    """
+    short_dep, long_dep = await asyncio.gather(
+        _get_latest_deployment(RAILWAY_SERVICE_SHORT),
+        _get_latest_deployment(RAILWAY_SERVICE_LONG),
+    )
+
+    STATUS_EMOJI = {
+        "SUCCESS": "✅", "ACTIVE": "✅",
+        "CRASHED": "🔴", "FAILED": "🔴",
+        "DEPLOYING": "🔄", "BUILDING": "🔄",
+        "SLEEPING": "😴", "QUEUED": "⏳",
+        "REMOVED": "🗑️",
+    }
+
+    def _fmt(name: str, dep: dict | None) -> str:
+        if dep is None:
+            return f"❓ {name}: impossibile recuperare stato"
+        status  = dep.get("status", "UNKNOWN")
+        emoji   = STATUS_EMOJI.get(status, "❓")
+        created = dep.get("createdAt", "")[:16].replace("T", " ")
+        updated = dep.get("updatedAt", "")[:16].replace("T", " ")
+        meta    = dep.get("meta") or {}
+        commit  = str(meta.get("commitMessage", "—"))[:60] if isinstance(meta, dict) else "—"
+        sha     = str(meta.get("commitSha", ""))[:7] if isinstance(meta, dict) else ""
+        sha_str = f"[{sha}] " if sha else ""
+        return (
+            f"{emoji} Bot {name} — {status}\n"
+            f"   Deploy: {created} UTC | Aggiornato: {updated} UTC\n"
+            f"   Commit: {sha_str}{commit}"
+        )
+
+    return _fmt("SHORT", short_dep) + "\n\n" + _fmt("LONG", long_dep)
+
+
+@mcp.tool()
+async def get_railway_logs(bot: str = "short", lines: int = 50) -> str:
+    """
+    Mostra gli ultimi N righe di log di un bot su Railway.
+    bot: 'short' o 'long' (default: 'short')
+    lines: numero di righe (default 50, max 200)
+    Utile per capire cosa sta facendo il bot in tempo reale: segnali, ingressi, uscite, errori.
+    """
+    bot = bot.lower().strip()
+    if bot not in ("short", "long"):
+        return "Valore non valido per bot: usa 'short' o 'long'"
+    lines = max(10, min(lines, 200))
+
+    service_id = RAILWAY_SERVICE_SHORT if bot == "short" else RAILWAY_SERVICE_LONG
+    dep = await _get_latest_deployment(service_id)
+    if dep is None:
+        return f"Impossibile trovare il deploy attivo per bot {bot.upper()}"
+
+    dep_id  = dep["id"]
+    status  = dep.get("status", "?")
+    data = await _railway_gql(_LOGS_QUERY, {"deploymentId": dep_id, "limit": lines})
+
+    if "errors" in data:
+        errs = "; ".join(e.get("message", "?") for e in data["errors"])
+        return f"Errore Railway API: {errs}"
+
+    log_entries = data.get("data", {}).get("deploymentLogs", [])
+    if not log_entries:
+        return f"Nessun log disponibile per bot {bot.upper()} (deploy {dep_id[:8]}... status: {status})"
+
+    SEV_EMOJI = {"ERROR": "🔴", "WARNING": "🟡", "INFO": ""}
+    out_lines = [f"📋 Log bot {bot.upper()} — ultimi {len(log_entries)} righe (status: {status})\n"]
+    for entry in log_entries:
+        ts  = (entry.get("timestamp") or "")[:19].replace("T", " ")
+        sev = entry.get("severity", "INFO")
+        msg = entry.get("message", "").rstrip()
+        em  = SEV_EMOJI.get(sev, "")
+        out_lines.append(f"{em}[{ts}] {msg}")
+
+    return "\n".join(out_lines)
+
+
 @mcp.tool()
 async def get_bot_summary() -> str:
     """
     Riepilogo completo dei bot: bilancio, posizioni aperte con analisi rischio,
-    ultimi 10 trade chiusi e statistiche degli ultimi 7 giorni.
+    ultimi 10 trade chiusi, statistiche degli ultimi 7 giorni e stato Railway.
     Punto di partenza ideale per capire lo stato attuale dei bot.
     """
     balance_str   = await get_wallet_balance()
@@ -382,13 +550,15 @@ async def get_bot_summary() -> str:
     risk_str      = await get_risk_exposure()
     pnl_str       = await get_recent_closed_pnl(10)
     summary_str   = await get_pnl_summary(7)
+    railway_str   = await get_railway_status()
 
     return (
         "═══ BILANCIO ═══\n" + balance_str +
         "\n\n═══ POSIZIONI APERTE ═══\n" + positions_str +
         "\n\n═══ RISCHIO APERTO ═══\n" + risk_str +
         "\n\n═══ ULTIMI 10 TRADE ═══\n" + pnl_str +
-        "\n\n═══ STATISTICHE 7 GIORNI ═══\n" + summary_str
+        "\n\n═══ STATISTICHE 7 GIORNI ═══\n" + summary_str +
+        "\n\n═══ STATO BOT RAILWAY ═══\n" + railway_str
     )
 
 
