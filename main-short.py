@@ -1151,8 +1151,10 @@ def _pick_floor_roi_short(mfe_roi: float) -> Optional[float]:
 
 def profit_floor_worker_short():
     """
-    Aggiorna lo stopLoss della posizione SHORT a scalini di ROI (solo dopo prima soglia).
-    Non applica floor=0. Non abbassa mai il floor. Usa trading-stop + Stop-Market backup.
+    Aggiorna lo stopLoss della posizione SHORT a scalini di ROI (ratchet).
+    IMPORTANTE: il ratchet gira SEMPRE, anche quando trailing_active=True.
+    Con trailing attivo: piazza SL manuale floor + stringe la distanza del trailing
+    in modo che non possa dare indietro più di (MFE - floor) in ROI.
     """
     while True:
         for symbol in list(open_positions):
@@ -1162,11 +1164,14 @@ def profit_floor_worker_short():
             if not entry_price or not qty_live or qty_live <= 0:
                 continue
 
-            # Cassaforte in USDT: se trailing non attivo e non già lockato, fissa SL che garantisca ≳ PNL_LOCK_USDT
             trailing_active = entry.get("trailing_active", False)
             usdt_floor_locked = entry.get("usdt_floor_locked", False)
             price_now = get_last_price(symbol)
-            if price_now and (not trailing_active) and (not usdt_floor_locked):
+            if not price_now:
+                continue
+
+            # Cassaforte in USDT: se trailing non attivo e non già lockato
+            if (not trailing_active) and (not usdt_floor_locked):
                 unrealized = (float(entry_price) - price_now) * float(qty_live)
                 if unrealized >= PNL_TRIGGER_USDT:
                     try:
@@ -1186,17 +1191,9 @@ def profit_floor_worker_short():
                         if LOG_DEBUG_STRATEGY:
                             tlog(f"usdt_floor_exc_short:{symbol}", f"[USDT-FLOOR-EXC][SHORT] {symbol} exc={_e}", 180)
 
-            # Se il trailing Bybit è attivo, non alziamo più lo stop manualmente
-            if entry.get("trailing_active", False):
-                set_position(symbol, entry)
-                continue
-
-            price_now = get_last_price(symbol)
-            if not price_now:
-                continue
-
+            # --- RATCHET ROI (gira sempre, anche con trailing attivo) ---
             # ROI (SHORT): prezzo scende → ROI positivo
-            price_move_pct = ((entry_price - price_now) / entry_price) * 100.0
+            price_move_pct = ((float(entry_price) - price_now) / float(entry_price)) * 100.0
             roi_now = price_move_pct * DEFAULT_LEVERAGE
 
             # Aggiorna MFE ROI
@@ -1224,12 +1221,12 @@ def profit_floor_worker_short():
 
             # Converti floor ROI in prezzo (SHORT: entry * (1 - delta))
             delta_pct_price = (target_floor_roi / max(1, DEFAULT_LEVERAGE)) / 100.0
-            floor_price = entry_price * (1.0 - delta_pct_price)
+            floor_price = float(entry_price) * (1.0 - delta_pct_price)
 
             # Buffer (SHORT → leggermente sopra il floor per attivarsi prima se risale)
             floor_price *= (1.0 + FLOOR_BUFFER_PCT)
 
-            # Se floor_price ≤ prezzo attuale, lo stop sarebbe sotto → inutile (non protegge profitto)
+            # Se floor_price ≤ prezzo attuale, lo stop sarebbe sotto → inutile
             if floor_price <= price_now:
                 entry["floor_roi"] = target_floor_roi
                 entry["floor_price"] = floor_price
@@ -1242,8 +1239,19 @@ def profit_floor_worker_short():
                 )
                 continue
 
-            # Aggiorna trading-stop (niente Stop-Market backup)
+            # Piazza SL manuale al floor — funziona sia con che senza trailing attivo
             set_ok = set_position_stoploss_short(symbol, floor_price)
+
+            # Se trailing attivo: stringe anche la distanza trailing in modo che
+            # non possa cedere più di (mfe_roi - target_floor_roi) in ROI
+            if trailing_active:
+                allowed_drawdown_roi = max(5.0, mfe_roi - target_floor_roi)  # min 5% ROI di spazio
+                max_trailing_pct = (allowed_drawdown_roi / max(1, DEFAULT_LEVERAGE)) / 100.0
+                new_trailing_dist = price_now * max_trailing_pct
+                new_trailing_dist = max(price_now * TRAILING_MIN, min(new_trailing_dist, price_now * TRAILING_MAX))
+                place_trailing_stop_short(symbol, new_trailing_dist)
+                tlog(f"trail_tighten_short:{symbol}",
+                     f"[TRAIL-TIGHTEN][SHORT] {symbol} MFE={mfe_roi:.1f}% floor={target_floor_roi:.1f}% → trailing_dist={new_trailing_dist:.6f}", 60)
 
             entry["floor_roi"] = target_floor_roi
             entry["floor_price"] = floor_price
@@ -1251,7 +1259,7 @@ def profit_floor_worker_short():
 
             tlog(
                 f"floor_up_short:{symbol}",
-                f"[FLOOR-UP][SHORT] {symbol} MFE={mfe_roi:.1f}% → FloorROI={target_floor_roi:.1f}% → SL={floor_price:.6f} set={set_ok}",
+                f"[FLOOR-UP][SHORT] {symbol} MFE={mfe_roi:.1f}% → FloorROI={target_floor_roi:.1f}% → SL={floor_price:.6f} trailing={trailing_active} set={set_ok}",
                 30,
             )
             set_position(symbol, entry)
