@@ -547,9 +547,12 @@ def get_last_price(symbol):
         resp = SESSION.get(endpoint, params=params, timeout=10)
         data = resp.json()
         if data.get("retCode") == 0:
-            price = float(data["result"]["list"][0]["lastPrice"])
+            item = data["result"]["list"][0]
+            price = float(item["lastPrice"])
+            bid1 = float(item.get("bid1Price") or price)
+            ask1 = float(item.get("ask1Price") or price)
             with _price_lock:
-                _last_price_cache[symbol] = {"price": price, "ts": now}
+                _last_price_cache[symbol] = {"price": price, "bid1": bid1, "ask1": ask1, "ts": now}
             return price
         else:
             tlog(f"lp_err:{symbol}", f"[BYBIT] Errore get_last_price {symbol}: {data}", 300)
@@ -557,6 +560,13 @@ def get_last_price(symbol):
     except Exception as e:
         tlog(f"lp_exc:{symbol}", f"[BYBIT] Errore get_last_price {symbol}: {e}", 300)
         return None
+
+def get_bid_price(symbol) -> Optional[float]:
+    """Ritorna bid1Price dal ticker (cacheato da get_last_price)."""
+    get_last_price(symbol)
+    with _price_lock:
+        c = _last_price_cache.get(symbol, {})
+        return c.get("bid1") or c.get("price")
 
 def get_instrument_info(symbol: str) -> dict:
     """
@@ -755,6 +765,47 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         log(f"❌ Errore calcolo quantità per {symbol}: {e}")
         return None
 
+def _try_limit_entry_long(symbol: str, qty_str: str, bid_price_str: str) -> Optional[float]:
+    """Tenta ingresso LONG come maker (PostOnly Limit a bid1Price).
+    Polling fill max 3 secondi. Cancella e ritorna None se non eseguito (fallback Market)."""
+    body = {
+        "category": "linear",
+        "symbol": symbol,
+        "side": "Buy",
+        "orderType": "Limit",
+        "timeInForce": "PostOnly",
+        "qty": qty_str,
+        "price": bid_price_str,
+        "positionIdx": LONG_IDX
+    }
+    resp = _bybit_signed_post("/v5/order/create", body)
+    try:
+        data = resp.json()
+    except Exception:
+        return None
+    if data.get("retCode") != 0:
+        if LOG_DEBUG_STRATEGY:
+            log(f"[LIMIT-ENTRY][LONG][{symbol}] PostOnly rifiutato ({data.get('retCode')}), fallback Market")
+        return None
+    order_id = data.get("result", {}).get("orderId", "")
+    # Polling fill: max 3 secondi (6 × 0.5s)
+    for _ in range(6):
+        time.sleep(0.5)
+        filled_qty = get_open_long_qty(symbol)
+        if filled_qty and filled_qty > 0:
+            log(f"[LIMIT-ENTRY][LONG][{symbol}] PostOnly @ {bid_price_str} eseguito ✓ (fee maker)")
+            return filled_qty
+    # Timeout: cancella ordine e segnala fallback
+    if order_id:
+        try:
+            _bybit_signed_post("/v5/order/cancel", {"category": "linear", "symbol": symbol, "orderId": order_id})
+        except Exception:
+            pass
+    if LOG_DEBUG_STRATEGY:
+        log(f"[LIMIT-ENTRY][LONG][{symbol}] PostOnly timeout, fallback Market")
+    return None
+
+
 def market_long(symbol: str, usdt_amount: float, qty_exact: Optional[str] = None):
     price = get_last_price(symbol)
     if not price:
@@ -801,6 +852,17 @@ def market_long(symbol: str, usdt_amount: float, qty_exact: Optional[str] = None
         qty_aligned = (Decimal(str(max_notional_now)) / Decimal(str(price))) // step_dec * step_dec
         if qty_aligned <= 0:
             return None
+
+    # --- TENTATIVO INGRESSO MAKER (PostOnly Limit a bid1Price) ---
+    bid_price = get_bid_price(symbol) or 0.0
+    if bid_price > 0:
+        price_step = float(info.get("price_step", 0.01))
+        bid_str = format_price_bybit(bid_price, price_step)
+        qty_str_limit = _format_qty_with_step(float(qty_aligned), qty_step)
+        if float(qty_str_limit) > 0:
+            limit_qty = _try_limit_entry_long(symbol, qty_str_limit, bid_str)
+            if limit_qty:
+                return limit_qty
 
     max_retries = 3
     for attempt in range(1, max_retries + 1):

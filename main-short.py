@@ -110,7 +110,7 @@ ENTRY_ADX_STABLE = 24         # fisso
 ADX_RELAX_EVENT = 3.0
 RSI_SHORT_THRESHOLD = 46.0
 LIQUIDITY_MIN_VOLUME = 1_000_000
-LINEAR_MIN_TURNOVER = 3_000_000  # abbassato da 5M: sufficiente per capital size ~200 USDT notional
+LINEAR_MIN_TURNOVER = 10_000_000  # allineato al bot LONG: esclude micro-cap illiquidi e token manipolati
 # Large-cap con minQty elevata: abilita auto-bump del notional al minimo (come nel LONG)
 LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 
@@ -311,6 +311,7 @@ def update_assets(top_n=12):
             t for t in tickers
             if t["symbol"].endswith("USDT")
             and float(t.get("turnover24h", 0)) >= LINEAR_MIN_TURNOVER
+            and abs(float(t.get("fundingRate", 0))) < 0.003  # esclude asset con funding anomalo (manipolazione)
             and t["symbol"] not in STABLECOIN_BLACKLIST
             and t["symbol"] not in EXCLUSION_LIST
         ]
@@ -592,9 +593,12 @@ def get_last_price(symbol):
         resp = SESSION.get(endpoint, params=params, timeout=10)
         data = resp.json()
         if data.get("retCode") == 0:
-            price = float(data["result"]["list"][0]["lastPrice"])
+            item = data["result"]["list"][0]
+            price = float(item["lastPrice"])
+            bid1 = float(item.get("bid1Price") or price)
+            ask1 = float(item.get("ask1Price") or price)
             with _price_lock:
-                _last_price_cache[symbol] = {"price": price, "ts": now}
+                _last_price_cache[symbol] = {"price": price, "bid1": bid1, "ask1": ask1, "ts": now}
             return price
         else:
             tlog(f"lp_err:{symbol}", f"[BYBIT] Errore get_last_price {symbol}: {data}", 300)
@@ -602,6 +606,13 @@ def get_last_price(symbol):
     except Exception as e:
         tlog(f"lp_exc:{symbol}", f"[BYBIT] Errore get_last_price {symbol}: {e}", 300)
         return None
+
+def get_ask_price(symbol) -> Optional[float]:
+    """Ritorna ask1Price dal ticker (cacheato da get_last_price)."""
+    get_last_price(symbol)
+    with _price_lock:
+        c = _last_price_cache.get(symbol, {})
+        return c.get("ask1") or c.get("price")
 
 def get_instrument_info(symbol: str) -> dict:
     """
@@ -798,6 +809,47 @@ def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
         log(f"❌ Errore calcolo quantità per {symbol}: {e}")
         return None
 
+def _try_limit_entry_short(symbol: str, qty_str: str, ask_price_str: str) -> Optional[float]:
+    """Tenta ingresso SHORT come maker (PostOnly Limit a ask1Price).
+    Polling fill max 3 secondi. Cancella e ritorna None se non eseguito (fallback Market)."""
+    body = {
+        "category": "linear",
+        "symbol": symbol,
+        "side": "Sell",
+        "orderType": "Limit",
+        "timeInForce": "PostOnly",
+        "qty": qty_str,
+        "price": ask_price_str,
+        "positionIdx": SHORT_IDX
+    }
+    resp = _bybit_signed_post("/v5/order/create", body)
+    try:
+        data = resp.json()
+    except Exception:
+        return None
+    if data.get("retCode") != 0:
+        if LOG_DEBUG_STRATEGY:
+            log(f"[LIMIT-ENTRY][SHORT][{symbol}] PostOnly rifiutato ({data.get('retCode')}), fallback Market")
+        return None
+    order_id = data.get("result", {}).get("orderId", "")
+    # Polling fill: max 3 secondi (6 × 0.5s)
+    for _ in range(6):
+        time.sleep(0.5)
+        filled_qty = get_open_short_qty(symbol)
+        if filled_qty and filled_qty > 0:
+            log(f"[LIMIT-ENTRY][SHORT][{symbol}] PostOnly @ {ask_price_str} eseguito ✓ (fee maker)")
+            return filled_qty
+    # Timeout: cancella ordine e segnala fallback
+    if order_id:
+        try:
+            _bybit_signed_post("/v5/order/cancel", {"category": "linear", "symbol": symbol, "orderId": order_id})
+        except Exception:
+            pass
+    if LOG_DEBUG_STRATEGY:
+        log(f"[LIMIT-ENTRY][SHORT][{symbol}] PostOnly timeout, fallback Market")
+    return None
+
+
 def market_short(symbol: str, usdt_amount: float, qty_exact: Optional[str] = None):
     price = get_last_price(symbol)
     if not price:
@@ -834,6 +886,17 @@ def market_short(symbol: str, usdt_amount: float, qty_exact: Optional[str] = Non
         qty_aligned = max(qty_aligned, min_notional_qty)
         if LOG_DEBUG_STRATEGY:
             log(f"[NOTIONAL-GUARD][{symbol}] qty alzata per min_order_amt → {float(qty_aligned)}")
+
+    # --- TENTATIVO INGRESSO MAKER (PostOnly Limit a ask1Price) ---
+    ask_price = get_ask_price(symbol) or 0.0
+    if ask_price > 0:
+        price_step = float(info.get("price_step", 0.01))
+        ask_str = format_price_bybit(ask_price, price_step)
+        qty_str_limit = _format_qty_with_step(float(qty_aligned), qty_step)
+        if float(qty_str_limit) > 0:
+            limit_qty = _try_limit_entry_short(symbol, qty_str_limit, ask_str)
+            if limit_qty:
+                return limit_qty
 
     max_retries = 3
     for attempt in range(1, max_retries + 1):
