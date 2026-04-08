@@ -1704,12 +1704,19 @@ def sync_positions_from_wallet():
     try:
         resp = requests.get(endpoint, headers=headers, params=params, timeout=10)
         data = resp.json()
-        pos_list = data.get("result", {}).get("list", []) if data.get("retCode") == 0 else []
-    except Exception:
+        if data.get("retCode") == 0:
+            pos_list = data.get("result", {}).get("list", [])
+        else:
+            log(f"[SYNC] ⚠️ Bybit pos/list retCode={data.get('retCode')} msg={data.get('retMsg')} — fallback su ASSETS")
+            pos_list = []
+    except Exception as _e:
+        log(f"[SYNC] ⚠️ Eccezione fetch pos/list: {_e} — fallback su ASSETS")
         pos_list = []
 
     # Filtra posizioni LONG (side=Buy)
-    symbols = {p["symbol"] for p in pos_list if p.get("side") == "Buy" and float(p.get("size", 0) or 0) > 0} or set(ASSETS)
+    # IMPORTANT: usa i simboli da Bybit (pos_list) se disponibili, altrimenti ASSETS.
+    bybit_open_symbols = {p["symbol"] for p in pos_list if p.get("side") == "Buy" and float(p.get("size", 0) or 0) > 0}
+    symbols = bybit_open_symbols if bybit_open_symbols else set(ASSETS)
     for symbol in symbols:
         if symbol == "USDT":
             continue

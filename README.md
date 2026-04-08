@@ -78,3 +78,15 @@ Per eseguire i due bot come servizi indipendenti:
 Note:
 - Le funzioni di Google Sheets sono state rimosse da `main-long.py` e `main-short.py`. Il file `requirements.txt` è stato snellito: se usi script legacy che richiedono Google Sheets, aggiungi manualmente i pacchetti necessari o un file `requirements-sheets.txt` dedicato.
 - Imposta `PYTHONUNBUFFERED=1` su Railway per log in tempo reale. Impostare `TZ=Etc/UTC` aiuta ad avere timestamp coerenti.
+
+## 📈 Reports
+
+fai un controllo su bybit e sui log di short e long su railway e fammi un report su come sta andando il trade delle ultime 24 ore. Verifica se ci sono stati errori o problemi di connessione e se le operazioni di short e long sono state eseguite correttamente. Fornisci un'analisi dettagliata delle performance del trade, inclusi eventuali guadagni o perdite (elenca anche le spese dovute alle fee di bybit), e suggerimenti per migliorare la strategia di trading in futuro.
+
+### tabella trailing SL/TP (ratchet) 
+
+≥ 15% ROI chiudere a +7% ✅  
+≥ 25% ROI chiudere a +15% ✅  
+≥ 40% ROI chiudere a +25% ✅  
+≥ 60% ROI chiudere a +40% ✅  
+≥ 80% ROI chiudere a +60% ✅
