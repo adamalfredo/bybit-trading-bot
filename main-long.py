@@ -1203,10 +1203,9 @@ def profit_floor_worker_long():
                 set_position(symbol, entry)
                 continue
 
-            # Rispetta cooldown
-            last_upd = entry.get("floor_updated_ts", 0)
-            if time.time() - last_upd < FLOOR_UPDATE_COOLDOWN_SEC:
-                continue
+            # NOTA: cooldown rimosso per i tier upgrade — il check target<=prev già
+            # impedisce duplicati. Il cooldown bloccava salti rapidi di tier (es. 7%→15%)
+            # causando mancati aggiornamenti quando il prezzo rimbalzava dopo il cooldown.
 
             # Calcolo livello di prezzo corrispondente al floor ROI
             delta_pct_price = (target_floor_roi / max(1, DEFAULT_LEVERAGE)) / 100.0
