@@ -104,6 +104,7 @@ MAX_LOSS_CAP_PCT = 0.03   # FIX: era 0.015, cap alzato a 3% per non bloccare SL_
 # >>> regime semplificato: contesto BTC 4h + drawdown giornaliero
 DAILY_DD_CAP_PCT = 0.04         # blocca nuovi ingressi se equity < -4% dal livello di inizio giorno
 _btc_favorable_short = False    # True se BTC 4h in downtrend → contesto favorevole per SHORT
+_btc_pumping_short = False      # True se BTC 15m sale > +1.5% in 30 min (pump guard)
 _btc_ctx_ts = 0                 # timestamp ultimo aggiornamento contesto BTC
 _daily_start_equity = None
 _trading_paused_until = 0
@@ -255,15 +256,43 @@ def is_trending_down_1h(symbol: str, tf: str = "60"):
         return False
 
 def _update_btc_context_short():
-    """Aggiorna il contesto BTC ogni 3 min: True se BTC 4h in downtrend (favorevole per SHORT)."""
-    global _btc_favorable_short, _btc_ctx_ts
+    """Aggiorna il contesto BTC ogni 3 min.
+    Fix #3: se BTC 24h in positivo forza btc_fav=False anche se 4h downtrend.
+    Fix #1: calcola momentum 15m per rilevare pump improvvisi (pump guard)."""
+    global _btc_favorable_short, _btc_pumping_short, _btc_ctx_ts
     if time.time() - _btc_ctx_ts > 180:
         try:
             _btc_favorable_short = is_trending_down("BTCUSDT", "240")
-        except:
+            # Fix #3: override se BTC 24h già in positivo (rimbalzo in corso)
+            try:
+                _r = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/tickers",
+                                 params={"category": "linear", "symbol": "BTCUSDT"}, timeout=5)
+                _d = _r.json()
+                if _d.get("retCode") == 0 and _d["result"]["list"]:
+                    _pct24h = float(_d["result"]["list"][0].get("price24hPcnt", 0)) * 100
+                    if _pct24h > 0.5:
+                        _btc_favorable_short = False
+                        tlog("btc_ctx_pct", f"[CTX] BTC 24h={_pct24h:+.2f}% → btc_fav override=False", 180)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        # Fix #1: momentum BTC 15m — pump guard
+        try:
+            _r2 = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/kline",
+                              params={"category": "linear", "symbol": "BTCUSDT",
+                                      "interval": "15", "limit": 5}, timeout=5)
+            _d2 = _r2.json()
+            if _d2.get("retCode") == 0 and len(_d2["result"]["list"]) >= 3:
+                _cls = _d2["result"]["list"]  # ordine Bybit: [0]=più recente
+                _chg_30m = (float(_cls[0][4]) - float(_cls[2][4])) / float(_cls[2][4]) * 100
+                _btc_pumping_short = _chg_30m > 1.5
+                if _btc_pumping_short:
+                    tlog("btc_pump", f"[CTX] BTC 15m pump={_chg_30m:+.2f}% → PUMP-GATE attivo", 60)
+        except Exception:
             pass
         _btc_ctx_ts = time.time()
-        tlog("btc_ctx", f"[CTX] BTC 4h downtrend={_btc_favorable_short}", 180)
+        tlog("btc_ctx", f"[CTX] BTC 4h downtrend={_btc_favorable_short} | pumping={_btc_pumping_short}", 180)
 
 def _get_oi_change(symbol: str) -> float | None:
     """Restituisce la variazione % di Open Interest nell'ultima ora (intervalTime=1h).
@@ -1143,6 +1172,23 @@ def breakeven_lock_worker_short():
             if be_locked:
                 continue
 
+            # Fix #2: pump guard BE — se BTC sta pompando, forza BE su SHORT in profitto
+            if _btc_pumping_short and price_now is not None and price_now < entry_price:
+                be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
+                qty_live = get_open_short_qty(symbol)
+                if qty_live and qty_live > 0:
+                    place_conditional_sl_short(symbol, be_price, qty_live, trigger_by="MarkPrice")
+                    set_position_stoploss_short(symbol, be_price)
+                entry["be_locked"] = True
+                entry["be_price"] = be_price
+                set_position(symbol, entry)
+                tlog(f"pump_be:{symbol}", f"[PUMP-BE][SHORT] {symbol} SL→BE {be_price:.6f} (BTC pump)", 60)
+                try:
+                    notify_telegram(f"⚠️ PUMP-BE SHORT {symbol}: SL→BE {be_price:.6f} (BTC +1.5%/30m)")
+                except Exception:
+                    pass
+                continue
+
             r_dist = entry.get("r_dist")  # distanza 1R in prezzo
             # Se abbiamo r_dist, be quando prezzo ha guadagnato 1R
             cond_be = (r_dist is not None and price_now <= entry_price - (BE_AT_R * r_dist))
@@ -2008,6 +2054,10 @@ while True:
             if ENABLE_DD_PAUSE and time.time() < _trading_paused_until:
                  tlog(f"paused:{symbol}", f"[PAUSE] trading sospeso (DD cap), skip SHORT {symbol}", 600)
                  continue
+            # Fix #1: pump guard — BTC sta salendo velocemente, skip nuove aperture SHORT
+            if _btc_pumping_short:
+                tlog(f"pump_gate:{symbol}", f"[PUMP-GATE][SHORT] BTC pump attivo, skip entry {symbol}", 300)
+                continue
             # if CURRENT_REGIME == "BULL":
             #     tlog(f"reg_gate:{symbol}", f"[REGIME-GATE] BULL → skip SHORT {symbol}", 600)
             #     continue

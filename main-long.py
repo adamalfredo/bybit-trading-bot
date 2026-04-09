@@ -99,6 +99,7 @@ MAX_LOSS_CAP_PCT = 0.03   # FIX: era 0.015, cap alzato a 3% per non bloccare SL_
 # >>> NEW: regime + drawdown giornaliero (LONG)
 DAILY_DD_CAP_PCT = 0.04
 _btc_favorable_long = False    # True se BTC 4h in uptrend → contesto favorevole per LONG
+_btc_dumping_long = False      # True se BTC 15m scende > -1.5% in 30 min (dump guard)
 _btc_ctx_ts = 0
 _daily_start_equity = None
 _trading_paused_until = 0
@@ -242,15 +243,43 @@ def is_trending_up_1h(symbol: str, tf: str = "60"):
         return False
 
 def _update_btc_context_long():
-    """Aggiorna il contesto BTC ogni 3 min: True se BTC 4h in uptrend (favorevole per LONG)."""
-    global _btc_favorable_long, _btc_ctx_ts
+    """Aggiorna il contesto BTC ogni 3 min.
+    Fix #3: se BTC 24h in negativo forza btc_fav=False anche se 4h uptrend.
+    Fix #1: calcola momentum 15m per rilevare dump improvvisi (dump guard)."""
+    global _btc_favorable_long, _btc_dumping_long, _btc_ctx_ts
     if time.time() - _btc_ctx_ts > 180:
         try:
             _btc_favorable_long = is_trending_up("BTCUSDT", "240")
-        except:
+            # Fix #3: override se BTC 24h già in negativo (dump in corso)
+            try:
+                _r = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/tickers",
+                                 params={"category": "linear", "symbol": "BTCUSDT"}, timeout=5)
+                _d = _r.json()
+                if _d.get("retCode") == 0 and _d["result"]["list"]:
+                    _pct24h = float(_d["result"]["list"][0].get("price24hPcnt", 0)) * 100
+                    if _pct24h < -0.5:
+                        _btc_favorable_long = False
+                        tlog("btc_ctx_pct", f"[CTX] BTC 24h={_pct24h:+.2f}% → btc_fav override=False", 180)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        # Fix #1: momentum BTC 15m — dump guard
+        try:
+            _r2 = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/kline",
+                              params={"category": "linear", "symbol": "BTCUSDT",
+                                      "interval": "15", "limit": 5}, timeout=5)
+            _d2 = _r2.json()
+            if _d2.get("retCode") == 0 and len(_d2["result"]["list"]) >= 3:
+                _cls = _d2["result"]["list"]  # ordine Bybit: [0]=più recente
+                _chg_30m = (float(_cls[0][4]) - float(_cls[2][4])) / float(_cls[2][4]) * 100
+                _btc_dumping_long = _chg_30m < -1.5
+                if _btc_dumping_long:
+                    tlog("btc_dump", f"[CTX] BTC 15m dump={_chg_30m:+.2f}% → DUMP-GATE attivo", 60)
+        except Exception:
             pass
         _btc_ctx_ts = time.time()
-        tlog("btc_ctx", f"[CTX] BTC 4h uptrend={_btc_favorable_long}", 180)
+        tlog("btc_ctx", f"[CTX] BTC 4h uptrend={_btc_favorable_long} | dumping={_btc_dumping_long}", 180)
 
 def _get_oi_change(symbol: str) -> float | None:
     """Restituisce la variazione % di Open Interest nell'ultima ora (intervalTime=1h).
@@ -1133,6 +1162,24 @@ def breakeven_lock_worker_long():
             if be_locked:
                 continue
 
+            # Fix #2: dump guard BE — se BTC sta dumpando, forza BE su LONG in profitto
+            if _btc_dumping_long and price_now is not None and price_now > entry_price:
+                be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
+                qty_live = get_open_long_qty(symbol)
+                if qty_live and qty_live > 0:
+                    place_conditional_sl_long(symbol, be_price, qty_live, trigger_by="MarkPrice")
+                    set_position_stoploss_long(symbol, be_price)
+                entry["be_locked"] = True
+                entry["be_price"] = be_price
+                with _state_lock:
+                    position_data[symbol] = entry
+                tlog(f"dump_be:{symbol}", f"[DUMP-BE][LONG] {symbol} SL→BE {be_price:.6f} (BTC dump)", 60)
+                try:
+                    notify_telegram(f"⚠️ DUMP-BE LONG {symbol}: SL→BE {be_price:.6f} (BTC -1.5%/30m)")
+                except Exception:
+                    pass
+                continue
+
             r_dist = entry.get("r_dist")
             cond_be = (r_dist is not None and price_now >= entry_price + (BE_AT_R * r_dist))
             if r_dist is None:
@@ -1972,6 +2019,10 @@ while True:
             # >>> GATE: blocca solo le NUOVE APERTURE (non gli exit)
             if ENABLE_DD_PAUSE and time.time() < _trading_paused_until:
                 tlog(f"paused:{symbol}", f"[PAUSE] trading sospeso (DD cap), skip LONG {symbol}", 600)
+                continue
+            # Fix #1: dump guard — BTC sta scendendo velocemente, skip nuove aperture LONG
+            if _btc_dumping_long:
+                tlog(f"dump_gate:{symbol}", f"[DUMP-GATE][LONG] BTC dump attivo, skip entry {symbol}", 300)
                 continue
             # Regime gate rimosso: analyze_asset gestisce già i requisiti più stringenti quando BTC è sfavorevole
 
