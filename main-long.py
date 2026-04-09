@@ -1292,6 +1292,10 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
         price_step = info.get("price_step", 0.01)
         qty_str = _format_qty_with_step(float(qty), qty_step)
         stop_str = format_price_bybit(stop_price, price_step)
+
+        # Cancella ordini stop esistenti per evitare accumulo (limite Bybit: 10 ordini)
+        cancel_all_orders(symbol, "StopOrder")
+
         body = {
             "category": "linear",
             "symbol": symbol,
