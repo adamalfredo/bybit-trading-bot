@@ -48,6 +48,38 @@ SL_MIN = 1.0
 SL_MAX = 2.0
 # Nuovi parametri per protezione guadagni (stop_floor)
 TRIGGER_BY = "LastPrice"    # "LastPrice" o "MarkPrice" per trigger degli stop exchange
+
+# Persistenza stato ratchet tra deploy
+STATE_FILE = "/tmp/position_state_long.json"
+
+def save_positions_state():
+    """Salva mfe_roi e floor_roi di ogni posizione su file per sopravvivere ai restart."""
+    try:
+        state = {}
+        for symbol in list(open_positions):
+            entry = position_data.get(symbol)
+            if entry:
+                state[symbol] = {
+                    "mfe_roi": entry.get("mfe_roi", 0.0),
+                    "floor_roi": entry.get("floor_roi"),
+                    "entry_price": entry.get("entry_price"),
+                    "floor_updated_ts": entry.get("floor_updated_ts", 0),
+                }
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f)
+    except Exception:
+        pass  # non bloccare il bot per un errore di salvataggio
+
+def load_positions_state() -> dict:
+    """Carica lo stato ratchet salvato, se esiste."""
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
 RATCHET_TIERS_ROI = [
     (15, 7),    # FIX: era (30,15) → soglie realistiche a leva 10x
     (25, 15),
@@ -104,7 +136,7 @@ ENTRY_ADX_STABLE = 24          # fisso
 ADX_RELAX_EVENT = 3.0
 RSI_LONG_THRESHOLD = 54.0
 COOLDOWN_MINUTES = 60          # fisso (non usare os.getenv)
-MAX_OPEN_POSITIONS = 3         # massimo posizioni simultanee (leva 10x su ~50 USDT = rischio elevato)
+MAX_OPEN_POSITIONS = 4         # massimo posizioni simultanee
 FUNDING_LONG_MAX = 0.0005      # blocca nuovi LONG se funding > +0.05% (longs sovraccarichi = pressione ribassista)
 MAX_CONSEC_LOSSES = 2          # fisso
  
@@ -1243,6 +1275,7 @@ def profit_floor_worker_long():
             tlog(f"floor_up_long:{symbol}",
                  f"[FLOOR-UP][LONG] {symbol} MFE={mfe_roi:.1f}% → FloorROI={target_floor_roi:.1f}% → SL={floor_price:.6f} trailing={trailing_active} set={set_ok}", 30)
             set_position(symbol, entry)
+            save_positions_state()  # persisti mfe_roi/floor_roi su disco
 
         except Exception as _worker_exc:
             log(f"[RATCHET-LONG][CRASH] Eccezione nel worker: {_worker_exc}")
@@ -1686,6 +1719,7 @@ TEST_MODE = False  # Acquisti e vendite normali abilitati
 def sync_positions_from_wallet():
     log("[SYNC] Avvio scansione posizioni LONG DAL CONTO (tutti i simboli linear)...")
     trovate = 0
+    _saved_state = load_positions_state()  # carica stato ratchet pre-restart
     endpoint = f"{BYBIT_BASE_URL}/v5/position/list"
     params = {"category": "linear", "settleCoin": "USDT"}
     from urllib.parse import urlencode
@@ -1790,6 +1824,21 @@ def sync_positions_from_wallet():
                 "floor_roi": recovered_floor_roi,
                 "usdt_floor_locked": recovered_floor_roi is not None,  # non riscrivere cassaforte se ratchet già attivo
             })
+            # Ripristina mfe_roi/floor_roi storici dal file se migliori del valore attuale
+            saved = _saved_state.get(symbol, {})
+            saved_entry = saved.get("entry_price")
+            if saved_entry and abs(float(saved_entry) - float(entry_price)) / float(entry_price) < 0.001:
+                # stessa posizione (entry price entro 0.1%)
+                cur = position_data.get(symbol, {})
+                if saved.get("mfe_roi", 0) > recovered_mfe_roi:
+                    cur["mfe_roi"] = saved["mfe_roi"]
+                    set_position(symbol, cur)
+                    log(f"[SYNC-STATE][LONG] {symbol} MFE ripristinato: {saved['mfe_roi']:.1f}% (era {recovered_mfe_roi:.1f}%)")
+                if saved.get("floor_roi") and (recovered_floor_roi is None or saved["floor_roi"] > recovered_floor_roi):
+                    cur["floor_roi"] = saved["floor_roi"]
+                    cur["floor_updated_ts"] = saved.get("floor_updated_ts", 0)
+                    set_position(symbol, cur)
+                    log(f"[SYNC-STATE][LONG] {symbol} FloorROI ripristinato: {saved['floor_roi']:.1f}%")
             trovate += 1
             log(f"[SYNC] Posizione LONG trovata: {symbol} qty={qty} entry={entry_price:.4f} SL={final_sl:.4f} TP={tp:.4f}")
             # Piazza subito stop di posizione + conditional (backup) col CAP

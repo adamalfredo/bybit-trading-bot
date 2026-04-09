@@ -90,3 +90,5 @@ fai un controllo su bybit e sui log di short e long su railway e fammi un report
 ≥ 40% ROI chiudere a +25% ✅  
 ≥ 60% ROI chiudere a +40% ✅  
 ≥ 80% ROI chiudere a +60% ✅
+
+09/04/2026 portato il MAX_OPEN_POSITIONS da 3 a 4 valutare gli altri limiti
