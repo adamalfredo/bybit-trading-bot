@@ -2221,6 +2221,21 @@ while True:
             entry_price = entry.get("entry_price", get_last_price(symbol) or 0.0)
             exit_price = get_last_price(symbol) or 0.0
             record_exit(symbol, entry_price, exit_price, "SHORT")
+            # Notifica Telegram chiusura da SL/TP Bybit
+            try:
+                if entry_price and exit_price:
+                    pnl_pct = ((float(entry_price) - float(exit_price)) / float(entry_price)) * 100.0 * DEFAULT_LEVERAGE
+                    floor_roi = entry.get("floor_roi")
+                    floor_info = f"\nFloor ratchet: {floor_roi:.1f}%" if floor_roi else ""
+                    notify_telegram(
+                        f"🔴📉 Posizione SHORT chiusa da exchange (SL/TP)\n"
+                        f"Simbolo: {symbol}\n"
+                        f"Entry: {float(entry_price):.6f}\n"
+                        f"Uscita: {float(exit_price):.6f}\n"
+                        f"ROI stimato: {pnl_pct:.2f}%{floor_info}"
+                    )
+            except Exception as _tg_exc:
+                log(f"[TELEGRAM-CLEANUP][SHORT] errore notifica {symbol}: {_tg_exc}")
             with _state_lock:
                 position_data.pop(symbol, None)
             if get_open_long_qty(symbol) == 0:
