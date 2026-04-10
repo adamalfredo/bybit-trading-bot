@@ -2231,9 +2231,11 @@ while True:
             if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                 current_price = get_last_price(symbol)
                 exit_value = current_price * qty
-                pnl = ((current_price - entry_price) / entry_price) * 100.0
-                log(f"[EXIT-LONG][{symbol}] prezzo={current_price:.4f} entry={entry_price:.4f} pnl={pnl:.2f}% qty={qty:.4f}")
-                notify_telegram(f"✅ Exit LONG {symbol} a {current_price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}%")
+                pnl_gross = ((current_price - entry_price) / entry_price) * 100.0
+                pnl = pnl_gross - (FEES_TAKER_PCT * 2 * 100.0)  # fee round-trip
+                pnl_emoji = "📈" if pnl >= 0 else "📉"
+                log(f"[EXIT-LONG][{symbol}] prezzo={current_price:.4f} entry={entry_price:.4f} pnl={pnl:.2f}% (lordo={pnl_gross:.2f}%) qty={qty:.4f}")
+                notify_telegram(f"{pnl_emoji} Exit LONG {symbol} a {current_price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}% (fee incluse)")
                 record_exit(symbol, entry_price, current_price, "LONG")
                 _trade_log("exit", symbol, "LONG", entry_price=entry_price, qty=qty, sl=entry.get("sl", 0.0), tp=entry.get("tp", 0.0), r_dist=entry.get("r_dist", 0.0), extra={"pnl_pct": pnl})
                 try:

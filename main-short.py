@@ -2326,10 +2326,12 @@ while True:
             if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
                 current_price = get_last_price(symbol)
                 exit_value = current_price * qty
-                pnl = ((entry_price - current_price) / entry_price) * 100  # PnL SHORT corretto
+                pnl_gross = ((entry_price - current_price) / entry_price) * 100  # PnL SHORT corretto
+                pnl = pnl_gross - (FEES_TAKER_PCT * 2 * 100.0)  # fee round-trip
+                pnl_emoji = "📈" if pnl >= 0 else "📉"
                 
                 log(f"[EXIT-OK] Ricopertura completata per {symbol} | PnL: {pnl:.2f}%")
-                notify_telegram(f"✅ Exit Signal: ricopertura SHORT per {symbol} a {current_price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}%")
+                notify_telegram(f"{pnl_emoji} Exit SHORT {symbol} a {current_price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}% (fee incluse)")
                 record_exit(symbol, entry_price, current_price, "SHORT")
                 try:
                     _expectancy_log(pnl, qty * entry_price, exit_value, maker_entry=False, maker_exit=False)
