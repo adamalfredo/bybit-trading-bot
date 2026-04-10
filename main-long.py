@@ -103,6 +103,11 @@ _btc_dumping_long = False      # True se BTC 15m scende > -1.5% in 30 min (dump 
 _btc_ctx_ts = 0
 _daily_start_equity = None
 _trading_paused_until = 0
+# Report giornaliero
+_daily_trades_opened: int = 0
+_daily_trades_closed: int = 0
+_daily_pnl_sum: float = 0.0   # somma PnL % netti del giorno
+_last_report_day: str = ""     # "YYYY-MM-DD" dell'ultimo report inviato
 # BEGIN PATCH: throttle DD (no pausa forzata di default)
 ENABLE_DD_PAUSE = os.getenv("ENABLE_DD_PAUSE", "0") == "1"   # se "1" mantiene la pausa forzata
 DD_PAUSE_MINUTES = int(os.getenv("DD_PAUSE_MINUTES", "120"))
@@ -322,6 +327,41 @@ def _update_daily_anchor_and_btc_context():
     if _daily_start_equity is None or time.strftime("%Y-%m-%d") != time.strftime("%Y-%m-%d", time.gmtime()):
         _daily_start_equity = _equity_now()
     _update_btc_context_long()
+
+def _send_daily_report():
+    """Invia una volta al giorno (intorno alle 23:00 UTC) il riepilogo su Telegram."""
+    global _last_report_day, _daily_trades_opened, _daily_trades_closed, _daily_pnl_sum
+    now_utc = time.gmtime()
+    today = time.strftime("%Y-%m-%d", now_utc)
+    if today == _last_report_day:
+        return
+    # Invia solo dopo le 23:00 UTC
+    if now_utc.tm_hour < 23:
+        return
+    try:
+        equity = _equity_now()
+        pnl_day = equity - (_daily_start_equity or equity)
+        pnl_day_pct = (pnl_day / max(1e-9, _daily_start_equity or equity)) * 100.0
+        pnl_emoji = "📈" if pnl_day >= 0 else "📉"
+        pos_list = ", ".join(sorted(open_positions)) if open_positions else "nessuna"
+        avg_pnl = (_daily_pnl_sum / _daily_trades_closed) if _daily_trades_closed > 0 else 0.0
+        msg = (
+            f"📋 Report giornaliero LONG — {today}\n"
+            f"{pnl_emoji} PnL giorno: {pnl_day:+.2f} USDT ({pnl_day_pct:+.2f}%)\n"
+            f"💰 Equity: {equity:.2f} USDT\n"
+            f"📂 Trade aperti oggi: {_daily_trades_opened}\n"
+            f"✅ Trade chiusi oggi: {_daily_trades_closed}\n"
+            f"📊 PnL medio chiusi: {avg_pnl:+.2f}% (fee incl.)\n"
+            f"🔓 Posizioni attive: {pos_list}"
+        )
+        notify_telegram(msg)
+        _last_report_day = today
+        # Reset contatori per il giorno successivo
+        _daily_trades_opened = 0
+        _daily_trades_closed = 0
+        _daily_pnl_sum = 0.0
+    except Exception as e:
+        log(f"[DAILY-REPORT] Errore invio report: {e}")
 
 def is_breaking_weekly_high(symbol: str):
     """
@@ -1769,6 +1809,33 @@ notify_telegram("🤖 BOT [LONG] AVVIATO - In ascolto per segnali di ingresso/us
 
 TEST_MODE = False  # Acquisti e vendite normali abilitati
 
+def _sync_tp_order_long(symbol: str, tp_price: float, full_qty: float):
+    """Verifica se esiste un TP Limit attivo su Bybit per la posizione LONG; se mancante, lo ricrea."""
+    try:
+        resp = _bybit_signed_get("/v5/order/realtime", {"category": "linear", "symbol": symbol})
+        orders = resp.json().get("result", {}).get("list", [])
+        has_tp = any(
+            o.get("side") == "Sell"
+            and o.get("orderType") == "Limit"
+            and str(o.get("reduceOnly", "false")).lower() == "true"
+            and int(o.get("positionIdx", 0)) == LONG_IDX
+            for o in orders
+        )
+        if has_tp:
+            log(f"[SYNC-TP][LONG] {symbol}: TP Limit già attivo su Bybit, skip")
+            return
+        qty_tp1 = max(0.0, full_qty * TP1_PARTIAL)
+        ok, oid = place_takeprofit_long(symbol, tp_price, qty_tp1)
+        if ok:
+            log(f"[SYNC-TP][LONG] {symbol}: TP ripiazzato @ {tp_price:.6f} qty={qty_tp1:.4f} orderId={oid}")
+            entry_pd = get_position(symbol) or {}
+            entry_pd["tp_order_id"] = oid
+            set_position(symbol, entry_pd)
+        else:
+            log(f"[SYNC-TP][LONG] {symbol}: TP mancante, ripiazzo FALLITO @ {tp_price:.6f}")
+    except Exception as e:
+        log(f"[SYNC-TP][LONG] {symbol} errore: {e}")
+
 def sync_positions_from_wallet():
     log("[SYNC] Avvio scansione posizioni LONG DAL CONTO (tutti i simboli linear)...")
     trovate = 0
@@ -2210,6 +2277,7 @@ while True:
                 "r_dist": r_dist
             })
             add_open(symbol)
+            _daily_trades_opened += 1
             notify_telegram(f"🟢📈 LONG aperto {symbol}\nPrezzo: {price_now:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f}\nSL: {final_sl:.4f}\nTP1: {tp1_price:.4f}\nScore: {len([s for s in strategy.split(',') if 'ADX' not in s and s.strip()]) + (1 if _btc_favorable_long else 0)}/5")
             time.sleep(3)
 
@@ -2236,6 +2304,8 @@ while True:
                 pnl_emoji = "📈" if pnl >= 0 else "📉"
                 log(f"[EXIT-LONG][{symbol}] prezzo={current_price:.4f} entry={entry_price:.4f} pnl={pnl:.2f}% (lordo={pnl_gross:.2f}%) qty={qty:.4f}")
                 notify_telegram(f"{pnl_emoji} Exit LONG {symbol} a {current_price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}% (fee incluse)")
+                _daily_trades_closed += 1
+                _daily_pnl_sum += pnl
                 record_exit(symbol, entry_price, current_price, "LONG")
                 _trade_log("exit", symbol, "LONG", entry_price=entry_price, qty=qty, sl=entry.get("sl", 0.0), tp=entry.get("tp", 0.0), r_dist=entry.get("r_dist", 0.0), extra={"pnl_pct": pnl})
                 try:
@@ -2303,4 +2373,5 @@ while True:
                 entry["be_price"] = be_price
                 tlog(f"be_lock_safety:{symbol}", f"[BE-LOCK-SAFETY][LONG] SL→BE {be_price:.6f}", 60)
 
+    _send_daily_report()
     time.sleep(180)

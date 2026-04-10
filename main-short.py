@@ -110,6 +110,11 @@ _btc_pumping_short = False      # True se BTC 15m sale > +1.5% in 30 min (pump g
 _btc_ctx_ts = 0                 # timestamp ultimo aggiornamento contesto BTC
 _daily_start_equity = None
 _trading_paused_until = 0
+# Report giornaliero
+_daily_trades_opened: int = 0
+_daily_trades_closed: int = 0
+_daily_pnl_sum: float = 0.0   # somma PnL % netti del giorno
+_last_report_day: str = ""     # "YYYY-MM-DD" dell'ultimo report inviato
 # BEGIN PATCH: throttle DD (no pausa forzata di default)
 ENABLE_DD_PAUSE = os.getenv("ENABLE_DD_PAUSE", "0") == "1"
 DD_PAUSE_MINUTES = int(os.getenv("DD_PAUSE_MINUTES", "120"))
@@ -361,6 +366,43 @@ def _update_daily_anchor_and_btc_context():
     if _daily_start_equity is None or time.strftime("%Y-%m-%d") != time.strftime("%Y-%m-%d", time.gmtime()):
         _daily_start_equity = _equity_now()
     _update_btc_context_short()
+
+def _send_daily_report():
+    """Invia una volta al giorno (intorno alle 23:00 UTC) il riepilogo su Telegram."""
+    global _last_report_day, _daily_trades_opened, _daily_trades_closed, _daily_pnl_sum
+    now_utc = time.gmtime()
+    today = time.strftime("%Y-%m-%d", now_utc)
+    if today == _last_report_day:
+        return
+    # Invia solo dopo le 23:00 UTC
+    if now_utc.tm_hour < 23:
+        return
+    try:
+        equity = _equity_now()
+        pnl_day = equity - (_daily_start_equity or equity)
+        pnl_day_pct = (pnl_day / max(1e-9, _daily_start_equity or equity)) * 100.0
+        pnl_emoji = "📈" if pnl_day >= 0 else "📉"
+        bear_status = "✅ confermato" if (_btc_favorable_short and _btc_daily_down_short) else "❌ non confermato"
+        pos_list = ", ".join(sorted(open_positions)) if open_positions else "nessuna"
+        avg_pnl = (_daily_pnl_sum / _daily_trades_closed) if _daily_trades_closed > 0 else 0.0
+        msg = (
+            f"📋 Report giornaliero SHORT — {today}\n"
+            f"{pnl_emoji} PnL giorno: {pnl_day:+.2f} USDT ({pnl_day_pct:+.2f}%)\n"
+            f"💰 Equity: {equity:.2f} USDT\n"
+            f"📂 Trade aperti oggi: {_daily_trades_opened}\n"
+            f"✅ Trade chiusi oggi: {_daily_trades_closed}\n"
+            f"📊 PnL medio chiusi: {avg_pnl:+.2f}% (fee incl.)\n"
+            f"🐻 Bear confermato: {bear_status}\n"
+            f"🔓 Posizioni attive: {pos_list}"
+        )
+        notify_telegram(msg)
+        _last_report_day = today
+        # Reset contatori per il giorno successivo
+        _daily_trades_opened = 0
+        _daily_trades_closed = 0
+        _daily_pnl_sum = 0.0
+    except Exception as e:
+        log(f"[DAILY-REPORT] Errore invio report: {e}")
 
 def is_breaking_weekly_low(symbol: str):
     """
@@ -1831,6 +1873,32 @@ notify_telegram("🤖 BOT [SHORT] AVVIATO - In ascolto per segnali di ingresso/u
 
 TEST_MODE = False  # Acquisti e vendite normali abilitati
 
+def _sync_tp_order_short(symbol: str, tp_price: float, full_qty: float):
+    """Verifica se esiste un TP Limit attivo su Bybit per la posizione SHORT; se mancante, lo ricrea."""
+    try:
+        resp = _bybit_signed_get("/v5/order/realtime", {"category": "linear", "symbol": symbol})
+        orders = resp.json().get("result", {}).get("list", [])
+        has_tp = any(
+            o.get("side") == "Buy"
+            and o.get("orderType") == "Limit"
+            and str(o.get("reduceOnly", "false")).lower() == "true"
+            and int(o.get("positionIdx", 0)) == SHORT_IDX
+            for o in orders
+        )
+        if has_tp:
+            log(f"[SYNC-TP][SHORT] {symbol}: TP Limit già attivo su Bybit, skip")
+            return
+        qty_tp1 = max(0.0, full_qty * TP1_PARTIAL)
+        ok, oid = place_takeprofit_short(symbol, tp_price, qty_tp1)
+        if ok:
+            log(f"[SYNC-TP][SHORT] {symbol}: TP ripiazzato @ {tp_price:.6f} qty={qty_tp1:.4f} orderId={oid}")
+            if symbol in position_data:
+                position_data[symbol]["tp_order_id"] = oid
+        else:
+            log(f"[SYNC-TP][SHORT] {symbol}: TP mancante, ripiazzo FALLITO @ {tp_price:.6f}")
+    except Exception as e:
+        log(f"[SYNC-TP][SHORT] {symbol} errore: {e}")
+
 def sync_positions_from_wallet():
     log("[SYNC] Avvio scansione posizioni short DAL CONTO (tutti i simboli linear)...")
     trovate = 0
@@ -1954,7 +2022,9 @@ def sync_positions_from_wallet():
             log(f"[SYNC] Posizione trovata: {symbol} qty={qty} entry={entry_price:.4f} SL={final_sl:.4f} TP={tp:.4f}")
             set_position_stoploss_short(symbol, final_sl)
             place_conditional_sl_short(symbol, final_sl, qty, trigger_by="MarkPrice")
-
+            # Sync TP: verifica e ripristina il TP order se mancante su Bybit
+            tp_sync_price = entry_price - (TP1_R * atr_val * SL_ATR_MULT)
+            _sync_tp_order_short(symbol, tp_sync_price, qty)
             # >>> PATCH: BE-LOCK immediato se già oltre soglia al riavvio (SHORT)
             try:
                 if price <= entry_price * (1.0 - BREAKEVEN_LOCK_PCT) and not position_data[symbol].get("be_locked"):
@@ -2289,6 +2359,7 @@ while True:
                 "r_dist": r_dist
             })
             add_open(symbol)
+            _daily_trades_opened += 1
             notify_telegram(f"🟢📉 SHORT aperto per {symbol}\nPrezzo: {price_now:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f} USDT\nSL: {final_sl:.4f}\nTP1: {tp1_price:.4f}\nScore: {len([s for s in strategy.split(',') if 'ADX' not in s and s.strip()]) + (1 if (_btc_favorable_short and _btc_daily_down_short) else 0)}/5")
             time.sleep(3)
 
@@ -2332,6 +2403,8 @@ while True:
                 
                 log(f"[EXIT-OK] Ricopertura completata per {symbol} | PnL: {pnl:.2f}%")
                 notify_telegram(f"{pnl_emoji} Exit SHORT {symbol} a {current_price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}% (fee incluse)")
+                _daily_trades_closed += 1
+                _daily_pnl_sum += pnl
                 record_exit(symbol, entry_price, current_price, "SHORT")
                 try:
                     _expectancy_log(pnl, qty * entry_price, exit_value, maker_entry=False, maker_exit=False)
@@ -2408,4 +2481,5 @@ while True:
 
     # Sicurezza: attesa tra i cicli principali
     # time.sleep(INTERVAL_MINUTES * 60)
+    _send_daily_report()
     time.sleep(180)  # analizza ogni 3 minuti per ridurre carico API

@@ -50,6 +50,6 @@
 
 ## ⚙️ 6. Infrastruttura
 
-- **Sincronizzazione ordini a restart**: al riavvio su Railway, recuperare anche gli ordini TP/SL attivi (oggi si sincronizzano solo le posizioni).
+- ✅ **Sincronizzazione ordini a restart**: al riavvio su Railway, recuperare anche gli ordini TP/SL attivi — helper `_sync_tp_order_long/short` implementati in entrambi i bot.
 - **Separazione account LONG/SHORT**: valutare due sub-account distinti per evitare interferenze tra i bot sullo stesso conto.
 - **Ambiente di staging**: bot in paper trading (Bybit testnet) per testare modifiche prima del deploy in produzione.
