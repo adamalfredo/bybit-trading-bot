@@ -49,7 +49,7 @@ TRAILING_MIN = 0.02   # trailing più conservativo
 TRAILING_MAX = 0.08   # trailing più conservativo
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
 COOLDOWN_MINUTES = 60
-MAX_OPEN_POSITIONS = 4         # massimo posizioni simultanee
+MAX_OPEN_POSITIONS = 2         # massimo posizioni simultanee (ridotto: esposizione correlata in rally)
 FUNDING_SHORT_MIN = -0.0005    # blocca nuovi SHORT se funding < -0.05% (shorts sovraccaricati = pressione rialzista)
 # Nuovi parametri protezione guadagni (SHORT)
 TRIGGER_BY = "LastPrice"
@@ -104,6 +104,8 @@ MAX_LOSS_CAP_PCT = 0.03   # FIX: era 0.015, cap alzato a 3% per non bloccare SL_
 # >>> regime semplificato: contesto BTC 4h + drawdown giornaliero
 DAILY_DD_CAP_PCT = 0.04         # blocca nuovi ingressi se equity < -4% dal livello di inizio giorno
 _btc_favorable_short = False    # True se BTC 4h in downtrend → contesto favorevole per SHORT
+_btc_uptrend_short = False      # True se BTC 4h in uptrend → blocco totale nuove aperture SHORT
+_btc_daily_down_short = False   # True se BTC daily in downtrend (EMA200 descend + price < ema200)
 _btc_pumping_short = False      # True se BTC 15m sale > +1.5% in 30 min (pump guard)
 _btc_ctx_ts = 0                 # timestamp ultimo aggiornamento contesto BTC
 _daily_start_equity = None
@@ -137,7 +139,7 @@ MIN_CONFLUENCE = 2   # FIX: era 1, richiede almeno 2 indicatori allineati
 ENTRY_TF_VOLATILE = 60  # FIX2: allineato al loop principale (60m) per evitare segnali stantii
 ENTRY_TF_STABLE = 60   # FIX2: allineato al loop principale (60m)
 ENTRY_ADX_VOLATILE = 27       # fisso
-ENTRY_ADX_STABLE = 24         # fisso
+ENTRY_ADX_STABLE = 25         # alzato da 24: riduce entry in trend deboli
 ADX_RELAX_EVENT = 3.0
 RSI_SHORT_THRESHOLD = 46.0
 LIQUIDITY_MIN_VOLUME = 1_000_000
@@ -257,12 +259,37 @@ def is_trending_down_1h(symbol: str, tf: str = "60"):
 
 def _update_btc_context_short():
     """Aggiorna il contesto BTC ogni 3 min.
-    Fix #3: se BTC 24h in positivo forza btc_fav=False anche se 4h downtrend.
-    Fix #1: calcola momentum 15m per rilevare pump improvvisi (pump guard)."""
-    global _btc_favorable_short, _btc_pumping_short, _btc_ctx_ts
+    Bear confirmed: SHORT opera solo quando BTC 4h + Daily ENTRAMBI in downtrend.
+    Fix #3: se BTC 24h in positivo forza btc_fav=False.
+    Fix #1: pump guard 15m.
+    Uptrend guard: blocco totale se 4h uptrend."""
+    global _btc_favorable_short, _btc_uptrend_short, _btc_daily_down_short, _btc_pumping_short, _btc_ctx_ts
     if time.time() - _btc_ctx_ts > 180:
         try:
             _btc_favorable_short = is_trending_down("BTCUSDT", "240")
+            # Bear confirmed: check BTC daily downtrend
+            _btc_daily_down_short = is_trending_down("BTCUSDT", "D")
+            # Uptrend guard: controlla se BTC 4h è in uptrend (EMA200 crescente + prezzo sopra EMA200)
+            try:
+                from ta.trend import EMAIndicator as _EMA
+                _ru = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/kline",
+                                  params={"category": "linear", "symbol": "BTCUSDT",
+                                          "interval": "240", "limit": 220}, timeout=8)
+                _du = _ru.json()
+                if _du.get("retCode") == 0 and _du["result"]["list"]:
+                    import pandas as _pd
+                    _df = _pd.DataFrame(_du["result"]["list"],
+                                        columns=["ts","O","H","L","C","V","T"])
+                    _df["C"] = _pd.to_numeric(_df["C"], errors="coerce")
+                    _ema200 = _EMA(close=_df["C"], window=200).ema_indicator()
+                    _btc_uptrend_short = (
+                        float(_df["C"].iloc[-1]) > float(_ema200.iloc[-1]) and
+                        float(_ema200.iloc[-1]) >= float(_ema200.iloc[-2])
+                    )
+                    if _btc_uptrend_short:
+                        tlog("btc_uptrend", f"[CTX] BTC 4h UPTREND → blocco totale SHORT", 180)
+            except Exception:
+                pass
             # Fix #3: override se BTC 24h già in positivo (rimbalzo in corso)
             try:
                 _r = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/tickers",
@@ -292,7 +319,8 @@ def _update_btc_context_short():
         except Exception:
             pass
         _btc_ctx_ts = time.time()
-        tlog("btc_ctx", f"[CTX] BTC 4h downtrend={_btc_favorable_short} | pumping={_btc_pumping_short}", 180)
+        _bear_confirmed = _btc_favorable_short and _btc_daily_down_short
+        tlog("btc_ctx", f"[CTX] BTC 4h_down={_btc_favorable_short} | daily_down={_btc_daily_down_short} | bear_confirmed={_bear_confirmed} | uptrend={_btc_uptrend_short} | pumping={_btc_pumping_short}", 180)
 
 def _get_oi_change(symbol: str) -> float | None:
     """Restituisce la variazione % di Open Interest nell'ultima ora (intervalTime=1h).
@@ -1673,7 +1701,11 @@ def analyze_asset(symbol: str):
 
         event_triggered = ema_bearish_cross or macd_bearish_cross or rsi_break
         # OI come 4° indicatore: OI crescente con prezzo in calo = nuovi short genuini (non solo liquidazioni)
+        # OI deve essere >= 0 (mercato neutro o in espansione—non in withdrawal): filtro obbligatorio se dato disponibile
         oi_change = _get_oi_change(symbol)
+        if oi_change is not None and oi_change < 0:
+            tlog(f"oi_filter:{symbol}", f"[OI-FILTER][SHORT] {symbol} OI={oi_change:+.2f}% < 0, pressione in calo, skip", 300)
+            return None, None, None
         oi_confirms = oi_change is not None and oi_change > 0.2
         conf_count = [ema_state, macd_state, rsi_state, oi_confirms].count(True)
 
@@ -2054,6 +2086,14 @@ while True:
             if ENABLE_DD_PAUSE and time.time() < _trading_paused_until:
                  tlog(f"paused:{symbol}", f"[PAUSE] trading sospeso (DD cap), skip SHORT {symbol}", 600)
                  continue
+            # BEAR-GATE: SHORT opera solo se BTC 4h + daily ENTRAMBI in downtrend confermato
+            if not (_btc_favorable_short and _btc_daily_down_short):
+                tlog(f"bear_gate:{symbol}", f"[BEAR-GATE][SHORT] bear non confermato (4h={_btc_favorable_short} daily={_btc_daily_down_short}), skip {symbol}", 600)
+                continue
+            # Uptrend guard — BTC 4h in uptrend: blocco totale nuove aperture SHORT
+            if _btc_uptrend_short:
+                tlog(f"uptrend_gate:{symbol}", f"[UPTREND-GATE][SHORT] BTC 4h uptrend, skip entry {symbol}", 600)
+                continue
             # Fix #1: pump guard — BTC sta salendo velocemente, skip nuove aperture SHORT
             if _btc_pumping_short:
                 tlog(f"pump_gate:{symbol}", f"[PUMP-GATE][SHORT] BTC pump attivo, skip entry {symbol}", 300)
@@ -2063,10 +2103,14 @@ while True:
             #     continue
             #     Regime: niente blocco. In BULL verranno già irrigiditi i filtri a monte (analyze_asset).
 
-            # Cooldown: 4h post-loss, 1h post-win
+            # Cooldown: 12h se 2+ loss consecutive, 4h post-loss singola, 1h post-win
             if symbol in last_exit_time:
                 elapsed = time.time() - last_exit_time[symbol]
-                cd_min = COOLDOWN_MINUTES * 4 if last_exit_was_loss.get(symbol) else COOLDOWN_MINUTES
+                if last_exit_was_loss.get(symbol):
+                    consec = recent_losses.get(symbol, 1)
+                    cd_min = COOLDOWN_MINUTES * 12 if consec >= 2 else COOLDOWN_MINUTES * 4  # 12h o 4h
+                else:
+                    cd_min = COOLDOWN_MINUTES
                 if elapsed < cd_min * 60:
                     tlog(f"cooldown:{symbol}", f"⏳ Cooldown {'post-loss' if last_exit_was_loss.get(symbol) else 'post-win'} attivo per {symbol} ({elapsed:.0f}s / {cd_min*60:.0f}s), salto ingresso", 300)
                     continue
@@ -2142,11 +2186,11 @@ while True:
                     if LOG_DEBUG_STRATEGY:
                         log(f"[VOLATILITÀ] {symbol}: ATR/Prezzo elevato ({atr_ratio:.2%}), size -25%.")
 
-            # --- Sizing basato sul rischio (ATR e R) ---
+            # --- Sizing basato sul rischio (ATR 4h e R) ---
             price_now_calc = get_last_price(symbol) or price
-            df = fetch_history(symbol, interval=INTERVAL_MINUTES)
-            if df is None or len(df) < max(ATR_WINDOW+2, 50):
-                tlog(f"no_hist:{symbol}", f"[SKIP] Storico insufficiente per sizing ATR su {symbol}", 600)
+            df = fetch_history(symbol, interval=240)  # ATR su 4h per SL più stabile (meno noise)
+            if df is None or len(df) < max(ATR_WINDOW+2, 20):
+                tlog(f"no_hist:{symbol}", f"[SKIP] Storico 4h insufficiente per sizing ATR su {symbol}", 600)
                 continue
             atr_series = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
             atr_val = float(atr_series.iloc[-1]) if not pd.isna(atr_series.iloc[-1]) else 0.0
@@ -2245,7 +2289,7 @@ while True:
                 "r_dist": r_dist
             })
             add_open(symbol)
-            notify_telegram(f"🟢📉 SHORT aperto per {symbol}\nPrezzo: {price_now:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f} USDT\nSL: {final_sl:.4f}\nTP1: {tp1_price:.4f}")
+            notify_telegram(f"🟢📉 SHORT aperto per {symbol}\nPrezzo: {price_now:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f} USDT\nSL: {final_sl:.4f}\nTP1: {tp1_price:.4f}\nScore: {len([s for s in strategy.split(',') if 'ADX' not in s and s.strip()]) + (1 if (_btc_favorable_short and _btc_daily_down_short) else 0)}/5")
             time.sleep(3)
 
         # 🔴 USCITA SHORT (EXIT) - INSERISCI QUI

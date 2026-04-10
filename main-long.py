@@ -138,6 +138,8 @@ ADX_RELAX_EVENT = 3.0
 RSI_LONG_THRESHOLD = 54.0
 COOLDOWN_MINUTES = 60          # fisso (non usare os.getenv)
 MAX_OPEN_POSITIONS = 4         # massimo posizioni simultanee
+MAX_LARGE_CAP_POSITIONS = 1    # max 1 large cap LONG aperta (BTC/ETH/BNB/SOL fortemente correlate)
+MAX_VOLATILE_LONG = 2          # max 2 asset volatili (>5% 24h) LONG aperti contemporaneamente
 FUNDING_LONG_MAX = 0.0005      # blocca nuovi LONG se funding > +0.05% (longs sovraccarichi = pressione ribassista)
 MAX_CONSEC_LOSSES = 2          # fisso
  
@@ -2036,6 +2038,18 @@ while True:
             if len(open_positions) >= MAX_OPEN_POSITIONS:
                 tlog(f"maxpos", f"[MAX-POS] {len(open_positions)}/{MAX_OPEN_POSITIONS} posizioni aperte, skip {symbol}", 300)
                 continue
+            # Max 1 large cap: BTC/ETH/BNB/SOL sono altamente correlate, evita esposizione multipla
+            if symbol in LARGE_CAPS:
+                large_cap_open = sum(1 for s in open_positions if s in LARGE_CAPS)
+                if large_cap_open >= MAX_LARGE_CAP_POSITIONS:
+                    tlog(f"largecap:{symbol}", f"[LARGE-CAP-GATE][LONG] già {large_cap_open} large cap aperta, skip {symbol}", 300)
+                    continue
+            # Max 2 volatile: evita concentrazione su asset ad alta volatilità correlata
+            if symbol in VOLATILE_ASSETS:
+                volatile_open = sum(1 for s in open_positions if s in VOLATILE_ASSETS)
+                if volatile_open >= MAX_VOLATILE_LONG:
+                    tlog(f"volatile_gate:{symbol}", f"[VOLATILE-GATE][LONG] già {volatile_open}/{MAX_VOLATILE_LONG} volatili aperti, skip {symbol}", 300)
+                    continue
             if symbol in open_positions:
                 if LOG_DEBUG_STRATEGY:
                     tlog(f"inpos:{symbol}", f"⏩ Ignoro apertura LONG: già in posizione su {symbol}", 1800)
@@ -2094,11 +2108,11 @@ while True:
                 except Exception:
                     pass
 
-            # --- Sizing basato sul rischio (ATR e R) ---
+            # --- Sizing basato sul rischio (ATR 4h e R) ---
             price_now_calc = get_last_price(symbol) or price
-            df = fetch_history(symbol, interval=INTERVAL_MINUTES)
-            if df is None or len(df) < max(ATR_WINDOW+2, 50):
-                tlog(f"no_hist:{symbol}", f"[SKIP] Storico insufficiente per sizing ATR su {symbol}", 600)
+            df = fetch_history(symbol, interval=240)  # ATR su 4h per SL più stabile (meno noise)
+            if df is None or len(df) < max(ATR_WINDOW+2, 20):
+                tlog(f"no_hist:{symbol}", f"[SKIP] Storico 4h insufficiente per sizing ATR su {symbol}", 600)
                 continue
             atr_series = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
             atr_val = float(atr_series.iloc[-1]) if not pd.isna(atr_series.iloc[-1]) else 0.0
@@ -2196,7 +2210,7 @@ while True:
                 "r_dist": r_dist
             })
             add_open(symbol)
-            notify_telegram(f"🟢📈 LONG aperto {symbol}\nPrezzo: {price_now:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f}\nSL: {final_sl:.4f}\nTP1: {tp1_price:.4f}")
+            notify_telegram(f"🟢📈 LONG aperto {symbol}\nPrezzo: {price_now:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f}\nSL: {final_sl:.4f}\nTP1: {tp1_price:.4f}\nScore: {len([s for s in strategy.split(',') if 'ADX' not in s and s.strip()]) + (1 if _btc_favorable_long else 0)}/5")
             time.sleep(3)
 
         # EXIT LONG (segnale di uscita strategico)
