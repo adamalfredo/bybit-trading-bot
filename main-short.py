@@ -1684,8 +1684,18 @@ def analyze_asset(symbol: str):
     # BTC favorevole (4h downtrend) → accettiamo solo 4h; altrimenti richiediamo 4h+1h
     trend_ok = down_4h if _btc_favorable_short else (down_4h and down_1h)
 
+    # Breakout-exempt: bypass filtro BTC per coin con crash esplosivo confermato
+    # Condizioni: BTC non favorevole + coin in VOLATILE_ASSETS (>15% loss) + ADX1h > 35 + max 1 exempt aperta
+    _is_breakout_exempt = False
+    if (not _btc_favorable_short and symbol in VOLATILE_ASSETS
+            and adx1h is not None and adx1h > 35):
+        breakout_exempt_open = sum(1 for s in open_positions if position_data.get(s, {}).get("breakout_exempt"))
+        if breakout_exempt_open < 1:
+            _is_breakout_exempt = True
+            log(f"[BREAKOUT-EXEMPT][SHORT] {symbol} bypass BTC filter: adx1h={adx1h:.1f}, VOLATILE, btc_fav=False")
+
     # Filtro trend: obbligatorio quando BTC non è in downtrend (contesto sfavorevole)
-    if not _btc_favorable_short and not trend_ok:
+    if not _btc_favorable_short and not trend_ok and not _is_breakout_exempt:
         tlog(f"trend_short:{symbol}", f"[TREND-FILTER][{symbol}] BTC sfavorevole, trend non idoneo", 600)
         return None, None, None
 
@@ -1696,7 +1706,7 @@ def analyze_asset(symbol: str):
             adx_thresh = ENTRY_ADX_VOLATILE if (symbol in VOLATILE_ASSETS) else ENTRY_ADX_STABLE
             ema_down = (ema200_slope is not None and ema200_slope < 0) or (ema100_slope is not None and ema100_slope < 0)
             strong_trend = trend_ok and (adx1h is not None and adx1h >= adx_thresh) and ema_down
-            if not strong_trend:
+            if not strong_trend and not _is_breakout_exempt:
                 if LOG_DEBUG_STRATEGY:
                     tlog(f"breakout_short:{symbol}", f"[BREAKOUT-FILTER][{symbol}] No breakdown e fallback non soddisfatto → skip", 600)
                 return None, None, None
@@ -1783,9 +1793,12 @@ def analyze_asset(symbol: str):
             required_confluence = MIN_CONFLUENCE + 1
         else:
             required_confluence = MIN_CONFLUENCE
+        # Breakout-exempt: ADX1h > 35 già confermato, riduci requisito confluence di 1
+        if _is_breakout_exempt:
+            required_confluence = max(1, required_confluence - 1)
 
         # Quando BTC non favorevole, richiedi SEMPRE un evento reale (cross/break)
-        if not _btc_favorable_short and not event_triggered:
+        if not _btc_favorable_short and not event_triggered and not _is_breakout_exempt:
             return None, None, None
 
         # ADX richiesto + bonus extra quando BTC non favorevole
@@ -1825,8 +1838,10 @@ def analyze_asset(symbol: str):
             vol_avg20 = vol_series.iloc[-22:-2].mean() if len(vol_series) >= 22 else 0.0
             vol_last = float(vol_series.iloc[-2])
             vol_ratio = vol_last / vol_avg20 if vol_avg20 > 0 else 1.0
-            if vol_ratio < 0.6:
-                tlog(f"vol_low:{symbol}", f"[VOL-FILTER][SHORT] {symbol} volume={vol_ratio:.2f}x media, segnale debole, skip", 300)
+            # Breakout-exempt richiede volume almeno 1.5x media (conferma breakdown genuino)
+            vol_min = 1.5 if _is_breakout_exempt else 0.6
+            if vol_ratio < vol_min:
+                tlog(f"vol_low:{symbol}", f"[VOL-FILTER][SHORT] {symbol} volume={vol_ratio:.2f}x media (min={vol_min:.1f}x), segnale debole, skip", 300)
                 return None, None, None
             # Filtro funding: se shorts sovraccaricati (funding negativo) → pressione rialzista
             if funding_rate is not None and funding_rate < FUNDING_SHORT_MIN:
@@ -1842,6 +1857,8 @@ def analyze_asset(symbol: str):
                 entry_strategies.append(f"Trend Forte({last['adx']:.0f})")
             else:
                 entry_strategies.append("ADX Trend")
+            if _is_breakout_exempt:
+                entry_strategies.append("BREAKOUT-EXEMPT")
             if LOG_DEBUG_STRATEGY:
                 log(f"[ENTRY-SHORT][{symbol}] EVENTO/CONFLUENZA → {entry_strategies}")
             return "entry", ", ".join(entry_strategies), price
@@ -2398,7 +2415,8 @@ while True:
                 "entry_time": time.time(),
                 "trailing_active": False,
                 "p_min": price_now,
-                "r_dist": r_dist
+                "r_dist": r_dist,
+                "breakout_exempt": "BREAKOUT-EXEMPT" in (strategy or "")
             })
             add_open(symbol)
             _daily_trades_opened += 1
