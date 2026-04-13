@@ -368,14 +368,14 @@ def _update_daily_anchor_and_btc_context():
     _update_btc_context_short()
 
 def _send_daily_report():
-    """Invia una volta al giorno (intorno alle 23:00 UTC) il riepilogo su Telegram."""
+    """Invia una volta al giorno (intorno alle 21:00 UTC / 23:00 ora italiana) il riepilogo su Telegram."""
     global _last_report_day, _daily_trades_opened, _daily_trades_closed, _daily_pnl_sum
     now_utc = time.gmtime()
     today = time.strftime("%Y-%m-%d", now_utc)
     if today == _last_report_day:
         return
-    # Invia solo dopo le 23:00 UTC
-    if now_utc.tm_hour < 23:
+    # Invia solo dopo le 21:00 UTC (= 23:00 ora italiana, prima di mezzanotte)
+    if now_utc.tm_hour < 21:
         return
     try:
         equity = _equity_now()
@@ -1183,11 +1183,14 @@ def cancel_all_orders(symbol: str, order_filter: Optional[str] = None) -> bool:
 
 # >>> PATCH: funzioni per impostare lo stopLoss sulla posizione (SHORT) e worker BE
 def set_position_stoploss_short(symbol: str, sl_price: float) -> bool:
+    info = get_instrument_info(symbol)
+    price_step = info.get("price_step", 0.01)
+    stop_str = format_price_bybit(sl_price, price_step)
     body = {
         "category": "linear",
         "symbol": symbol,
-        "stopLoss": f"{sl_price:.8f}",
-        "slTriggerBy": "MarkPrice",   # <<< FIX: allinea al conditional
+        "stopLoss": stop_str,
+        "slTriggerBy": "MarkPrice",
         "positionIdx": SHORT_IDX
     }
     try:
@@ -1195,10 +1198,10 @@ def set_position_stoploss_short(symbol: str, sl_price: float) -> bool:
         data = resp.json()
         ok = data.get("retCode") == 0
         if not ok:
-            tlog(f"sl_pos_err:{symbol}", f"[POS-SL][SHORT] retCode={data.get('retCode')} msg={data.get('retMsg')}", 300)
+            log(f"[POS-SL][SHORT] {symbol} FALLITO retCode={data.get('retCode')} msg={data.get('retMsg')} stopLoss={stop_str}")
         return ok
     except Exception as e:
-        tlog(f"sl_pos_exc:{symbol}", f"[POS-SL][SHORT] exc: {e}", 300)
+        log(f"[POS-SL][SHORT] {symbol} eccezione: {e}")
         return False
 
 def breakeven_lock_worker_short():
@@ -1810,7 +1813,11 @@ def analyze_asset(symbol: str):
             if macd_state: entry_strategies.append(f"MACD Bearish {tf_tag}")
             if rsi_state: entry_strategies.append(f"RSI Bearish {tf_tag}")
             if oi_confirms: entry_strategies.append(f"OI↑{oi_change:+.2f}%")
-            entry_strategies.append("ADX Trend")
+            # ADX forte (>soglia+8) conta come punto score; altrimenti "ADX Trend" viene ignorato
+            if float(last["adx"]) > adx_threshold + 8:
+                entry_strategies.append(f"Trend Forte({last['adx']:.0f})")
+            else:
+                entry_strategies.append("ADX Trend")
             if LOG_DEBUG_STRATEGY:
                 log(f"[ENTRY-SHORT][{symbol}] EVENTO/CONFLUENZA → {entry_strategies}")
             return "entry", ", ".join(entry_strategies), price
@@ -1828,7 +1835,10 @@ def analyze_asset(symbol: str):
             tlog(f"pullback_short:{symbol}",
                  f"[PULLBACK-OVERRIDE][SHORT] {symbol} | rsi1h={rsi1h:.1f} adx1h={adx1h:.1f} ema200_slope={ema200_slope:.4f} → ingresso rimbalzo BEAR",
                  300)
-            return "entry", f"Rimbalzo BEAR RSI{rsi1h:.0f} (1h)", price
+            _rb_parts = [f"Rimbalzo BEAR RSI{rsi1h:.0f} (1h)"]
+            if rsi1h > 72: _rb_parts.append("Overbought Estremo")
+            if adx1h is not None and adx1h > 25: _rb_parts.append(f"Trend Forte({adx1h:.0f})")
+            return "entry", ", ".join(_rb_parts), price
 
         # Segnale uscita (chiudi SHORT se eccesso di compressione)
         cond_exit1 = last["Close"] > last["bb_upper"] and last["rsi"] > 55
@@ -2329,12 +2339,20 @@ while True:
             # APPLICA CAP PERDITA: non oltre MAX_LOSS_CAP_PCT sopra l'entry
             sl_cap = price_now * (1.0 + MAX_LOSS_CAP_PCT)
             final_sl = min(price_now + r_dist, sl_cap)
-            set_position_stoploss_short(symbol, final_sl)
+            ok_pos_sl = set_position_stoploss_short(symbol, final_sl)
             # Backup: piazza anche uno Stop-Market reduceOnly
+            ok_cond_sl = False
             try:
-                place_conditional_sl_short(symbol, final_sl, qty, trigger_by="MarkPrice")
-            except Exception:
-                pass
+                ok_cond_sl = place_conditional_sl_short(symbol, final_sl, qty, trigger_by="MarkPrice")
+            except Exception as e:
+                log(f"[SL-FAIL][SHORT] {symbol} eccezione conditional SL: {e}")
+            if not ok_pos_sl and not ok_cond_sl:
+                log(f"🚨 [SL-FAIL][SHORT] {symbol} NESSUN SL impostato! Entry={price_now:.6f} SL={final_sl:.6f}")
+                notify_telegram(f"🚨 SL NON IMPOSTATO {symbol} SHORT!\nEntry={price_now:.4f} SL target={final_sl:.4f}\n⚠️ IMPOSTA MANUALMENTE!")
+            elif not ok_pos_sl:
+                log(f"[SL-WARN][SHORT] {symbol} position-SL fallito, ma conditional SL OK")
+            elif not ok_cond_sl:
+                log(f"[SL-WARN][SHORT] {symbol} conditional SL fallito, ma position-SL OK")
             actual_cost = qty * price_now
             log(f"🟢 SHORT aperto per {symbol}. Investito effettivo: {actual_cost:.2f} USDT")
 
