@@ -1211,14 +1211,17 @@ def breakeven_lock_worker_long():
             if _btc_dumping_long and price_now is not None and price_now > entry_price:
                 be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
                 qty_live = get_open_long_qty(symbol)
+                ok_csl = False
+                ok_psl = False
                 if qty_live and qty_live > 0:
-                    place_conditional_sl_long(symbol, be_price, qty_live, trigger_by="MarkPrice")
-                    set_position_stoploss_long(symbol, be_price)
-                entry["be_locked"] = True
-                entry["be_price"] = be_price
-                with _state_lock:
-                    position_data[symbol] = entry
-                tlog(f"dump_be:{symbol}", f"[DUMP-BE][LONG] {symbol} SL→BE {be_price:.6f} (BTC dump)", 60)
+                    ok_csl = place_conditional_sl_long(symbol, be_price, qty_live, trigger_by="MarkPrice")
+                    ok_psl = set_position_stoploss_long(symbol, be_price)
+                if ok_csl or ok_psl:
+                    entry["be_locked"] = True
+                    entry["be_price"] = be_price
+                    with _state_lock:
+                        position_data[symbol] = entry
+                    tlog(f"dump_be:{symbol}", f"[DUMP-BE][LONG] {symbol} SL→BE {be_price:.6f} (BTC dump)", 60)
                 try:
                     notify_telegram(f"⚠️ DUMP-BE LONG {symbol}: SL→BE {be_price:.6f} (BTC -1.5%/30m)")
                 except Exception:
@@ -1232,16 +1235,18 @@ def breakeven_lock_worker_long():
             if cond_be:
                 be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
                 qty_live = get_open_long_qty(symbol)
+                ok_csl = False
+                ok_psl = False
                 if qty_live and qty_live > 0:
                     # Piazza sia trading-stop di posizione sia uno stop-market di backup
-                    place_conditional_sl_long(symbol, be_price, qty_live, trigger_by="MarkPrice")
-                    set_position_stoploss_long(symbol, be_price)
-
-                entry["be_locked"] = True
-                entry["be_price"] = be_price
-                with _state_lock:
-                    position_data[symbol] = entry
-                tlog(f"be_lock:{symbol}", f"[BE-LOCK][LONG] {symbol} SL→BE {be_price:.6f}", 60)
+                    ok_csl = place_conditional_sl_long(symbol, be_price, qty_live, trigger_by="MarkPrice")
+                    ok_psl = set_position_stoploss_long(symbol, be_price)
+                if ok_csl or ok_psl:
+                    entry["be_locked"] = True
+                    entry["be_price"] = be_price
+                    with _state_lock:
+                        position_data[symbol] = entry
+                    tlog(f"be_lock:{symbol}", f"[BE-LOCK][LONG] {symbol} SL→BE {be_price:.6f}", 60)
         time.sleep(2)
 
 def _pick_floor_roi_long(mfe_roi: float) -> Optional[float]:
@@ -1411,14 +1416,12 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
             data = {}
         if data.get("retCode") == 0:
             return True
-        tlog(
-            f"sl_create_err:{symbol}",
-            f"[SL-PLACE][LONG] retCode={data.get('retCode')} msg={data.get('retMsg')} resp={json.dumps(data)} body={body}",
-            300,
-        )
+        log(f"[SL-PLACE][LONG] {symbol} FALLITO dopo cancel! retCode={data.get('retCode')} msg={data.get('retMsg')} triggerPrice={stop_str}")
+        notify_telegram(f"🚨 SL conditional FALLITO {symbol} LONG!\ntriggerPrice={stop_str}\nretCode={data.get('retCode')} {data.get('retMsg')}\n⚠️ VERIFICA MANUALE")
         return False
     except Exception as e:
-        tlog(f"sl_create_exc:{symbol}", f"[SL-PLACE][LONG] eccezione: {e}", 300)
+        log(f"[SL-PLACE][LONG] {symbol} eccezione: {e}")
+        notify_telegram(f"🚨 SL conditional ECCEZIONE {symbol} LONG!\n{e}\n⚠️ VERIFICA MANUALE")
         return False
 
 def place_takeprofit_long(symbol: str, tp_price: float, qty: float) -> tuple[bool, str]:

@@ -1249,13 +1249,16 @@ def breakeven_lock_worker_short():
             if _btc_pumping_short and price_now is not None and price_now < entry_price:
                 be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
                 qty_live = get_open_short_qty(symbol)
+                ok_csl = False
+                ok_psl = False
                 if qty_live and qty_live > 0:
-                    place_conditional_sl_short(symbol, be_price, qty_live, trigger_by="MarkPrice")
-                    set_position_stoploss_short(symbol, be_price)
-                entry["be_locked"] = True
-                entry["be_price"] = be_price
-                set_position(symbol, entry)
-                tlog(f"pump_be:{symbol}", f"[PUMP-BE][SHORT] {symbol} SL→BE {be_price:.6f} (BTC pump)", 60)
+                    ok_csl = place_conditional_sl_short(symbol, be_price, qty_live, trigger_by="MarkPrice")
+                    ok_psl = set_position_stoploss_short(symbol, be_price)
+                if ok_csl or ok_psl:
+                    entry["be_locked"] = True
+                    entry["be_price"] = be_price
+                    set_position(symbol, entry)
+                    tlog(f"pump_be:{symbol}", f"[PUMP-BE][SHORT] {symbol} SL→BE {be_price:.6f} (BTC pump)", 60)
                 try:
                     notify_telegram(f"⚠️ PUMP-BE SHORT {symbol}: SL→BE {be_price:.6f} (BTC +1.5%/30m)")
                 except Exception:
@@ -1272,15 +1275,17 @@ def breakeven_lock_worker_short():
                 # Buffer negativo: BE leggermente sotto l'entry per coprire fee/slippage
                 be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
                 qty_live = get_open_short_qty(symbol)
+                ok_csl = False
+                ok_psl = False
                 if qty_live and qty_live > 0:
                     # Piazza sia trading-stop di posizione sia uno stop-market di backup
-                    place_conditional_sl_short(symbol, be_price, qty_live, trigger_by="MarkPrice")
-                    set_position_stoploss_short(symbol, be_price)
-
-                entry["be_locked"] = True
-                entry["be_price"] = be_price
-                set_position(symbol, entry)
-                tlog(f"be_lock:{symbol}", f"[BE-LOCK][SHORT] {symbol} SL→BE {be_price:.6f}", 60)
+                    ok_csl = place_conditional_sl_short(symbol, be_price, qty_live, trigger_by="MarkPrice")
+                    ok_psl = set_position_stoploss_short(symbol, be_price)
+                if ok_csl or ok_psl:
+                    entry["be_locked"] = True
+                    entry["be_price"] = be_price
+                    set_position(symbol, entry)
+                    tlog(f"be_lock:{symbol}", f"[BE-LOCK][SHORT] {symbol} SL→BE {be_price:.6f}", 60)
         time.sleep(2)
 
 def _pick_floor_roi_short(mfe_roi: float) -> Optional[float]:
@@ -1444,7 +1449,7 @@ def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigg
             "reduceOnly": True,
             "positionIdx": SHORT_IDX,
             "triggerBy": trigger_by,
-            "triggerPrice": stop_str,                              # <<< sostituito
+            "triggerPrice": stop_str,
             "triggerDirection": 1,
             "closeOnTrigger": True
         }
@@ -1457,10 +1462,12 @@ def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigg
             data = {}
         if data.get("retCode") == 0:
             return True
-        tlog(f"sl_create_err:{symbol}", f"[SL-PLACE][SHORT] retCode={data.get('retCode')} msg={data.get('retMsg')} resp={json.dumps(data)} body={body}", 300)
+        log(f"[SL-PLACE][SHORT] {symbol} FALLITO dopo cancel! retCode={data.get('retCode')} msg={data.get('retMsg')} triggerPrice={stop_str}")
+        notify_telegram(f"🚨 SL conditional FALLITO {symbol} SHORT!\ntriggerPrice={stop_str}\nretCode={data.get('retCode')} {data.get('retMsg')}\n⚠️ VERIFICA MANUALE")
         return False
     except Exception as e:
-        tlog(f"sl_create_exc:{symbol}", f"[SL-PLACE][SHORT] eccezione: {e}", 300)
+        log(f"[SL-PLACE][SHORT] {symbol} eccezione: {e}")
+        notify_telegram(f"🚨 SL conditional ECCEZIONE {symbol} SHORT!\n{e}\n⚠️ VERIFICA MANUALE")
         return False
 
 def place_takeprofit_short(symbol: str, tp_price: float, qty: float) -> tuple[bool, str]:
