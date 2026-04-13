@@ -493,7 +493,24 @@ def update_assets(top_n=12):
             reverse=True
         )
 
-        top = scored[:top_n]
+        # -- BREAKOUT SLOTS: 2 slot garantiti per i top loser del momento --
+        # Cattura coin con forte ribasso in atto (-15%→-60%) attualmente penalizzate
+        # dallo score 0.05 e quindi mai selezionate dalla formula normale.
+        BREAKOUT_SLOTS    = 2
+        BREAKOUT_LOSS_MIN = 15.0
+        BREAKOUT_LOSS_MAX = 60.0
+        top_base         = scored[:top_n - BREAKOUT_SLOTS]
+        already_selected = {c[0] for c in top_base}
+        breakout_cands   = sorted(
+            [c for c in candidates
+             if -BREAKOUT_LOSS_MAX <= c[2] <= -BREAKOUT_LOSS_MIN
+             and c[0] not in already_selected],
+            key=lambda c: c[2]
+        )[:BREAKOUT_SLOTS]
+        top = top_base + breakout_cands
+        if breakout_cands:
+            log(f"[BREAKOUT-SLOTS][SHORT] Aggiunti: {[(c[0], f'{c[2]:+.1f}%') for c in breakout_cands]}")
+
         ASSETS = [c[0] for c in top]
         # VOLATILE = asset che si muovono più del 5% in 24h (in abs) → ADX threshold 27
         # LESS_VOLATILE = gli altri → ADX threshold 24
