@@ -216,7 +216,7 @@ def is_trending_up(symbol: str, tf: str = "240"):
         data = resp.json()
         if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
             return False
-        raw = data["result"]["list"]
+        raw = list(reversed(data["result"]["list"]))  # FIX: Bybit ritorna newest-first; invertiamo per avere oldest-first
         df = pd.DataFrame(raw, columns=["timestamp","Open","High","Low","Close","Volume","turnover"])
         df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
         df.dropna(subset=["Close"], inplace=True)
@@ -238,7 +238,7 @@ def is_trending_up_1h(symbol: str, tf: str = "60"):
         data = resp.json()
         if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
             return False
-        raw = data["result"]["list"]
+        raw = list(reversed(data["result"]["list"]))  # FIX: Bybit ritorna newest-first; invertiamo per avere oldest-first
         df = pd.DataFrame(raw, columns=["timestamp","Open","High","Low","Close","Volume","turnover"])
         df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
         df.dropna(subset=["Close"], inplace=True)
@@ -1513,8 +1513,7 @@ def fetch_history(symbol: str, interval=INTERVAL_MINUTES, limit=400):
         if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
             log(f"[BYBIT] Errore fetch_history {symbol}: {data}")
             return None
-        klines = data["result"]["list"]
-        # Bybit restituisce i dati dal più vecchio al più recente
+        klines = list(reversed(data["result"]["list"]))  # FIX: Bybit ritorna newest-first; invertiamo per avere oldest-first
         df = pd.DataFrame(klines, columns=[
             "timestamp", "Open", "High", "Low", "Close", "Volume", "Turnover"
         ])
