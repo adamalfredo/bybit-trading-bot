@@ -335,8 +335,8 @@ def _send_daily_report():
     today = time.strftime("%Y-%m-%d", now_utc)
     if today == _last_report_day:
         return
-    # Invia solo dopo le 21:00 UTC (= 23:00 ora italiana, prima di mezzanotte)
-    if now_utc.tm_hour < 21:
+    # Invia solo dopo le 21:55 UTC (= 23:55 ora italiana, a fine giornata)
+    if now_utc.tm_hour < 21 or (now_utc.tm_hour == 21 and now_utc.tm_minute < 55):
         return
     try:
         equity = _equity_now()
@@ -1698,8 +1698,14 @@ def analyze_asset(symbol: str):
         tf_tag = f"({tf_minutes}m)"
 
         # Filtro estensione: evita LONG troppo sopra EMA20 + k*ATR
+        # Per breakout-exempt k è rilassato (3.5x) perché la coin è PER DEFINIZIONE estesa
         ema20v = float(last["ema20"]); atrv = float(last["atr"])
-        k = 1.8 if symbol in LARGE_CAPS else 1.5
+        if _is_breakout_exempt:
+            k = 3.5
+        elif symbol in LARGE_CAPS:
+            k = 1.8
+        else:
+            k = 1.5
         ext_cap = ema20v + k * atrv
         if float(last["Close"]) > ext_cap:
             if LOG_DEBUG_STRATEGY:
