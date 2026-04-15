@@ -375,7 +375,7 @@ def _send_daily_report():
     if today == _last_report_day:
         return
     # Invia solo dopo le 21:55 UTC (= 23:55 ora italiana, a fine giornata)
-    if now_utc.tm_hour < 21 or (now_utc.tm_hour == 21 and now_utc.tm_minute < 55):
+    if now_utc.tm_hour < 21 or (now_utc.tm_hour == 21 and now_utc.tm_min < 55):
         return
     try:
         equity = _equity_now()
@@ -2546,5 +2546,8 @@ while True:
 
     # Sicurezza: attesa tra i cicli principali
     # time.sleep(INTERVAL_MINUTES * 60)
-    _send_daily_report()
+    try:
+        _send_daily_report()
+    except Exception as _rep_exc:
+        log(f"[DAILY-REPORT][ERRORE LOOP] {_rep_exc}")
     time.sleep(180)  # analizza ogni 3 minuti per ridurre carico API
