@@ -200,7 +200,11 @@ def discard_open(symbol: str) -> None:
 STABLECOIN_BLACKLIST = [
     "USDCUSDT", "USDEUSDT", "TUSDUSDT", "USDPUSDT", "BUSDUSDT", "FDUSDUSDT", "DAIUSDT", "EURUSDT", "USDTUSDT"
 ]
-EXCLUSION_LIST = ["FUSDT", "YBUSDT", "ZBTUSDT", "RECALLUSDT", "XPLUSDT", "BRETTUSDT", "STABLEUSDT"]
+EXCLUSION_LIST = [
+    "FUSDT", "YBUSDT", "ZBTUSDT", "RECALLUSDT", "XPLUSDT", "BRETTUSDT", "STABLEUSDT",
+    # Commodity / metalli: seguono oro/argento, non crypto → indicatori 60m inutili su questi asset
+    "PAXGUSDT", "XAUTUSDT", "XAUUSDT", "XAGUSDT",
+]
 
 def is_trending_down(symbol: str, tf: str = "240"):
     """
@@ -441,13 +445,16 @@ def update_assets(top_n=12):
         btc_pct = float(_btc_t.get("price24hPcnt", 0)) * 100 if _btc_t else 0.0
 
         # Pool: tutti i linear USDT liquidi, escluse blacklist
+        # Token leveraged da escludere (pattern sul suffisso prima di USDT)
+        _LEV_SUFFIXES = ("3L", "3S", "2L", "2S", "BULL", "BEAR")
         pool = [
             t for t in tickers
             if t["symbol"].endswith("USDT")
             and float(t.get("turnover24h", 0)) >= LINEAR_MIN_TURNOVER
-            and abs(float(t.get("fundingRate", 0))) < 0.003  # esclude asset con funding anomalo (manipolazione)
+            and float(t.get("fundingRate", 0)) > -0.0020  # SHORT: funding negativo alto = troppi shorts già dentro, rischio squeeze
             and t["symbol"] not in STABLECOIN_BLACKLIST
             and t["symbol"] not in EXCLUSION_LIST
+            and not t["symbol"][:-4].endswith(_LEV_SUFFIXES)  # esclude token leveraged (3L/3S/BULL/BEAR)
         ]
 
         if not pool:
@@ -504,6 +511,7 @@ def update_assets(top_n=12):
         breakout_cands   = sorted(
             [c for c in candidates
              if -BREAKOUT_LOSS_MAX <= c[2] <= -BREAKOUT_LOSS_MIN
+             and c[1] >= 50_000_000   # breakout richiedono liquidità elevata per evitare dump&pump micro-cap
              and c[0] not in already_selected],
             key=lambda c: c[2]
         )[:BREAKOUT_SLOTS]
