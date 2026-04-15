@@ -99,7 +99,7 @@ FLOOR_TRIGGER_BY = "MarkPrice"     # usa Mark per coerenza con SL
 # >>> PATCH: parametri breakeven lock (SHORT)
 BREAKEVEN_LOCK_PCT = 0.025     # FIX2: era 0.015, attiva BE al -2.5% di prezzo (più respiro prima del lock)
 BREAKEVEN_BUFFER   = -0.012   # FIX2: era -0.006, buffer più largo per evitare noise-stop su BE
-MAX_LOSS_CAP_PCT = 0.03   # FIX: era 0.015, cap alzato a 3% per non bloccare SL_ATR_MULT=2.0
+MAX_LOSS_CAP_PCT = 0.08   # FIX2: alzato a 8% per non sovrascrivere SL_ATR_MULT=2.0 su coin ad alta ATR (meme coin ATR/prezzo tipicamente 4-8%)
 
 # >>> regime semplificato: contesto BTC 4h + drawdown giornaliero
 DAILY_DD_CAP_PCT = 0.04         # blocca nuovi ingressi se equity < -4% dal livello di inizio giorno
@@ -156,7 +156,7 @@ LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 RISK_PCT = float(os.getenv("RISK_PCT", "0.0075"))   # 0.75% equity per trade
 SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "2.0"))   # FIX: era 1.4, SL più largo per ridurre noise-stop
 TP1_R = float(os.getenv("TP1_R", "2.5"))             # FIX: era 1.0, R:R almeno 2.5:1
-TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.5"))  # 50% posizione al primo TP
+TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.65"))  # OPT: alzato da 0.50 a 0.65 — incassa più profitto al TP1, migliora avg win
 BE_AT_R = float(os.getenv("BE_AT_R", "1.0"))
 TRAIL_START_R = float(os.getenv("TRAIL_START_R", "0.5"))  # FIX: abbassato da 1.5 a 0.5 per attivazione trailing prima
 TRAIL_ATR_MULT = float(os.getenv("TRAIL_ATR_MULT", "1.3"))
@@ -204,6 +204,9 @@ EXCLUSION_LIST = [
     "FUSDT", "YBUSDT", "ZBTUSDT", "RECALLUSDT", "XPLUSDT", "BRETTUSDT", "STABLEUSDT",
     # Commodity / metalli: seguono oro/argento, non crypto → indicatori 60m inutili su questi asset
     "PAXGUSDT", "XAUTUSDT", "XAUUSDT", "XAGUSDT",
+    # Blacklist performance: peggior asset per PnL storico (mese corrente)
+    "BTCUSDT",    # notional enorme per ogni SL hit, risultati sistematicamente negativi
+    "LABUSDT",   # -1.05 USDT storico, entrate durante crash-loop
 ]
 
 def is_trending_down(symbol: str, tf: str = "240"):
@@ -505,7 +508,7 @@ def update_assets(top_n=12):
         # dallo score 0.05 e quindi mai selezionate dalla formula normale.
         BREAKOUT_SLOTS    = 2
         BREAKOUT_LOSS_MIN = 15.0
-        BREAKOUT_LOSS_MAX = 60.0
+        BREAKOUT_LOSS_MAX = 25.0   # OPT: tagliato da 60% a 25% per evitare dump già esauriti (-40%+ = momentum terminale)
         top_base         = scored[:top_n - BREAKOUT_SLOTS]
         already_selected = {c[0] for c in top_base}
         breakout_cands   = sorted(
