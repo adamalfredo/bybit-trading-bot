@@ -103,12 +103,17 @@ MAX_LOSS_CAP_PCT = 0.08   # FIX2: alzato a 8% per non sovrascrivere SL_ATR_MULT=
 
 # >>> regime semplificato: contesto BTC 4h + drawdown giornaliero
 DAILY_DD_CAP_PCT = 0.04         # blocca nuovi ingressi se equity < -4% dal livello di inizio giorno
+WEEKLY_DD_CAP_PCT = float(os.getenv("WEEKLY_DD_CAP_PCT", "0.08"))  # Gap3: blocca nuovi ingressi se equity < -8% rispetto a 7gg fa
 _btc_favorable_short = False    # True se BTC 4h in downtrend → contesto favorevole per SHORT
+_btc_favorable_short_prev = False  # Gap1: stato precedente per rilevare transizione True→False
 _btc_uptrend_short = False      # True se BTC 4h in uptrend → blocco totale nuove aperture SHORT
 _btc_daily_down_short = False   # True se BTC daily in downtrend (EMA200 descend + price < ema200)
 _btc_pumping_short = False      # True se BTC 15m sale > +1.5% in 30 min (pump guard)
 _btc_ctx_ts = 0                 # timestamp ultimo aggiornamento contesto BTC
 _daily_start_equity = None
+_weekly_start_equity: float | None = None   # Gap3: equity snapshot di 7gg fa
+_weekly_anchor_ts: float = 0.0              # Gap3: timestamp ultimo aggiornamento settimanale
+_weekly_protection_active: bool = False     # Gap3: True = nessun nuovo ingresso SHORT
 _trading_paused_until = 0
 # Report giornaliero
 _daily_trades_opened: int = 0
@@ -269,13 +274,95 @@ def is_trending_down_1h(symbol: str, tf: str = "60"):
     except Exception:
         return False
 
+def _on_regime_bullish_short():
+    """
+    Gap1 — Chiamata quando btc_fav transita True→False per SHORT (bear regime finisce).
+    Per ogni posizione SHORT aperta senza ratchet attivo, sposta lo SL al breakeven
+    per evitare che posizioni aperte in un regime che si è girato portino perdite.
+    BREAKEVEN_BUFFER è negativo per SHORT (BE = entry * (1 + BREAKEVEN_BUFFER) = leggermente sotto entry).
+    """
+    log("[REGIME-CHANGE][SHORT] btc_fav True→False: stringo SL delle posizioni SHORT non protette → BE")
+    notify_telegram("⚠️ [REGIME-CHANGE] BTC perde il downtrend: sposto SL a breakeven sulle posizioni SHORT senza protezione")
+    for symbol in list(open_positions):
+        try:
+            entry = position_data.get(symbol)
+            if not entry:
+                continue
+            # Già protette: be_locked o ratchet attivo (floor_roi impostato)
+            if entry.get("be_locked") or entry.get("floor_roi") is not None:
+                continue
+            entry_price = entry.get("entry_price")
+            if not entry_price:
+                continue
+            price_now = get_last_price(symbol)
+            if not price_now:
+                continue
+            # Solo posizioni in profitto (SHORT: price_now < entry_price = profitto)
+            if price_now >= float(entry_price):
+                log(f"[REGIME-CHANGE][SHORT] {symbol} già in perdita, non modifico SL")
+                continue
+            be_price = float(entry_price) * (1.0 + BREAKEVEN_BUFFER)  # BREAKEVEN_BUFFER negativo
+            qty_live = get_open_short_qty(symbol)
+            if qty_live and qty_live > 0:
+                ok_csl = place_conditional_sl_short(symbol, be_price, qty_live, trigger_by="MarkPrice")
+                ok_psl = set_position_stoploss_short(symbol, be_price)
+                if ok_csl or ok_psl:
+                    entry["be_locked"] = True
+                    entry["be_price"] = be_price
+                    set_position(symbol, entry)
+                    log(f"[REGIME-CHANGE][SHORT] {symbol} SL→BE {be_price:.6f} (entry={entry_price:.6f})")
+        except Exception as _e:
+            log(f"[REGIME-CHANGE][SHORT] {symbol} errore: {_e}")
+
+
+def _check_weekly_dd_short(portfolio_value: float) -> bool:
+    """
+    Gap3 — Verifica drawdown settimanale per SHORT.
+    Aggiorna lo snapshot settimanale ogni 7 giorni (168h).
+    Ritorna True se il weekly DD supera WEEKLY_DD_CAP_PCT → blocca nuovi ingressi.
+    Con protezione attiva: si disattiva quando l'equity recupera il 50% della perdita.
+    """
+    global _weekly_start_equity, _weekly_anchor_ts, _weekly_protection_active
+    now = time.time()
+    # Inizializza snapshot se mai impostato
+    if _weekly_start_equity is None or _weekly_anchor_ts == 0.0:
+        _weekly_start_equity = portfolio_value
+        _weekly_anchor_ts = now
+        return False
+    # Aggiorna snapshot ogni 7 giorni
+    if now - _weekly_anchor_ts >= 7 * 24 * 3600:
+        _weekly_start_equity = portfolio_value
+        _weekly_anchor_ts = now
+        _weekly_protection_active = False
+        log(f"[WEEKLY-DD] Snapshot aggiornato: equity={portfolio_value:.2f} USDT")
+        return False
+    # Calcola drawdown settimanale
+    weekly_dd = (portfolio_value - _weekly_start_equity) / max(1e-9, _weekly_start_equity)
+    if weekly_dd < -WEEKLY_DD_CAP_PCT:
+        if not _weekly_protection_active:
+            _weekly_protection_active = True
+            log(f"[WEEKLY-DD] ⛔ DD settimanale {-weekly_dd*100:.1f}% > cap {WEEKLY_DD_CAP_PCT*100:.0f}% → protezione attiva")
+            notify_telegram(f"⛔ [WEEKLY-DD] Drawdown settimanale {-weekly_dd*100:.1f}% supera cap {WEEKLY_DD_CAP_PCT*100:.0f}%\nNessun nuovo SHORT fino a recupero parziale")
+        return True
+    # Disattiva protezione se recupera ≥50% della perdita
+    if _weekly_protection_active:
+        loss = _weekly_start_equity * WEEKLY_DD_CAP_PCT
+        recovered = portfolio_value - (_weekly_start_equity * (1.0 - WEEKLY_DD_CAP_PCT))
+        if recovered >= loss * 0.5:
+            _weekly_protection_active = False
+            log(f"[WEEKLY-DD] ✅ Recupero sufficiente, protezione disattivata. Equity={portfolio_value:.2f}")
+            notify_telegram(f"✅ [WEEKLY-DD] Recupero raggiunto, nuovi SHORT abilitati")
+    return _weekly_protection_active
+
+
 def _update_btc_context_short():
     """Aggiorna il contesto BTC ogni 3 min.
     Bear confirmed: SHORT opera solo quando BTC 4h + Daily ENTRAMBI in downtrend.
     Fix #3: se BTC 24h in positivo forza btc_fav=False.
     Fix #1: pump guard 15m.
-    Uptrend guard: blocco totale se 4h uptrend."""
-    global _btc_favorable_short, _btc_uptrend_short, _btc_daily_down_short, _btc_pumping_short, _btc_ctx_ts
+    Uptrend guard: blocco totale se 4h uptrend.
+    Gap1: rileva transizione True→False e attiva regime change handler."""
+    global _btc_favorable_short, _btc_favorable_short_prev, _btc_uptrend_short, _btc_daily_down_short, _btc_pumping_short, _btc_ctx_ts
     if time.time() - _btc_ctx_ts > 180:
         try:
             _btc_favorable_short = is_trending_down("BTCUSDT", "240")
@@ -333,6 +420,13 @@ def _update_btc_context_short():
         _btc_ctx_ts = time.time()
         _bear_confirmed = _btc_favorable_short and _btc_daily_down_short
         tlog("btc_ctx", f"[CTX] BTC 4h_down={_btc_favorable_short} | daily_down={_btc_daily_down_short} | bear_confirmed={_bear_confirmed} | uptrend={_btc_uptrend_short} | pumping={_btc_pumping_short}", 180)
+        # Gap1: transizione bear→bull → stringi SL posizioni SHORT non protette
+        if _btc_favorable_short_prev and not _btc_favorable_short and open_positions:
+            try:
+                _on_regime_bullish_short()
+            except Exception as _re:
+                log(f"[REGIME-CHANGE][SHORT] errore handler: {_re}")
+        _btc_favorable_short_prev = _btc_favorable_short
 
 def _get_oi_change(symbol: str) -> float | None:
     """Restituisce la variazione % di Open Interest nell'ultima ora (intervalTime=1h).
@@ -2178,6 +2272,10 @@ while True:
             RISK_THROTTLE_LEVEL = 2 if draw > DAILY_DD_CAP_PCT * 2 else (1 if draw > DAILY_DD_CAP_PCT else 0)
             if RISK_THROTTLE_LEVEL > 0:
                 tlog("dd_throttle", f"[THROTTLE] DD={draw*100:.2f}% → livello={RISK_THROTTLE_LEVEL}", 600)
+    # Gap3: weekly drawdown check
+    _weekly_block = _check_weekly_dd_short(portfolio_value)
+    if _weekly_block:
+        tlog("weekly_dd", f"[WEEKLY-DD] ⛔ Protezione settimanale attiva, skip nuovi SHORT", 600)
 
     # sync_positions_from_wallet()  # evita di resettare position_data/trailing ad ogni ciclo
     portfolio_value, usdt_balance, coin_values = get_portfolio_value()
@@ -2223,6 +2321,10 @@ while True:
             if ENABLE_DD_PAUSE and time.time() < _trading_paused_until:
                  tlog(f"paused:{symbol}", f"[PAUSE] trading sospeso (DD cap), skip SHORT {symbol}", 600)
                  continue
+            # Gap3: weekly DD cap gate
+            if _weekly_block:
+                tlog(f"weekly_block:{symbol}", f"[WEEKLY-DD] protezione settimanale attiva, skip SHORT {symbol}", 600)
+                continue
             # BEAR-GATE: SHORT opera solo se BTC 4h + daily ENTRAMBI in downtrend confermato
             if not (_btc_favorable_short and _btc_daily_down_short):
                 tlog(f"bear_gate:{symbol}", f"[BEAR-GATE][SHORT] bear non confermato (4h={_btc_favorable_short} daily={_btc_daily_down_short}), skip {symbol}", 600)

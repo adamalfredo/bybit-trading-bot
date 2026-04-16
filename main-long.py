@@ -98,10 +98,15 @@ MAX_LOSS_CAP_PCT = 0.08   # FIX2: alzato a 8% per non sovrascrivere SL_ATR_MULT=
 
 # >>> NEW: regime + drawdown giornaliero (LONG)
 DAILY_DD_CAP_PCT = 0.04
+WEEKLY_DD_CAP_PCT = float(os.getenv("WEEKLY_DD_CAP_PCT", "0.08"))  # Gap3: blocca nuovi ingressi se equity < -8% rispetto a 7gg fa
 _btc_favorable_long = False    # True se BTC 4h in uptrend → contesto favorevole per LONG
+_btc_favorable_long_prev = False  # Gap1: stato precedente per rilevare transizione True→False
 _btc_dumping_long = False      # True se BTC 15m scende > -1.5% in 30 min (dump guard)
 _btc_ctx_ts = 0
 _daily_start_equity = None
+_weekly_start_equity: float | None = None   # Gap3: equity snapshot di 7gg fa
+_weekly_anchor_ts: float = 0.0              # Gap3: timestamp ultimo aggiornamento settimanale
+_weekly_protection_active: bool = False     # Gap3: True = nessun nuovo ingresso LONG
 _trading_paused_until = 0
 # Report giornaliero
 _daily_trades_opened: int = 0
@@ -256,12 +261,95 @@ def is_trending_up_1h(symbol: str, tf: str = "60"):
     except Exception:
         return False
 
+def _on_regime_bearish_long():
+    """
+    Gap1 — Chiamata quando btc_fav transita True→False.
+    Per ogni posizione aperta senza ratchet attivo, sposta lo SL al breakeven
+    in modo da non lasciare perdite aperte in un mercato che si è girato.
+    Le posizioni che hanno già ratchet/BE attivo vengono ignorate (già protette).
+    """
+    log("[REGIME-CHANGE][LONG] btc_fav True→False: stringo SL delle posizioni non protette → BE")
+    notify_telegram("⚠️ [REGIME-CHANGE] BTC ha perso il trend: sposto SL a breakeven sulle posizioni LONG senza protezione")
+    for symbol in list(open_positions):
+        try:
+            entry = position_data.get(symbol)
+            if not entry:
+                continue
+            # Già protette: be_locked o ratchet attivo (floor_roi impostato)
+            if entry.get("be_locked") or entry.get("floor_roi") is not None:
+                continue
+            entry_price = entry.get("entry_price")
+            if not entry_price:
+                continue
+            price_now = get_last_price(symbol)
+            if not price_now:
+                continue
+            # Solo posizioni in profitto: non peggiorare lo SL di posizioni già in perdita
+            if price_now <= float(entry_price):
+                log(f"[REGIME-CHANGE][LONG] {symbol} già in perdita, non modifico SL")
+                continue
+            be_price = float(entry_price) * (1.0 + BREAKEVEN_BUFFER)
+            qty_live = get_open_long_qty(symbol)
+            if qty_live and qty_live > 0:
+                ok_csl = place_conditional_sl_long(symbol, be_price, qty_live, trigger_by="MarkPrice")
+                ok_psl = set_position_stoploss_long(symbol, be_price)
+                if ok_csl or ok_psl:
+                    entry["be_locked"] = True
+                    entry["be_price"] = be_price
+                    set_position(symbol, entry)
+                    log(f"[REGIME-CHANGE][LONG] {symbol} SL→BE {be_price:.6f} (entry={entry_price:.6f})")
+        except Exception as _e:
+            log(f"[REGIME-CHANGE][LONG] {symbol} errore: {_e}")
+
+
+def _check_weekly_dd_long(portfolio_value: float) -> bool:
+    """
+    Gap3 — Verifica drawdown settimanale.
+    Aggiorna lo snapshot settimanale ogni 7 giorni (168h).
+    Ritorna True se il weekly DD supera WEEKLY_DD_CAP_PCT → blocca nuovi ingressi.
+    Con protezione attiva: si disattiva quando l'equity recupera il 50% della perdita.
+    """
+    global _weekly_start_equity, _weekly_anchor_ts, _weekly_protection_active
+    now = time.time()
+    # Inizializza snapshot se mai impostato
+    if _weekly_start_equity is None or _weekly_anchor_ts == 0.0:
+        _weekly_start_equity = portfolio_value
+        _weekly_anchor_ts = now
+        return False
+    # Aggiorna snapshot ogni 7 giorni
+    if now - _weekly_anchor_ts >= 7 * 24 * 3600:
+        _weekly_start_equity = portfolio_value
+        _weekly_anchor_ts = now
+        _weekly_protection_active = False
+        log(f"[WEEKLY-DD] Snapshot aggiornato: equity={portfolio_value:.2f} USDT")
+        return False
+    # Calcola drawdown settimanale
+    weekly_dd = (portfolio_value - _weekly_start_equity) / max(1e-9, _weekly_start_equity)
+    if weekly_dd < -WEEKLY_DD_CAP_PCT:
+        if not _weekly_protection_active:
+            _weekly_protection_active = True
+            log(f"[WEEKLY-DD] ⛔ DD settimanale {-weekly_dd*100:.1f}% > cap {WEEKLY_DD_CAP_PCT*100:.0f}% → protezione attiva")
+            notify_telegram(f"⛔ [WEEKLY-DD] Drawdown settimanale {-weekly_dd*100:.1f}% supera cap {WEEKLY_DD_CAP_PCT*100:.0f}%\nNessun nuovo LONG fino a recupero parziale")
+        return True
+    # Disattiva protezione se recupera ≥50% della perdita
+    if _weekly_protection_active:
+        loss = _weekly_start_equity * WEEKLY_DD_CAP_PCT
+        recovered = portfolio_value - (_weekly_start_equity * (1.0 - WEEKLY_DD_CAP_PCT))
+        if recovered >= loss * 0.5:
+            _weekly_protection_active = False
+            log(f"[WEEKLY-DD] ✅ Recupero sufficiente, protezione disattivata. Equity={portfolio_value:.2f}")
+            notify_telegram(f"✅ [WEEKLY-DD] Recupero raggiunto, nuovi LONG abilitati")
+    return _weekly_protection_active
+
+
 def _update_btc_context_long():
     """Aggiorna il contesto BTC ogni 3 min.
     Fix #3: se BTC 24h in negativo forza btc_fav=False anche se 4h uptrend.
-    Fix #1: calcola momentum 15m per rilevare dump improvvisi (dump guard)."""
-    global _btc_favorable_long, _btc_dumping_long, _btc_ctx_ts
+    Fix #1: calcola momentum 15m per rilevare dump improvvisi (dump guard).
+    Gap1: rileva transizione True→False e attiva regime change handler."""
+    global _btc_favorable_long, _btc_favorable_long_prev, _btc_dumping_long, _btc_ctx_ts
     if time.time() - _btc_ctx_ts > 180:
+        _prev = _btc_favorable_long
         try:
             _btc_favorable_long = is_trending_up("BTCUSDT", "240")
             # Fix #3: override se BTC 24h già in negativo (dump in corso)
@@ -294,6 +382,12 @@ def _update_btc_context_long():
             pass
         _btc_ctx_ts = time.time()
         tlog("btc_ctx", f"[CTX] BTC 4h uptrend={_btc_favorable_long} | dumping={_btc_dumping_long}", 180)
+        # Gap1: transizione bull→bear → stringi SL posizioni non protette
+        if _prev and not _btc_favorable_long and open_positions:
+            try:
+                _on_regime_bearish_long()
+            except Exception as _re:
+                log(f"[REGIME-CHANGE][LONG] errore handler: {_re}")
 
 def _get_oi_change(symbol: str) -> float | None:
     """Restituisce la variazione % di Open Interest nell'ultima ora (intervalTime=1h).
@@ -2120,6 +2214,10 @@ while True:
             RISK_THROTTLE_LEVEL = 2 if draw > DAILY_DD_CAP_PCT * 2 else (1 if draw > DAILY_DD_CAP_PCT else 0)
             if RISK_THROTTLE_LEVEL > 0:
                 tlog("dd_throttle", f"[THROTTLE] DD={draw*100:.2f}% → livello={RISK_THROTTLE_LEVEL}", 600)
+    # Gap3: weekly drawdown check
+    _weekly_block = _check_weekly_dd_long(portfolio_value)
+    if _weekly_block:
+        tlog("weekly_dd", f"[WEEKLY-DD] ⛔ Protezione settimanale attiva, skip nuovi LONG", 600)
 
     portfolio_value, usdt_balance, coin_values = get_portfolio_value()
     volatile_budget = portfolio_value * 0.4
@@ -2152,6 +2250,10 @@ while True:
             # >>> GATE: blocca solo le NUOVE APERTURE (non gli exit)
             if ENABLE_DD_PAUSE and time.time() < _trading_paused_until:
                 tlog(f"paused:{symbol}", f"[PAUSE] trading sospeso (DD cap), skip LONG {symbol}", 600)
+                continue
+            # Gap3: weekly DD cap gate
+            if _weekly_block:
+                tlog(f"weekly_block:{symbol}", f"[WEEKLY-DD] protezione settimanale attiva, skip LONG {symbol}", 600)
                 continue
             # Fix #1: dump guard — BTC sta scendendo velocemente, skip nuove aperture LONG
             if _btc_dumping_long:
