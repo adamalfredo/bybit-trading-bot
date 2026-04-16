@@ -1530,6 +1530,12 @@ def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigge
     Usa l'endpoint order/create (v5) per un ordine condizionale di chiusura.
     """
     try:
+        # Guard fondamentale: per LONG il trigger DEVE essere sotto il prezzo corrente.
+        # Bybit rifiuta con retCode 110093 se stop_price >= mark_price.
+        _cur = get_last_price(symbol)
+        if _cur and stop_price >= _cur:
+            tlog(f"csl_skip:{symbol}", f"[CSL-SKIP][LONG] {symbol} stop {stop_price:.6f} >= current {_cur:.6f}, skip", 60)
+            return False
         info = get_instrument_info(symbol)
         qty_step = info.get("qty_step", 0.01)
         price_step = info.get("price_step", 0.01)
