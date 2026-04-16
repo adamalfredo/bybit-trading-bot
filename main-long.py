@@ -94,8 +94,8 @@ FLOOR_TRIGGER_BY = "MarkPrice"     # usa Mark per coerenza con SL
 # >>> PATCH: parametri breakeven lock (LONG)
 BREAKEVEN_LOCK_PCT = 0.025  # FIX2: era 0.015, attiva BE al +2.5% di prezzo (più respiro prima del lock)
 BREAKEVEN_BUFFER   = 0.012  # FIX2: era 0.006, buffer più largo per evitare noise-stop su BE
-MAX_LOSS_CAP_PCT = 0.08   # FIX2: alzato a 8% per meme coin ad alta ATR (volatile >5% 24h)
-MAX_LOSS_CAP_PCT_STABLE = 0.04  # cap 4% per mid/large cap a bassa volatilità (es. AAVE, LINK)
+MAX_LOSS_CAP_PCT        = 0.15  # hard cap emergenza: SL primario è ATR-based; questo scatta solo se ATR > 15% (volatile)
+MAX_LOSS_CAP_PCT_STABLE = 0.10  # hard cap emergenza: SL primario è ATR-based; questo scatta solo se ATR > 10% (stabile: AAVE, LINK)
 
 # >>> NEW: regime + drawdown giornaliero (LONG)
 DAILY_DD_CAP_PCT = 0.04
@@ -2116,11 +2116,11 @@ def sync_positions_from_wallet():
             # Nuovi parametri locali coerenti con R-based: r_dist e tp1
             r_dist = atr_val * SL_ATR_MULT
             tp = entry_price + (TP1_R * r_dist)
-            # SL locale informativo; non modifichiamo ordini a sync
+            # SL basato su ATR; hard cap solo come fallback di emergenza
             sl_atr = entry_price - r_dist
-            _loss_cap = MAX_LOSS_CAP_PCT if symbol in VOLATILE_ASSETS else MAX_LOSS_CAP_PCT_STABLE
-            sl_cap = entry_price * (1.0 - _loss_cap)
-            final_sl = max(sl_atr, sl_cap)
+            _hard_cap = MAX_LOSS_CAP_PCT if symbol in VOLATILE_ASSETS else MAX_LOSS_CAP_PCT_STABLE
+            sl_hard_floor = entry_price * (1.0 - _hard_cap)
+            final_sl = max(sl_atr, sl_hard_floor)
 
             # Recupera MFE ROI dal movimento attuale (price vs entry)
             # Non conosciamo il massimo storico ma almeno partiamo dal ROI attuale
@@ -2472,10 +2472,11 @@ while True:
 
             actual_cost = qty * price_now
             
-            # APPPLICA CAP PERDITA: differenziato volatile (8%) vs stabile (4%)
-            _loss_cap = MAX_LOSS_CAP_PCT if symbol in VOLATILE_ASSETS else MAX_LOSS_CAP_PCT_STABLE
-            sl_cap = price_now * (1.0 - _loss_cap)
-            final_sl = max(price_now - r_dist, sl_cap)
+            # SL basato su ATR (adattivo alla volatilità reale dell'asset)
+            # Hard cap solo come fallback di emergenza se ATR è fuori range
+            _hard_cap = MAX_LOSS_CAP_PCT if symbol in VOLATILE_ASSETS else MAX_LOSS_CAP_PCT_STABLE
+            sl_hard_floor = price_now * (1.0 - _hard_cap)
+            final_sl = max(price_now - r_dist, sl_hard_floor)
             ok_pos_sl = set_position_stoploss_long(symbol, final_sl)
             # Backup: piazza anche uno Stop-Market reduceOnly
             ok_cond_sl = False
