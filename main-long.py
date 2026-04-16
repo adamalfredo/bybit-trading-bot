@@ -94,7 +94,8 @@ FLOOR_TRIGGER_BY = "MarkPrice"     # usa Mark per coerenza con SL
 # >>> PATCH: parametri breakeven lock (LONG)
 BREAKEVEN_LOCK_PCT = 0.025  # FIX2: era 0.015, attiva BE al +2.5% di prezzo (più respiro prima del lock)
 BREAKEVEN_BUFFER   = 0.012  # FIX2: era 0.006, buffer più largo per evitare noise-stop su BE
-MAX_LOSS_CAP_PCT = 0.08   # FIX2: alzato a 8% per non sovrascrivere SL_ATR_MULT=2.0 su coin ad alta ATR (meme coin ATR/prezzo tipicamente 4-8%)
+MAX_LOSS_CAP_PCT = 0.08   # FIX2: alzato a 8% per meme coin ad alta ATR (volatile >5% 24h)
+MAX_LOSS_CAP_PCT_STABLE = 0.04  # cap 4% per mid/large cap a bassa volatilità (es. AAVE, LINK)
 
 # >>> NEW: regime + drawdown giornaliero (LONG)
 DAILY_DD_CAP_PCT = 0.04
@@ -2105,7 +2106,8 @@ def sync_positions_from_wallet():
             tp = entry_price + (TP1_R * r_dist)
             # SL locale informativo; non modifichiamo ordini a sync
             sl_atr = entry_price - r_dist
-            sl_cap = entry_price * (1.0 - MAX_LOSS_CAP_PCT)
+            _loss_cap = MAX_LOSS_CAP_PCT if symbol in VOLATILE_ASSETS else MAX_LOSS_CAP_PCT_STABLE
+            sl_cap = entry_price * (1.0 - _loss_cap)
             final_sl = max(sl_atr, sl_cap)
 
             # Recupera MFE ROI dal movimento attuale (price vs entry)
@@ -2458,8 +2460,9 @@ while True:
 
             actual_cost = qty * price_now
             
-            # APPPLICA CAP PERDITA: non oltre MAX_LOSS_CAP_PCT sotto l'entry
-            sl_cap = price_now * (1.0 - MAX_LOSS_CAP_PCT)
+            # APPPLICA CAP PERDITA: differenziato volatile (8%) vs stabile (4%)
+            _loss_cap = MAX_LOSS_CAP_PCT if symbol in VOLATILE_ASSETS else MAX_LOSS_CAP_PCT_STABLE
+            sl_cap = price_now * (1.0 - _loss_cap)
             final_sl = max(price_now - r_dist, sl_cap)
             ok_pos_sl = set_position_stoploss_long(symbol, final_sl)
             # Backup: piazza anche uno Stop-Market reduceOnly

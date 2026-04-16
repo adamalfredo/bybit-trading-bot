@@ -99,7 +99,8 @@ FLOOR_TRIGGER_BY = "MarkPrice"     # usa Mark per coerenza con SL
 # >>> PATCH: parametri breakeven lock (SHORT)
 BREAKEVEN_LOCK_PCT = 0.025     # FIX2: era 0.015, attiva BE al -2.5% di prezzo (più respiro prima del lock)
 BREAKEVEN_BUFFER   = -0.012   # FIX2: era -0.006, buffer più largo per evitare noise-stop su BE
-MAX_LOSS_CAP_PCT = 0.08   # FIX2: alzato a 8% per non sovrascrivere SL_ATR_MULT=2.0 su coin ad alta ATR (meme coin ATR/prezzo tipicamente 4-8%)
+MAX_LOSS_CAP_PCT = 0.08   # FIX2: alzato a 8% per meme coin ad alta ATR (volatile >5% 24h)
+MAX_LOSS_CAP_PCT_STABLE = 0.04  # cap 4% per mid/large cap a bassa volatilità (es. AAVE, LINK)
 
 # >>> regime semplificato: contesto BTC 4h + drawdown giornaliero
 DAILY_DD_CAP_PCT = 0.04         # blocca nuovi ingressi se equity < -4% dal livello di inizio giorno
@@ -2173,7 +2174,8 @@ def sync_positions_from_wallet():
                 atr_val = price * 0.02
             tp = price - (atr_val * TP_FACTOR)
             sl_atr = entry_price + (atr_val * SL_FACTOR)       # riferimento entry
-            sl_cap = entry_price * (1.0 + MAX_LOSS_CAP_PCT)    # cap 3% sopra entry
+            _loss_cap = MAX_LOSS_CAP_PCT if symbol in VOLATILE_ASSETS else MAX_LOSS_CAP_PCT_STABLE
+            sl_cap = entry_price * (1.0 + _loss_cap)    # cap differenziato volatile/stabile
             final_sl = min(sl_atr, sl_cap)
 
             # Recupera MFE ROI dal movimento attuale (entry vs price, SHORT: entry > price = profitto)
@@ -2540,8 +2542,9 @@ while True:
                 ok_tp, tp_oid = place_takeprofit_short(symbol, tp1_price, qty_tp1)
                 if ok_tp:
                     tlog(f"tp1_short:{symbol}", f"[TP1] {symbol} tp1={tp1_price:.6f} qty={qty_tp1}", 60)
-            # APPLICA CAP PERDITA: non oltre MAX_LOSS_CAP_PCT sopra l'entry
-            sl_cap = price_now * (1.0 + MAX_LOSS_CAP_PCT)
+            # APPLICA CAP PERDITA: differenziato volatile (8%) vs stabile (4%)
+            _loss_cap = MAX_LOSS_CAP_PCT if symbol in VOLATILE_ASSETS else MAX_LOSS_CAP_PCT_STABLE
+            sl_cap = price_now * (1.0 + _loss_cap)
             final_sl = min(price_now + r_dist, sl_cap)
             ok_pos_sl = set_position_stoploss_short(symbol, final_sl)
             # Backup: piazza anche uno Stop-Market reduceOnly
