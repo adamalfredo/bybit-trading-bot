@@ -291,6 +291,12 @@ def _on_regime_bearish_long():
                 log(f"[REGIME-CHANGE][LONG] {symbol} già in perdita, non modifico SL")
                 continue
             be_price = float(entry_price) * (1.0 + BREAKEVEN_BUFFER)
+            # Guard: il conditional SL per LONG richiede trigger < prezzo corrente.
+            # Se be_price >= price_now il prezzo è già sceso sotto il BE → skip conditional SL,
+            # ma aggiorna comunque il position SL solo se be_price è raggiungibile.
+            if be_price >= price_now:
+                log(f"[REGIME-CHANGE][LONG] {symbol} BE {be_price:.6f} >= price {price_now:.6f}: prezzo già sotto BE, skip")
+                continue
             qty_live = get_open_long_qty(symbol)
             if qty_live and qty_live > 0:
                 ok_csl = place_conditional_sl_long(symbol, be_price, qty_live, trigger_by="MarkPrice")

@@ -304,6 +304,11 @@ def _on_regime_bullish_short():
                 log(f"[REGIME-CHANGE][SHORT] {symbol} già in perdita, non modifico SL")
                 continue
             be_price = float(entry_price) * (1.0 + BREAKEVEN_BUFFER)  # BREAKEVEN_BUFFER negativo
+            # Guard: il conditional SL per SHORT richiede trigger > prezzo corrente.
+            # Se be_price <= price_now il prezzo è già salito sopra il BE → skip.
+            if be_price <= price_now:
+                log(f"[REGIME-CHANGE][SHORT] {symbol} BE {be_price:.6f} <= price {price_now:.6f}: prezzo già sopra BE, skip")
+                continue
             qty_live = get_open_short_qty(symbol)
             if qty_live and qty_live > 0:
                 ok_csl = place_conditional_sl_short(symbol, be_price, qty_live, trigger_by="MarkPrice")
