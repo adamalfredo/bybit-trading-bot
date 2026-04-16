@@ -110,6 +110,7 @@ _btc_uptrend_short = False      # True se BTC 4h in uptrend → blocco totale nu
 _btc_daily_down_short = False   # True se BTC daily in downtrend (EMA200 descend + price < ema200)
 _btc_pumping_short = False      # True se BTC 15m sale > +1.5% in 30 min (pump guard)
 _btc_ctx_ts = 0                 # timestamp ultimo aggiornamento contesto BTC
+_btc_4h_chg_short: float = 0.0  # Imp1/Imp2: variazione BTC su 4h per RS relativa e pesi adattivi
 _daily_start_equity = None
 _weekly_start_equity: float | None = None   # Gap3: equity snapshot di 7gg fa
 _weekly_anchor_ts: float = 0.0              # Gap3: timestamp ultimo aggiornamento settimanale
@@ -362,7 +363,7 @@ def _update_btc_context_short():
     Fix #1: pump guard 15m.
     Uptrend guard: blocco totale se 4h uptrend.
     Gap1: rileva transizione True→False e attiva regime change handler."""
-    global _btc_favorable_short, _btc_favorable_short_prev, _btc_uptrend_short, _btc_daily_down_short, _btc_pumping_short, _btc_ctx_ts
+    global _btc_favorable_short, _btc_favorable_short_prev, _btc_uptrend_short, _btc_daily_down_short, _btc_pumping_short, _btc_ctx_ts, _btc_4h_chg_short
     if time.time() - _btc_ctx_ts > 180:
         try:
             _btc_favorable_short = is_trending_down("BTCUSDT", "240")
@@ -417,9 +418,20 @@ def _update_btc_context_short():
                     tlog("btc_pump", f"[CTX] BTC 15m pump={_chg_30m:+.2f}% → PUMP-GATE attivo", 60)
         except Exception:
             pass
+        # Imp1/Imp2: BTC 4h change — baseline RS per update_assets() e analyze_asset()
+        try:
+            _r4h = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/kline",
+                               params={"category": "linear", "symbol": "BTCUSDT",
+                                       "interval": "240", "limit": 6}, timeout=5)
+            _d4h = _r4h.json()
+            if _d4h.get("retCode") == 0 and len(_d4h["result"]["list"]) >= 5:
+                _c4h = _d4h["result"]["list"]  # [0]=più recente
+                _btc_4h_chg_short = (float(_c4h[0][4]) - float(_c4h[4][4])) / max(1e-9, float(_c4h[4][4])) * 100
+        except Exception:
+            pass
         _btc_ctx_ts = time.time()
         _bear_confirmed = _btc_favorable_short and _btc_daily_down_short
-        tlog("btc_ctx", f"[CTX] BTC 4h_down={_btc_favorable_short} | daily_down={_btc_daily_down_short} | bear_confirmed={_bear_confirmed} | uptrend={_btc_uptrend_short} | pumping={_btc_pumping_short}", 180)
+        tlog("btc_ctx", f"[CTX] BTC 4h_down={_btc_favorable_short} | daily_down={_btc_daily_down_short} | bear_confirmed={_bear_confirmed} | uptrend={_btc_uptrend_short} | pumping={_btc_pumping_short} | btc_4h_chg={_btc_4h_chg_short:+.2f}%", 180)
         # Gap1: transizione bear→bull → stringi SL posizioni SHORT non protette
         if _btc_favorable_short_prev and not _btc_favorable_short and open_positions:
             try:
@@ -589,11 +601,15 @@ def update_assets(top_n=12):
             rel_s = _relative_score_short(rel)
             candidates.append((sym, vol, pct, mom, rel, rel_s))
 
-        # Score finale: 20% volume normalizzato + 55% momentum + 25% debolezza relativa vs BTC
+        # Score finale — Imp1: pesi adattivi in sideways (BTC non fav e non pump)
         max_vol = max(c[1] for c in candidates) or 1.0
+        if not _btc_favorable_short and not _btc_pumping_short:
+            _w_vol, _w_mom, _w_rs = 0.20, 0.30, 0.50  # sideways: debolezza relativa più predittiva
+        else:
+            _w_vol, _w_mom, _w_rs = 0.20, 0.55, 0.25  # bear/pump: momentum guida
         scored = sorted(
             candidates,
-            key=lambda c: 0.20 * (c[1] / max_vol) + 0.55 * c[3] + 0.25 * c[5],
+            key=lambda c: _w_vol * (c[1] / max_vol) + _w_mom * c[3] + _w_rs * c[5],
             reverse=True
         )
 
@@ -1749,6 +1765,7 @@ def analyze_asset(symbol: str):
         resp4 = requests.get(f"{BYBIT_BASE_URL}/v5/market/kline", params={"category":"linear","symbol":symbol,"interval":"240","limit":220}, timeout=10)
         d4 = resp4.json()
         ema200_slope = None
+        coin_4h_chg = None  # Imp2: variazione 4h coin per RS breakdown
         if d4.get("retCode") == 0 and d4.get("result",{}).get("list"):
             raw4 = d4["result"]["list"]
             df4 = pd.DataFrame(raw4, columns=["timestamp","Open","High","Low","Close","Volume","turnover"])
@@ -1758,6 +1775,13 @@ def analyze_asset(symbol: str):
             if len(df4) >= 200:
                 ema200 = EMAIndicator(close=df4["Close"], window=200).ema_indicator()
                 ema200_slope = float(ema200.iloc[-1] - ema200.iloc[-2]) if len(ema200) >= 2 else None
+            # Imp2: coin 4h change per RS breakdown
+            if len(df4) >= 5:
+                try:
+                    coin_4h_chg = (float(df4["Close"].iloc[-1]) - float(df4["Close"].iloc[-5])) / max(1e-9, float(df4["Close"].iloc[-5])) * 100
+                except Exception:
+                    pass
+        rs_4h = (coin_4h_chg - _btc_4h_chg_short) if coin_4h_chg is not None else None
         # RSI 1h
         rsi1h = None
         if d1.get("retCode") == 0 and d1.get("result",{}).get("list"):
@@ -1777,7 +1801,7 @@ def analyze_asset(symbol: str):
                 funding_rate = float(lst[0].get("fundingRate") or 0.0)
         except:
             chg = None
-        tlog(f"telem_short:{symbol}", f"[TELEM][SHORT][{symbol}] adx1h={adx1h} ema100_slope={ema100_slope} ema200_slope={ema200_slope} rsi1h={rsi1h} chg24h={chg} funding={funding_rate}", 300)
+        tlog(f"telem_short:{symbol}", f"[TELEM][SHORT][{symbol}] adx1h={adx1h} ema100_slope={ema100_slope} ema200_slope={ema200_slope} rsi1h={rsi1h} chg24h={chg} funding={funding_rate} rs_4h={f'{rs_4h:+.2f}%' if rs_4h is not None else 'n/a'}", 300)
     except Exception as e:
         log(f"[TELEM][SHORT][{symbol}] errore telemetria: {e}")
 
@@ -1896,7 +1920,11 @@ def analyze_asset(symbol: str):
             tlog(f"oi_filter:{symbol}", f"[OI-FILTER][SHORT] {symbol} OI={oi_change:+.2f}% < 0, pressione in calo, skip", 300)
             return None, None, None
         oi_confirms = oi_change is not None and oi_change > 0.2
-        conf_count = [ema_state, macd_state, rsi_state, oi_confirms].count(True)
+        # Imp3: ATR expansion — volatilità crescente segnala movimento genuino (laterale → direzionale)
+        _atr_s = df["atr"]
+        _avg_atr_20 = float(_atr_s.iloc[-22:-2].mean()) if len(_atr_s) >= 22 else float(_atr_s.mean())
+        atr_expanding = float(last["atr"]) > _avg_atr_20 * 1.25
+        conf_count = [ema_state, macd_state, rsi_state, oi_confirms, atr_expanding].count(True)
 
         # Confluenza richiesta: più alta quando BTC non favorevole
         if not _btc_favorable_short:
@@ -1972,6 +2000,23 @@ def analyze_asset(symbol: str):
             if LOG_DEBUG_STRATEGY:
                 log(f"[ENTRY-SHORT][{symbol}] EVENTO/CONFLUENZA → {entry_strategies}")
             return "entry", ", ".join(entry_strategies), price
+
+        # Imp2: RS Breakdown — coin underperforma BTC di ≥4% su 4h + vol expansion + RSI<48 + ADX>20
+        # Cattura movimenti idiosincratici ribassisti prima che EMA/MACD lagging si allineino
+        if (rs_4h is not None and rs_4h <= -4.0
+                and rsi1h is not None and rsi1h < 48
+                and adx1h is not None and adx1h > 20
+                and RISK_THROTTLE_LEVEL == 0
+                and (funding_rate is None or funding_rate >= FUNDING_SHORT_MIN)):
+            _rs_vol_s = pd.to_numeric(df["Volume"], errors="coerce")
+            _rs_vol_avg = _rs_vol_s.iloc[-22:-2].mean() if len(_rs_vol_s) >= 22 else float(_rs_vol_s.mean())
+            _rs_vol_last = float(_rs_vol_s.iloc[-2])
+            _rs_vol_ratio = _rs_vol_last / _rs_vol_avg if _rs_vol_avg > 0 else 0.0
+            if _rs_vol_ratio >= 1.8:
+                tlog(f"rs_breakdown_short:{symbol}",
+                     f"[RS-BREAKDOWN][SHORT] {symbol} | rs_4h={rs_4h:+.2f}% | rsi1h={rsi1h:.1f} | adx1h={adx1h:.1f} | vol={_rs_vol_ratio:.1f}x",
+                     300)
+                return "entry", f"RS-Breakdown {rs_4h:.1f}% vs BTC (vol {_rs_vol_ratio:.1f}x)", price
 
         # OVERRIDE: rimbalzo su trend BEAR (mean reversion speculare al LONG)
         # Attivo solo in BEAR con 4h ancora down e RSI 1h fortemente ipercomprato

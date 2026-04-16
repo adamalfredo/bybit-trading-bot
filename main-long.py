@@ -103,6 +103,7 @@ _btc_favorable_long = False    # True se BTC 4h in uptrend → contesto favorevo
 _btc_favorable_long_prev = False  # Gap1: stato precedente per rilevare transizione True→False
 _btc_dumping_long = False      # True se BTC 15m scende > -1.5% in 30 min (dump guard)
 _btc_ctx_ts = 0
+_btc_4h_chg_long: float = 0.0  # Imp1/Imp2: variazione BTC su 4h, usato per RS relativa e pesi adattivi
 _daily_start_equity = None
 _weekly_start_equity: float | None = None   # Gap3: equity snapshot di 7gg fa
 _weekly_anchor_ts: float = 0.0              # Gap3: timestamp ultimo aggiornamento settimanale
@@ -347,7 +348,7 @@ def _update_btc_context_long():
     Fix #3: se BTC 24h in negativo forza btc_fav=False anche se 4h uptrend.
     Fix #1: calcola momentum 15m per rilevare dump improvvisi (dump guard).
     Gap1: rileva transizione True→False e attiva regime change handler."""
-    global _btc_favorable_long, _btc_favorable_long_prev, _btc_dumping_long, _btc_ctx_ts
+    global _btc_favorable_long, _btc_favorable_long_prev, _btc_dumping_long, _btc_ctx_ts, _btc_4h_chg_long
     if time.time() - _btc_ctx_ts > 180:
         _prev = _btc_favorable_long
         try:
@@ -380,8 +381,19 @@ def _update_btc_context_long():
                     tlog("btc_dump", f"[CTX] BTC 15m dump={_chg_30m:+.2f}% → DUMP-GATE attivo", 60)
         except Exception:
             pass
+        # Imp1/Imp2: BTC 4h change — baseline RS per update_assets() e analyze_asset()
+        try:
+            _r4h = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/kline",
+                               params={"category": "linear", "symbol": "BTCUSDT",
+                                       "interval": "240", "limit": 6}, timeout=5)
+            _d4h = _r4h.json()
+            if _d4h.get("retCode") == 0 and len(_d4h["result"]["list"]) >= 5:
+                _c4h = _d4h["result"]["list"]  # [0]=più recente
+                _btc_4h_chg_long = (float(_c4h[0][4]) - float(_c4h[4][4])) / max(1e-9, float(_c4h[4][4])) * 100
+        except Exception:
+            pass
         _btc_ctx_ts = time.time()
-        tlog("btc_ctx", f"[CTX] BTC 4h uptrend={_btc_favorable_long} | dumping={_btc_dumping_long}", 180)
+        tlog("btc_ctx", f"[CTX] BTC 4h uptrend={_btc_favorable_long} | dumping={_btc_dumping_long} | btc_4h_chg={_btc_4h_chg_long:+.2f}%", 180)
         # Gap1: transizione bull→bear → stringi SL posizioni non protette
         if _prev and not _btc_favorable_long and open_positions:
             try:
@@ -548,11 +560,15 @@ def update_assets(top_n=12):
             rel_s = _relative_score_long(rel)
             candidates.append((sym, vol, pct, mom, rel, rel_s))
 
-        # Score finale: 20% volume normalizzato + 55% momentum + 25% forza relativa vs BTC
+        # Score finale — Imp1: pesi adattivi in sideways (BTC non fav e non dump)
         max_vol = max(c[1] for c in candidates) or 1.0
+        if not _btc_favorable_long and not _btc_dumping_long:
+            _w_vol, _w_mom, _w_rs = 0.20, 0.30, 0.50  # sideways: RS idiosincratica più predittiva
+        else:
+            _w_vol, _w_mom, _w_rs = 0.20, 0.55, 0.25  # bull/dump: momentum guida
         scored = sorted(
             candidates,
-            key=lambda c: 0.20 * (c[1] / max_vol) + 0.55 * c[3] + 0.25 * c[5],
+            key=lambda c: _w_vol * (c[1] / max_vol) + _w_mom * c[3] + _w_rs * c[5],
             reverse=True
         )
 
@@ -1689,6 +1705,7 @@ def analyze_asset(symbol: str):
         resp4 = requests.get(f"{BYBIT_BASE_URL}/v5/market/kline", params={"category":"linear","symbol":symbol,"interval":"240","limit":220}, timeout=10)
         d4 = resp4.json()
         ema200_slope = None
+        coin_4h_chg = None  # Imp2: variazione 4h coin per RS breakout
         if d4.get("retCode") == 0 and d4.get("result",{}).get("list"):
             raw4 = d4["result"]["list"]
             df4 = pd.DataFrame(raw4, columns=["timestamp","Open","High","Low","Close","Volume","turnover"])
@@ -1698,6 +1715,13 @@ def analyze_asset(symbol: str):
             if len(df4) >= 200:
                 ema200 = EMAIndicator(close=df4["Close"], window=200).ema_indicator()
                 ema200_slope = float(ema200.iloc[-1] - ema200.iloc[-2]) if len(ema200) >= 2 else None
+            # Imp2: coin 4h change per RS breakout
+            if len(df4) >= 5:
+                try:
+                    coin_4h_chg = (float(df4["Close"].iloc[-1]) - float(df4["Close"].iloc[-5])) / max(1e-9, float(df4["Close"].iloc[-5])) * 100
+                except Exception:
+                    pass
+        rs_4h = (coin_4h_chg - _btc_4h_chg_long) if coin_4h_chg is not None else None
         rsi1h = None
         if d1.get("retCode") == 0 and d1.get("result",{}).get("list"):
             try:
@@ -1714,7 +1738,7 @@ def analyze_asset(symbol: str):
                 funding_rate = float(lst[0].get("fundingRate") or 0.0)
         except:
             chg = None
-        tlog(f"telem_long:{symbol}", f"[TELEM][LONG][{symbol}] adx1h={adx1h} ema100_slope={ema100_slope} ema200_slope={ema200_slope} rsi1h={rsi1h} chg24h={chg} funding={funding_rate}", 300)
+        tlog(f"telem_long:{symbol}", f"[TELEM][LONG][{symbol}] adx1h={adx1h} ema100_slope={ema100_slope} ema200_slope={ema200_slope} rsi1h={rsi1h} chg24h={chg} funding={funding_rate} rs_4h={f'{rs_4h:+.2f}%' if rs_4h is not None else 'n/a'}", 300)
     except Exception as e:
         log(f"[TELEM][LONG][{symbol}] errore telemetria: {e}")
 
@@ -1830,7 +1854,11 @@ def analyze_asset(symbol: str):
         # OI come 4° indicatore: OI crescente con prezzo in salita = nuovi long genuini (non solo short squeeze)
         oi_change = _get_oi_change(symbol)
         oi_confirms = oi_change is not None and oi_change > 0.2
-        conf_count = [ema_state, macd_state, rsi_state, oi_confirms].count(True)
+        # Imp3: ATR expansion — volatilità crescente segnala movimento genuino (laterale → direzionale)
+        _atr_s = df["atr"]
+        _avg_atr_20 = float(_atr_s.iloc[-22:-2].mean()) if len(_atr_s) >= 22 else float(_atr_s.mean())
+        atr_expanding = float(last["atr"]) > _avg_atr_20 * 1.25
+        conf_count = [ema_state, macd_state, rsi_state, oi_confirms, atr_expanding].count(True)
         
         # Confluenza richiesta: più alta quando BTC non favorevole
         if not _btc_favorable_long:
@@ -1904,6 +1932,23 @@ def analyze_asset(symbol: str):
             if LOG_DEBUG_STRATEGY:
                 log(f"[ENTRY-LONG][{symbol}] EVENTO/CONFLUENZA → {entry_strategies}")
             return "entry", ", ".join(entry_strategies), price
+
+        # Imp2: RS Breakout — coin outperforma BTC di ≥4% su 4h + vol expansion + RSI>52 + ADX>20
+        # Cattura movimenti idiosincratici prima che EMA/MACD lagging si allineino
+        if (rs_4h is not None and rs_4h >= 4.0
+                and rsi1h is not None and rsi1h > 52
+                and adx1h is not None and adx1h > 20
+                and RISK_THROTTLE_LEVEL == 0
+                and (funding_rate is None or funding_rate <= FUNDING_LONG_MAX)):
+            _rs_vol_s = pd.to_numeric(df["Volume"], errors="coerce")
+            _rs_vol_avg = _rs_vol_s.iloc[-22:-2].mean() if len(_rs_vol_s) >= 22 else float(_rs_vol_s.mean())
+            _rs_vol_last = float(_rs_vol_s.iloc[-2])
+            _rs_vol_ratio = _rs_vol_last / _rs_vol_avg if _rs_vol_avg > 0 else 0.0
+            if _rs_vol_ratio >= 1.8:
+                tlog(f"rs_breakout_long:{symbol}",
+                     f"[RS-BREAKOUT][LONG] {symbol} | rs_4h={rs_4h:+.2f}% | rsi1h={rsi1h:.1f} | adx1h={adx1h:.1f} | vol={_rs_vol_ratio:.1f}x",
+                     300)
+                return "entry", f"RS-Breakout +{rs_4h:.1f}% vs BTC (vol {_rs_vol_ratio:.1f}x)", price
 
         # OVERRIDE: pullback su trend BULL (mean reversion)
         # Attivo solo in BULL con 4h ancora up e RSI 1h fortemente ipervenduto
