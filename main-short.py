@@ -2514,6 +2514,15 @@ while True:
             entry_price = entry.get("entry_price", get_last_price(symbol) or 0.0)
             exit_price = get_last_price(symbol) or 0.0
             record_exit(symbol, entry_price, exit_price, "SHORT")
+            # Aggiorna contatori report giornaliero (SL/TP Bybit)
+            try:
+                if entry_price and exit_price:
+                    pnl_raw_pct = ((float(entry_price) - float(exit_price)) / float(entry_price)) * 100.0
+                    pnl_net_pct = pnl_raw_pct - (FEES_TAKER_PCT * 2 * 100.0)
+                    _daily_trades_closed += 1
+                    _daily_pnl_sum += pnl_net_pct
+            except Exception:
+                pass
             # Notifica Telegram chiusura da SL/TP Bybit
             try:
                 if entry_price and exit_price:
