@@ -164,6 +164,7 @@ LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 
 # --- Nuova gestione rischio e R-multipli ---
 RISK_PCT = float(os.getenv("RISK_PCT", "0.0075"))   # 0.75% equity per trade
+MAX_MIN_QTY_RISK_FACTOR = 1.5  # max 1.5× il rischio atteso dopo bump min_qty (evita token come RAVEUSDT con minQty enorme)
 SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "2.0"))   # FIX: era 1.4, SL più largo per ridurre noise-stop
 TP1_R = float(os.getenv("TP1_R", "2.5"))             # FIX: era 1.0, R:R almeno 2.5:1
 TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.65"))  # OPT: alzato da 0.50 a 0.65 — incassa più profitto al TP1, migliora avg win
@@ -2537,7 +2538,12 @@ while True:
                 else:
                     tlog(f"min_notional:{symbol}", f"❌ Notional richiesto {order_amount:.2f} < minimo {min_notional:.2f} per {symbol} (min_qty={min_qty}, price={price_now_chk})", 300)
                     continue
-            
+
+            # Guard: se min_qty impone rischio reale > 1.5× atteso, il token è troppo caro per il sizing → skip
+            if min_qty > 0 and (min_qty * r_dist) > risk_usdt * MAX_MIN_QTY_RISK_FACTOR:
+                _real_risk = min_qty * r_dist
+                tlog(f"minqty_risk:{symbol}", f"[SKIP-MINQTY][SHORT] {symbol} min_qty={min_qty} × r_dist={r_dist:.4f} = rischio reale {_real_risk:.4f} USDT > {risk_usdt * MAX_MIN_QTY_RISK_FACTOR:.4f} (1.5× budget), skip", 600)
+                continue
 
             # Logga la quantità calcolata PRIMA dell'apertura short
             qty_str = calculate_quantity(symbol, order_amount)
