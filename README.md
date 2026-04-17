@@ -85,10 +85,15 @@ fai un controllo su bybit e sui log di short e long su railway e fammi un report
 
 ### tabella trailing SL/TP (ratchet) 
 
-≥ 15% ROI chiudere a +7% ✅  
-≥ 25% ROI chiudere a +15% ✅  
-≥ 40% ROI chiudere a +25% ✅  
-≥ 60% ROI chiudere a +40% ✅  
-≥ 80% ROI chiudere a +60% ✅
+ROI raggiunto	Floor garantito
+≥15%	        +7%
+≥25%	        +15%
+≥40%	        +25%
+≥60%	        +40%
+≥80%	        +60%
+≥100%	        +80%
+≥125%	        +100%
+≥150%	        +120%
 
 09/04/2026 portato il MAX_OPEN_POSITIONS da 3 a 4 valutare gli altri limiti
+17/04/2026 portato il MAX_OPEN_POSITIONS da 4 a 6 valutare gli altri limiti
