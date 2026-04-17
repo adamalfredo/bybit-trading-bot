@@ -152,7 +152,7 @@ ENTRY_ADX_STABLE = 24          # fisso
 ADX_RELAX_EVENT = 3.0
 RSI_LONG_THRESHOLD = 54.0
 COOLDOWN_MINUTES = 60          # fisso (non usare os.getenv)
-MAX_OPEN_POSITIONS = 4         # massimo posizioni simultanee
+MAX_OPEN_POSITIONS = 6         # massimo posizioni simultanee
 MAX_LARGE_CAP_POSITIONS = 1    # max 1 large cap LONG aperta (BTC/ETH/BNB/SOL fortemente correlate)
 MAX_VOLATILE_LONG = 2          # max 2 asset volatili (>5% 24h) LONG aperti contemporaneamente
 FUNDING_LONG_MAX = 0.0005      # blocca nuovi LONG se funding > +0.05% (longs sovraccarichi = pressione ribassista)
