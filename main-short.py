@@ -1387,9 +1387,16 @@ def breakeven_lock_worker_short():
                     trailing_dist = compute_trailing_distance(symbol, trailing_base)
                     if place_trailing_stop_short(symbol, trailing_dist):
                         entry["trailing_active"] = True
+                        # FIX: imposta immediatamente BE come floor minimo del position SL (SHORT).
+                        # Il trailing inizia a (price_now + trailing_dist) che può essere
+                        # sopra entry se TRAIL_START_R < TRAIL_ATR_MULT/SL_ATR_MULT.
+                        be_floor = float(entry_price) * (1.0 + abs(BREAKEVEN_BUFFER))  # SHORT: SL sopra entry
+                        set_position_stoploss_short(symbol, be_floor)
+                        entry["be_locked"] = True
+                        entry["be_price"] = be_floor
                         set_position(symbol, entry)
-                        tlog(f"trail_on_short:{symbol}", f"[TRAIL-ON][SHORT] {symbol} attivo dist={trailing_dist:.6f}", 60)
-                        notify_telegram(f"🎯 Trailing attivato SHORT {symbol}\nPrezzo: {price_now:.4f}\nDistanza trailing: {trailing_dist:.6f}")
+                        tlog(f"trail_on_short:{symbol}", f"[TRAIL-ON][SHORT] {symbol} attivo dist={trailing_dist:.6f} BE-floor={be_floor:.6f}", 60)
+                        notify_telegram(f"🎯 Trailing attivato SHORT {symbol}\nPrezzo: {price_now:.4f}\nDistanza trailing: {trailing_dist:.6f}\nBE floor: {be_floor:.4f}")
             except Exception as _e:
                 if LOG_DEBUG_STRATEGY:
                     tlog(f"trail_on_exc_short:{symbol}", f"[TRAIL-ON-EXC][SHORT] {symbol} exc={_e}", 300)
