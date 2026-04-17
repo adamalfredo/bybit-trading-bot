@@ -85,7 +85,10 @@ RATCHET_TIERS_ROI = [
     (25, 15),
     (40, 25),
     (60, 40),
-    (80, 60)
+    (80, 60),
+    (100, 80),  # ENA-case: se arriva a +100% proteggi almeno +80%
+    (125, 100), # trade eccezionale: se +125% proteggi +100%
+    (150, 120), # moonshot: se +150% proteggi +120%
 ]
 FLOOR_BUFFER_PCT = 0.0015          # 0.15% di prezzo per sicurezza esecuzione
 FLOOR_UPDATE_COOLDOWN_SEC = 45     # cooldown più lungo per evitare rumore
@@ -271,7 +274,11 @@ def _on_regime_bearish_long():
     Le posizioni che hanno già ratchet/BE attivo vengono ignorate (già protette).
     """
     log("[REGIME-CHANGE][LONG] btc_fav True→False: stringo SL delle posizioni non protette → BE")
-    notify_telegram("⚠️ [REGIME-CHANGE] BTC ha perso il trend: sposto SL a breakeven sulle posizioni LONG senza protezione")
+    # Throttle: max 1 notifica ogni 30 minuti (BTC può oscillare intorno alla soglia più volte)
+    _rc_key = "regime_change_long_tg"
+    if time.time() - _last_log_times.get(_rc_key, 0) >= 1800:
+        _last_log_times[_rc_key] = time.time()
+        notify_telegram("⚠️ [REGIME-CHANGE] BTC ha perso il trend: sposto SL a breakeven sulle posizioni LONG senza protezione")
     for symbol in list(open_positions):
         try:
             entry = position_data.get(symbol)
