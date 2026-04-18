@@ -58,7 +58,7 @@ TRIGGER_BY = "LastPrice"
 STATE_FILE = "/tmp/position_state_short.json"
 
 def save_positions_state():
-    """Salva mfe_roi e floor_roi di ogni posizione su file per sopravvivere ai restart."""
+    """Salva mfe_roi, floor_roi e cooldown state su file per sopravvivere ai restart."""
     try:
         state = {}
         for symbol in list(open_positions):
@@ -70,6 +70,12 @@ def save_positions_state():
                     "entry_price": entry.get("entry_price"),
                     "floor_updated_ts": entry.get("floor_updated_ts", 0),
                 }
+        # Persisti cooldown post-loss: sopravvive ai restart di Railway
+        cooldown_state = {
+            sym: {"last_exit_time": last_exit_time[sym], "recent_losses": recent_losses.get(sym, 0)}
+            for sym in last_exit_time
+        }
+        state["__cooldown__"] = cooldown_state
         with open(STATE_FILE, "w") as f:
             json.dump(state, f)
     except Exception as _e:
@@ -158,7 +164,7 @@ ENTRY_ADX_STABLE = 25         # alzato da 24: riduce entry in trend deboli
 ADX_RELAX_EVENT = 3.0
 RSI_SHORT_THRESHOLD = 46.0
 LIQUIDITY_MIN_VOLUME = 1_000_000
-LINEAR_MIN_TURNOVER = 10_000_000  # allineato al bot LONG: esclude micro-cap illiquidi e token manipolati
+LINEAR_MIN_TURNOVER = 50_000_000  # 50M: esclude micro-cap speculativi e meme coin (era 10M, alzato dopo FART/BOME/RAVE)
 # Large-cap con minQty elevata: abilita auto-bump del notional al minimo (come nel LONG)
 LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 
@@ -638,7 +644,7 @@ def update_assets(top_n=12):
         breakout_cands   = sorted(
             [c for c in candidates
              if -BREAKOUT_LOSS_MAX <= c[2] <= -BREAKOUT_LOSS_MIN
-             and c[1] >= 50_000_000   # breakout richiedono liquidità elevata per evitare dump&pump micro-cap
+             and c[1] >= 200_000_000  # ALZATO 50M→200M: breakout slot solo su coin con mercato reale
              and c[0] not in already_selected],
             key=lambda c: c[2]
         )[:BREAKOUT_SLOTS]
@@ -727,7 +733,7 @@ def _bybit_signed_get(path: str, params: dict):
         from urllib.parse import urlencode
         query_string = urlencode(sorted(params.items()))
         ts = str(int(time.time() * 1000))
-        recv_window = "5000"
+        recv_window = "10000"
         payload = f"{ts}{KEY}{recv_window}{query_string}"
         sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
         headers = {
@@ -745,7 +751,7 @@ def _bybit_signed_get(path: str, params: dict):
 def _bybit_signed_post(path: str, body: dict):
     try:
         ts = str(int(time.time() * 1000))
-        recv_window = "5000"
+        recv_window = "10000"
         body_json = json.dumps(body, separators=(",", ":"))
         payload = f"{ts}{KEY}{recv_window}{body_json}"
         sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
@@ -819,7 +825,7 @@ def get_open_short_qty(symbol):
         from urllib.parse import urlencode
         query_string = urlencode(sorted(params.items()))
         ts = str(int(time.time() * 1000))
-        recv_window = "5000"
+        recv_window = "10000"
         sign_payload = f"{ts}{KEY}{recv_window}{query_string}"
         sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
         headers = {
@@ -852,7 +858,7 @@ def get_open_long_qty(symbol):
         from urllib.parse import urlencode
         query_string = urlencode(sorted(params.items()))
         ts = str(int(time.time() * 1000))
-        recv_window = "5000"
+        recv_window = "10000"
         sign_payload = f"{ts}{KEY}{recv_window}{query_string}"
         sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
         headers = {
@@ -2142,7 +2148,7 @@ def sync_positions_from_wallet():
     from urllib.parse import urlencode
     query_string = urlencode(sorted(params.items()))
     ts = str(int(time.time() * 1000))
-    recv_window = "5000"
+    recv_window = "10000"
     sign_payload = f"{ts}{KEY}{recv_window}{query_string}"
     sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
     headers = {
@@ -2280,6 +2286,19 @@ def sync_positions_from_wallet():
 # Aggiorna la lista asset all'avvio
 update_assets()
 sync_positions_from_wallet()
+
+# Ripristina cooldown state post-loss dal file (sopravvive ai restart)
+try:
+    _cd_state = load_positions_state().get("__cooldown__", {})
+    for _sym, _v in _cd_state.items():
+        if "last_exit_time" in _v:
+            last_exit_time[_sym] = float(_v["last_exit_time"])
+        if "recent_losses" in _v:
+            recent_losses[_sym] = int(_v["recent_losses"])
+    if _cd_state:
+        log(f"[COOLDOWN-RESTORE] Ripristinati cooldown per {list(_cd_state.keys())}")
+except Exception as _e:
+    log(f"[COOLDOWN-RESTORE] Errore: {_e}")
 
 def get_usdt_balance() -> float:
     return get_free_qty("USDT")
