@@ -2347,6 +2347,64 @@ be_lock_thread_short.start()
 profit_floor_thread_short = threading.Thread(target=profit_floor_worker_short, daemon=True)
 profit_floor_thread_short.start()
 
+def sl_watchdog_worker_short():
+    """
+    Worker di sicurezza: ogni 5 minuti controlla che ogni posizione SHORT aperta
+    abbia uno SL impostato su Bybit. Se manca, ritenta set_position_stoploss_short
+    e place_conditional_sl_short. Protegge in caso di errori API transitori.
+    """
+    log("[SL-WATCHDOG][SHORT] Worker avviato")
+    while True:
+        try:
+            time.sleep(300)  # ogni 5 minuti
+            endpoint = f"{BYBIT_BASE_URL}/v5/position/list"
+            params = {"category": "linear", "settleCoin": "USDT"}
+            resp = _bybit_signed_get("/v5/position/list", params)
+            data = resp.json() if hasattr(resp, 'json') else {}
+            if data.get("retCode") != 0:
+                continue
+            pos_list = data.get("result", {}).get("list", [])
+            for pos in pos_list:
+                if pos.get("side") != "Sell":
+                    continue
+                qty = float(pos.get("size", 0) or 0)
+                if qty <= 0:
+                    continue
+                symbol = pos.get("symbol", "")
+                sl_val = float(pos.get("stopLoss", 0) or 0)
+                if sl_val > 0:
+                    continue  # SL già impostato, ok
+                # SL mancante: calcola e reimpianta
+                entry = get_position(symbol)
+                if not entry:
+                    continue
+                sl_price = entry.get("sl")
+                if not sl_price:
+                    entry_price = float(entry.get("entry_price", 0))
+                    r_dist = float(entry.get("r_dist", entry_price * 0.04))
+                    _hard_cap = MAX_LOSS_CAP_PCT if symbol in VOLATILE_ASSETS else MAX_LOSS_CAP_PCT_STABLE
+                    sl_price = min(entry_price + r_dist, entry_price * (1.0 + _hard_cap))
+                cur = get_last_price(symbol)
+                if cur and sl_price <= cur:
+                    sl_price = cur * (1.0 + 0.02)  # fallback: 2% sopra prezzo corrente
+                ok_pos = set_position_stoploss_short(symbol, sl_price)
+                ok_cond = False
+                try:
+                    ok_cond = place_conditional_sl_short(symbol, sl_price, qty, trigger_by="MarkPrice")
+                except Exception:
+                    pass
+                if ok_pos or ok_cond:
+                    log(f"[SL-WATCHDOG][SHORT] ✅ SL reimpostato su {symbol} @ {sl_price:.6f}")
+                    notify_telegram(f"⚠️ [SL-WATCHDOG] SL mancante rilevato e reimpostato\n{symbol} SHORT @ {sl_price:.4f}")
+                else:
+                    log(f"[SL-WATCHDOG][SHORT] 🚨 SL REIMPOSTAZIONE FALLITA su {symbol} @ {sl_price:.6f}")
+                    notify_telegram(f"🚨 [SL-WATCHDOG] SL MANCANTE e FALLITO su {symbol}!\nEntry={entry.get('entry_price'):.4f} SL target={sl_price:.4f}\n⚠️ INTERVIENI MANUALMENTE")
+        except Exception as _e:
+            log(f"[SL-WATCHDOG][SHORT] Eccezione: {_e}")
+
+sl_watchdog_thread_short = threading.Thread(target=sl_watchdog_worker_short, daemon=True)
+sl_watchdog_thread_short.start()
+
 while True:
     # Aggiorna la lista asset dinamicamente ogni ciclo
     update_assets()
