@@ -1349,7 +1349,8 @@ def set_position_stoploss_short(symbol: str, sl_price: float) -> bool:
         "symbol": symbol,
         "stopLoss": stop_str,
         "slTriggerBy": "MarkPrice",
-        "positionIdx": SHORT_IDX
+        "positionIdx": SHORT_IDX,
+        "tpslMode": "Full"
     }
     try:
         resp = _bybit_signed_post("/v5/position/trading-stop", body)
@@ -1357,6 +1358,7 @@ def set_position_stoploss_short(symbol: str, sl_price: float) -> bool:
         ok = data.get("retCode") == 0
         if not ok:
             log(f"[POS-SL][SHORT] {symbol} FALLITO retCode={data.get('retCode')} msg={data.get('retMsg')} stopLoss={stop_str}")
+            notify_telegram(f"⚠️ [POS-SL][SHORT] {symbol} position-SL FALLITO\nretCode={data.get('retCode')} {data.get('retMsg')}\nSL target={stop_str}")
         return ok
     except Exception as e:
         log(f"[POS-SL][SHORT] {symbol} eccezione: {e}")
