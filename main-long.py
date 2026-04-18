@@ -2320,8 +2320,31 @@ def sl_watchdog_worker_long():
                 symbol = pos.get("symbol", "")
                 sl_val = float(pos.get("stopLoss", 0) or 0)
                 if sl_val > 0:
-                    continue  # SL già impostato, ok
-                # SL mancante: calcola e reimpianta
+                    continue  # SL position-level già impostato, ok
+                # Posizione SL vuoto: controlla se esiste già un ordine stop condizionale (backup)
+                # Su Bybit UNIFIED, cancel_all(StopOrder) può cancellare il tpslOrder → posLoss torna 0
+                # ma il conditional stop-market (StopOrder) protegge ugualmente la posizione.
+                has_conditional_sl = False
+                try:
+                    o_resp = _bybit_signed_get("/v5/order/realtime", {
+                        "category": "linear", "symbol": symbol,
+                        "orderFilter": "StopOrder", "limit": "10"
+                    })
+                    o_data = o_resp.json() if hasattr(o_resp, 'json') else {}
+                    if o_data.get("retCode") == 0:
+                        for o in o_data.get("result", {}).get("list", []):
+                            if (o.get("side") == "Sell"
+                                    and float(o.get("triggerPrice", 0) or 0) > 0
+                                    and o.get("reduceOnly")):
+                                has_conditional_sl = True
+                                break
+                except Exception:
+                    pass
+                if has_conditional_sl:
+                    # Conditional stop presente: posizione protetta, nessuna azione necessaria
+                    tlog(f"sl_watch_cond_ok:{symbol}", f"[SL-WATCHDOG][LONG] {symbol} conditional SL presente, ok", 300)
+                    continue
+                # Né position SL né conditional order: situazione veramente scoperta
                 entry = get_position(symbol)
                 if not entry:
                     continue
