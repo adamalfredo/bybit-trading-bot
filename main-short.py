@@ -1610,9 +1610,6 @@ def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigg
         qty_str = _format_qty_with_step(float(qty), qty_step)
         stop_str = format_price_bybit(stop_price, price_step)     # <<< aggiunto
 
-        # Cancella ordini stop esistenti per evitare accumulo (limite Bybit: 10 ordini)
-        cancel_all_orders(symbol, "StopOrder")
-
         body = {
             "category": "linear",
             "symbol": symbol,
@@ -2352,14 +2349,13 @@ profit_floor_thread_short.start()
 def sl_watchdog_worker_short():
     """
     Worker di sicurezza: ogni 5 minuti controlla che ogni posizione SHORT aperta
-    abbia uno SL impostato su Bybit. Se manca, ritenta set_position_stoploss_short
-    e place_conditional_sl_short. Protegge in caso di errori API transitori.
+    abbia il position-level SL impostato su Bybit. Se manca, usa solo
+    set_position_stoploss_short (nessun conditional order per evitare cancel_all loop).
     """
     log("[SL-WATCHDOG][SHORT] Worker avviato")
     while True:
         try:
             time.sleep(300)  # ogni 5 minuti
-            endpoint = f"{BYBIT_BASE_URL}/v5/position/list"
             params = {"category": "linear", "settleCoin": "USDT"}
             resp = _bybit_signed_get("/v5/position/list", params)
             data = resp.json() if hasattr(resp, 'json') else {}
@@ -2376,28 +2372,8 @@ def sl_watchdog_worker_short():
                 sl_val = float(pos.get("stopLoss", 0) or 0)
                 if sl_val > 0:
                     continue  # SL position-level già impostato, ok
-                # Controlla se esiste già un ordine stop condizionale (Buy-side) come backup
-                has_conditional_sl = False
-                try:
-                    o_resp = _bybit_signed_get("/v5/order/realtime", {
-                        "category": "linear", "symbol": symbol,
-                        "orderFilter": "StopOrder", "limit": "10"
-                    })
-                    o_data = o_resp.json() if hasattr(o_resp, 'json') else {}
-                    if o_data.get("retCode") == 0:
-                        for o in o_data.get("result", {}).get("list", []):
-                            if (o.get("side") == "Buy"
-                                    and float(o.get("triggerPrice", 0) or 0) > 0
-                                    and o.get("reduceOnly")):
-                                has_conditional_sl = True
-                                break
-                except Exception:
-                    pass
-                if has_conditional_sl:
-                    tlog(f"sl_watch_cond_ok:{symbol}", f"[SL-WATCHDOG][SHORT] {symbol} conditional SL presente, ok", 300)
-                    continue
-                # Né position SL né conditional order: situazione veramente scoperta
-                entry = get_position(symbol)
+                # SL mancante: calcola e reimpianta SOLO position-level (no conditional per evitare loop)
+                entry = position_data.get(symbol)
                 if not entry:
                     continue
                 sl_price = entry.get("sl")
@@ -2408,14 +2384,9 @@ def sl_watchdog_worker_short():
                     sl_price = min(entry_price + r_dist, entry_price * (1.0 + _hard_cap))
                 cur = get_last_price(symbol)
                 if cur and sl_price <= cur:
-                    sl_price = cur * (1.0 + 0.02)  # fallback: 2% sopra prezzo corrente
+                    sl_price = cur * (1.0 + 0.02)
                 ok_pos = set_position_stoploss_short(symbol, sl_price)
-                ok_cond = False
-                try:
-                    ok_cond = place_conditional_sl_short(symbol, sl_price, qty, trigger_by="MarkPrice")
-                except Exception:
-                    pass
-                if ok_pos or ok_cond:
+                if ok_pos:
                     log(f"[SL-WATCHDOG][SHORT] ✅ SL reimpostato su {symbol} @ {sl_price:.6f}")
                     notify_telegram(f"⚠️ [SL-WATCHDOG] SL mancante rilevato e reimpostato\n{symbol} SHORT @ {sl_price:.4f}")
                 else:
