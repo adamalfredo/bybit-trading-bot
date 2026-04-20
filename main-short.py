@@ -175,7 +175,7 @@ SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "2.0"))   # FIX: era 1.4, SL più l
 TP1_R = float(os.getenv("TP1_R", "2.5"))             # FIX: era 1.0, R:R almeno 2.5:1
 TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.65"))  # OPT: alzato da 0.50 a 0.65 — incassa più profitto al TP1, migliora avg win
 BE_AT_R = float(os.getenv("BE_AT_R", "1.0"))
-TRAIL_START_R = float(os.getenv("TRAIL_START_R", "0.5"))  # FIX: abbassato da 1.5 a 0.5 per attivazione trailing prima
+TRAIL_START_R = float(os.getenv("TRAIL_START_R", "1.0"))  # FIX: alzato da 0.5 a 1.0 — a 0.5R il BE floor era sopra il prezzo → Bybit rifiutava SL
 TRAIL_ATR_MULT = float(os.getenv("TRAIL_ATR_MULT", "1.3"))
 
 # --- Stima fee per expectancy (percentuali lato notional) ---
@@ -1400,6 +1400,8 @@ def breakeven_lock_worker_short():
                         # Il trailing inizia a (price_now + trailing_dist) che può essere
                         # sopra entry se TRAIL_START_R < TRAIL_ATR_MULT/SL_ATR_MULT.
                         be_floor = float(entry_price) * (1.0 + abs(BREAKEVEN_BUFFER))  # SHORT: SL sopra entry
+                        # Guard: per SHORT il be_floor non può mai essere sotto il prezzo corrente
+                        be_floor = max(be_floor, price_now * 1.001)
                         set_position_stoploss_short(symbol, be_floor)
                         entry["be_locked"] = True
                         entry["be_price"] = be_floor

@@ -174,7 +174,7 @@ SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "2.0"))   # FIX: era 1.4, SL più l
 TP1_R = float(os.getenv("TP1_R", "2.5"))             # FIX: era 1.0, R:R almeno 2.5:1
 TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.65"))  # OPT: alzato da 0.50 a 0.65 — incassa più profitto al TP1, migliora avg win
 BE_AT_R = float(os.getenv("BE_AT_R", "1.0"))
-TRAIL_START_R = float(os.getenv("TRAIL_START_R", "0.5"))  # FIX: abbassato da 1.5 a 0.5 per attivazione trailing prima
+TRAIL_START_R = float(os.getenv("TRAIL_START_R", "1.0"))  # FIX: alzato da 0.5 a 1.0 — a 0.5R il BE floor (entry+1.2%) era sopra il prezzo → Bybit rifiutava SL
 TRAIL_ATR_MULT = float(os.getenv("TRAIL_ATR_MULT", "1.3"))
 
 # --- Stima fee per expectancy (percentuali lato notional) ---
@@ -196,7 +196,14 @@ EXCLUSION_LIST = [
     "PAXGUSDT", "XAUTUSDT", "XAUUSDT", "XAGUSDT",
     # Blacklist performance: peggior asset per PnL storico (mese corrente)
     "BTCUSDT",    # -1.50 USDT su 3 trade, notional enorme per ogni SL hit
-    "LABUSDT",   # -1.05 USDT su 2 trade WR 0%, entrate durante crash-loop
+    "LABUSDT",   # -1.05 USDT su 2 trade WR 0%
+    # Meme coin ad alta volatilità: anche sopra 50M turnover durante pump, SL ATR enorme → perdite >80% ROI
+    "BOMEUSDT",   # -141% ROI 20/04, meme coin inaffidabile
+    "FARTCOINUSDT", # -80% ROI 18/04, già in blacklist di fatto
+    "1000PEPEUSDT", # meme coin, SL troppo largo
+    # Asset strutturalmente in trend ribassista durante questo ciclo
+    "TAOUSDT",    # -30% ROI aperto, trend ribassista persistente
+    "ENAUSDT",    # -80% ROI 20/04 su seconda entrata, cooldown insufficiente
 ]
 
 # Cache leggera prezzo (TTL in secondi)
@@ -1364,6 +1371,8 @@ def breakeven_lock_worker_long():
                         # sotto entry se TRAIL_START_R < TRAIL_ATR_MULT/SL_ATR_MULT.
                         # Il BE garantisce che il peggio sia l'entry, non una perdita.
                         be_floor = float(entry_price) * (1.0 + BREAKEVEN_BUFFER)
+                        # Guard: be_floor non può mai essere sopra il prezzo corrente (causerebbe retCode=10001)
+                        be_floor = min(be_floor, price_now * 0.999)
                         set_position_stoploss_long(symbol, be_floor)
                         entry["be_locked"] = True
                         entry["be_price"] = be_floor
