@@ -2470,14 +2470,15 @@ while True:
             if _weekly_block:
                 tlog(f"weekly_block:{symbol}", f"[WEEKLY-DD] protezione settimanale attiva, skip SHORT {symbol}", 600)
                 continue
-            # BEAR-GATE: SHORT opera solo se BTC 4h + daily ENTRAMBI in downtrend confermato
-            if not (_btc_favorable_short and _btc_daily_down_short):
-                tlog(f"bear_gate:{symbol}", f"[BEAR-GATE][SHORT] bear non confermato (4h={_btc_favorable_short} daily={_btc_daily_down_short}), skip {symbol}", 600)
+            # BEAR-GATE: SHORT apre se almeno UNO tra 4h o daily è in downtrend.
+            # Il doppio lock (4h AND daily) era troppo restrittivo: in un mercato laterale
+            # BTC oscilla e il bot non apriva mai. Basta che il daily sia ribassista.
+            if not (_btc_favorable_short or _btc_daily_down_short):
+                tlog(f"bear_gate:{symbol}", f"[BEAR-GATE][SHORT] né 4h né daily in downtrend, skip {symbol}", 600)
                 continue
-            # Uptrend guard — BTC 4h in uptrend: blocco totale nuove aperture SHORT
-            if _btc_uptrend_short:
-                tlog(f"uptrend_gate:{symbol}", f"[UPTREND-GATE][SHORT] BTC 4h uptrend, skip entry {symbol}", 600)
-                continue
+            # Uptrend guard allentato: blocca solo se BTC pump attivo (15m), non su EMA200 4h.
+            # L'EMA200 4h si attiva su qualsiasi rimbalzo tecnico e bloccava per ore inutilmente.
+            # Il pump guard 15m è sufficiente come protezione contro rimbalzi improvvisi.
             # Fix #1: pump guard — BTC sta salendo velocemente, skip nuove aperture SHORT
             if _btc_pumping_short:
                 tlog(f"pump_gate:{symbol}", f"[PUMP-GATE][SHORT] BTC pump attivo, skip entry {symbol}", 300)
