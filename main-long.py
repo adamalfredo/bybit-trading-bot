@@ -1318,10 +1318,14 @@ def set_position_stoploss_long(symbol: str, sl_price: float) -> bool:
     try:
         resp = _bybit_signed_post("/v5/position/trading-stop", body)
         data = resp.json()
-        ok = data.get("retCode") == 0
+        ret = data.get("retCode")
+        ok = ret == 0
         if not ok:
-            log(f"[POS-SL][LONG] {symbol} FALLITO retCode={data.get('retCode')} msg={data.get('retMsg')} stopLoss={stop_str}")
-            notify_telegram(f"⚠️ [POS-SL][LONG] {symbol} position-SL FALLITO\nretCode={data.get('retCode')} {data.get('retMsg')}\nSL target={stop_str}")
+            if ret == 34040:  # "not modified": SL già impostato a questo valore, non è un errore reale
+                log(f"[POS-SL][LONG] {symbol} già impostato ({stop_str}), skip")
+            else:
+                log(f"[POS-SL][LONG] {symbol} FALLITO retCode={ret} msg={data.get('retMsg')} stopLoss={stop_str}")
+                notify_telegram(f"⚠️ [POS-SL][LONG] {symbol} position-SL FALLITO\nretCode={ret} {data.get('retMsg')}\nSL target={stop_str}")
         return ok
     except Exception as e:
         log(f"[POS-SL][LONG] {symbol} eccezione: {e}")
