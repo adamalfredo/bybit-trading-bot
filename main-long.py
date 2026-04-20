@@ -2623,6 +2623,13 @@ while True:
             entry = position_data.get(symbol, {})
             entry_price = entry.get("entry_price", price)
             entry_cost = entry.get("entry_cost", ORDER_USDT)
+
+            # Se ratchet floor o BE lock sono già attivi, il SL sul broker è già impostato
+            # in territorio profittevole. Non chiudere con market order (slippage inutile) —
+            # lascia che il SL del broker gestisca l'uscita e permetti al trend di continuare.
+            if entry.get("floor_roi") is not None or entry.get("be_locked"):
+                tlog(f"exit_skip:{symbol}", f"[EXIT-SKIP][LONG] {symbol} ratchet floor={entry.get('floor_roi')}% / be_locked={entry.get('be_locked')} attivo → ignoro exit signal, SL broker gestisce", 300)
+                continue
             
             qty = get_open_long_qty(symbol)
             if not qty or qty <= 0:
