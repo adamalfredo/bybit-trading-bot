@@ -194,16 +194,9 @@ EXCLUSION_LIST = [
     "FUSDT", "YBUSDT", "ZBTUSDT", "RECALLUSDT", "XPLUSDT", "BRETTUSDT", "STABLEUSDT",
     # Commodity / metalli: seguono oro/argento, non crypto → indicatori 60m inutili su questi asset
     "PAXGUSDT", "XAUTUSDT", "XAUUSDT", "XAGUSDT",
-    # Blacklist performance: peggior asset per PnL storico (mese corrente)
-    "BTCUSDT",    # -1.50 USDT su 3 trade, notional enorme per ogni SL hit
-    "LABUSDT",   # -1.05 USDT su 2 trade WR 0%
-    # Meme coin ad alta volatilità: anche sopra 50M turnover durante pump, SL ATR enorme → perdite >80% ROI
-    "BOMEUSDT",   # -141% ROI 20/04, meme coin inaffidabile
-    "FARTCOINUSDT", # -80% ROI 18/04, già in blacklist di fatto
-    "1000PEPEUSDT", # meme coin, SL troppo largo
-    # Asset strutturalmente in trend ribassista durante questo ciclo
-    "TAOUSDT",    # -30% ROI aperto, trend ribassista persistente
-    "ENAUSDT",    # -80% ROI 20/04 su seconda entrata, cooldown insufficiente
+    "BTCUSDT",    # escluso: il sizing ATR su BTC produce notional sproporzionato rispetto al RISK_PCT
+    "LABUSDT",    # escluso: illiquido, spread elevato, min_qty crea rischio reale >1.5× budget spesso
+    # Non usare blacklist per performance passate: usare ATR_RATIO_MAX_ENTRY per filtrare ipervolatilità
 ]
 
 # Cache leggera prezzo (TTL in secondi)
@@ -2488,8 +2481,11 @@ while True:
                     atr_val = atr.iloc[-1]
                     last_price = df_hist["Close"].iloc[-1]
                     atr_ratio = atr_val / last_price if last_price > 0 else 0
+                    # Hard skip: ATR > 8% del prezzo → SL ATR-based sarebbe >16% (160% ROI loss a 10x)
+                    # Questo filtra strutturalmente meme coin e asset in crash, senza blacklist hardcoded
                     if atr_ratio > 0.08:
-                        strength *= 0.5
+                        tlog(f"atr_volatile:{symbol}", f"[SKIP-ATR][LONG] {symbol} ATR/prezzo={atr_ratio:.1%} > 8%, troppo volatile per SL ATR-based", 600)
+                        continue
                     elif atr_ratio > 0.04:
                         strength *= 0.75
                 except Exception:

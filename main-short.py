@@ -2561,15 +2561,13 @@ while True:
                 atr_val = last_hist["atr"]
                 last_price = last_hist["Close"]
                 atr_ratio = atr_val / last_price if last_price > 0 else 0
-                # Se la volatilità è molto alta, riduci la size ordine
+                # Hard skip: ATR > 8% del prezzo → SL ATR-based sarebbe >16% (160% ROI loss a 10x)
+                # Questo filtra strutturalmente meme coin e asset in crash, senza blacklist hardcoded
                 if atr_ratio > 0.08:
-                    strength *= 0.5
-                    if LOG_DEBUG_STRATEGY:
-                        log(f"[VOLATILITÀ] {symbol}: ATR/Prezzo molto alto ({atr_ratio:.2%}), size dimezzata.")
+                    tlog(f"atr_volatile:{symbol}", f"[SKIP-ATR][SHORT] {symbol} ATR/prezzo={atr_ratio:.1%} > 8%, troppo volatile per SL ATR-based", 600)
+                    continue
                 elif atr_ratio > 0.04:
                     strength *= 0.75
-                    if LOG_DEBUG_STRATEGY:
-                        log(f"[VOLATILITÀ] {symbol}: ATR/Prezzo elevato ({atr_ratio:.2%}), size -25%.")
 
             # --- Sizing basato sul rischio (ATR 4h e R) ---
             price_now_calc = get_last_price(symbol) or price
