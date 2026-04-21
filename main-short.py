@@ -1341,6 +1341,14 @@ def cancel_all_orders(symbol: str, order_filter: Optional[str] = None) -> bool:
 
 # >>> PATCH: funzioni per impostare lo stopLoss sulla posizione (SHORT) e worker BE
 def set_position_stoploss_short(symbol: str, sl_price: float) -> bool:
+    # Guard preventivo: per SHORT il SL deve essere SOPRA il prezzo corrente.
+    # Se il valore è stale (prezzo si è mosso contro la SHORT dopo che il ratchet
+    # aveva abbassato il floor), skippare silenziosamente evita retCode=10001.
+    cur = get_last_price(symbol)
+    if cur and sl_price <= cur:
+        tlog(f"sl_invalid_short:{symbol}", f"[POS-SL][SHORT] {symbol} SL={sl_price:.6f} <= prezzo={cur:.6f}: valore stale, skip", 300)
+        return False
+
     info = get_instrument_info(symbol)
     price_step = info.get("price_step", 0.01)
     stop_str = format_price_bybit(sl_price, price_step)
@@ -1360,6 +1368,9 @@ def set_position_stoploss_short(symbol: str, sl_price: float) -> bool:
         if not ok:
             if ret == 34040:  # "not modified": SL già impostato a questo valore, non è un errore reale
                 log(f"[POS-SL][SHORT] {symbol} già impostato ({stop_str}), skip")
+            elif ret == 10001 and "greater" in (data.get("retMsg") or "").lower():
+                # SL sotto prezzo corrente: guard sopra dovrebbe prevenirlo, ma per sicurezza
+                tlog(f"sl_invalid_short:{symbol}", f"[POS-SL][SHORT] {symbol} retCode=10001 SL stale ({stop_str} < prezzo), skip", 300)
             else:
                 log(f"[POS-SL][SHORT] {symbol} FALLITO retCode={ret} msg={data.get('retMsg')} stopLoss={stop_str}")
                 notify_telegram(f"⚠️ [POS-SL][SHORT] {symbol} position-SL FALLITO\nretCode={ret} {data.get('retMsg')}\nSL target={stop_str}")
