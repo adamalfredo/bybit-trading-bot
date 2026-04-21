@@ -421,6 +421,13 @@ def _update_btc_context_long():
                 _on_regime_bearish_long()
             except Exception as _re:
                 log(f"[REGIME-CHANGE][LONG] errore handler: {_re}")
+        # Gap1b: transizione bear→bull → notifica recupero trend (no azione sui SL, già gestiti dal ratchet)
+        if not _prev and _btc_favorable_long:
+            _rc_bull_key = "regime_change_long_bull_tg"
+            if time.time() - _last_log_times.get(_rc_bull_key, 0) >= 1800:
+                _last_log_times[_rc_bull_key] = time.time()
+                n_pos = len(open_positions)
+                notify_telegram(f"✅ [REGIME-CHANGE] BTC ha recuperato il trend 4h → contesto LONG favorevole\nPosizioni aperte: {n_pos}")
 
 def _get_oi_change(symbol: str) -> float | None:
     """Restituisce la variazione % di Open Interest nell'ultima ora (intervalTime=1h).
