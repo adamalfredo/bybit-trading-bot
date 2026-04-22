@@ -105,6 +105,7 @@ BREAKEVEN_LOCK_PCT = 0.025  # FIX2: era 0.015, attiva BE al +2.5% di prezzo (pi�
 BREAKEVEN_BUFFER   = 0.012  # FIX2: era 0.006, buffer più largo per evitare noise-stop su BE
 MAX_LOSS_CAP_PCT        = 0.15  # hard cap emergenza: SL primario è ATR-based; questo scatta solo se ATR > 15% (volatile)
 MAX_LOSS_CAP_PCT_STABLE = 0.10  # hard cap emergenza: SL primario è ATR-based; questo scatta solo se ATR > 10% (stabile: AAVE, LINK)
+SIGNAL_EXPIRY_MIN_AGE_H = 24   # ore minime di vita prima che signal expiry sia valutata (zombie stop)
 
 # >>> NEW: regime + drawdown giornaliero (LONG)
 DAILY_DD_CAP_PCT = 0.04
@@ -2742,6 +2743,54 @@ while True:
                 entry["be_locked"] = True
                 entry["be_price"] = be_price
                 tlog(f"be_lock_safety:{symbol}", f"[BE-LOCK-SAFETY][LONG] SL→BE {be_price:.6f}", 60)
+
+    # --- SIGNAL EXPIRY: chiudi posizioni zombie (>24h in perdita, segnale coin invertito) ---
+    # Non usa il regime BTC (troppo oscillante): valuta il segnale MACD/tecnico della coin stessa.
+    # Libera slot bloccati da trade "morti" prima che il prezzo faccia un secondo leg contro.
+    for symbol in list(open_positions):
+        entry = position_data.get(symbol)
+        if not entry:
+            continue
+        # Non toccare posizioni già protette da ratchet o breakeven lock
+        if entry.get("floor_roi") is not None or entry.get("be_locked"):
+            continue
+        age_h = (time.time() - entry.get("entry_time", time.time())) / 3600
+        if age_h < SIGNAL_EXPIRY_MIN_AGE_H:
+            continue
+        price_now = get_last_price(symbol)
+        if not price_now:
+            continue
+        entry_price = entry.get("entry_price", price_now)
+        # LONG: in perdita solo se prezzo sotto entry
+        if price_now >= entry_price:
+            continue
+        # Verifica se il segnale tecnico della coin si è invertito (exit confermato)
+        try:
+            sig, reason, _ = analyze_asset(symbol)
+        except Exception:
+            continue
+        if sig != "exit":
+            continue
+        # Segnale invertito confermato → chiudi la posizione zombie
+        qty_live = get_open_long_qty(symbol)
+        if not qty_live or qty_live <= 0:
+            continue
+        tlog(f"signal_expiry:{symbol}", f"[SIGNAL-EXPIRY][LONG] {symbol} zombie {age_h:.1f}h, segnale invertito ({reason}) → chiudo", 300)
+        res = market_close_long(symbol, qty_live)
+        if res:
+            pnl_pct = (price_now - entry_price) / entry_price * 100.0 * DEFAULT_LEVERAGE
+            notify_telegram(
+                f"🧹 [SIGNAL-EXPIRY][LONG] Posizione zombie chiusa\n"
+                f"Simbolo: {symbol}\n"
+                f"Età: {age_h:.1f}h | Entry: {entry_price:.6f} | Uscita: {price_now:.6f}\n"
+                f"ROI stimato: {pnl_pct:.2f}%\n"
+                f"Motivo: {reason}"
+            )
+            discard_open(symbol)
+            record_exit(symbol, entry_price, price_now, "LONG")
+            with _state_lock:
+                position_data.pop(symbol, None)
+            cancel_all_orders(symbol)
 
     try:
         _send_daily_report()
