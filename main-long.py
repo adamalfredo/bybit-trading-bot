@@ -107,6 +107,15 @@ MAX_LOSS_CAP_PCT        = 0.15  # hard cap emergenza: SL primario è ATR-based; 
 MAX_LOSS_CAP_PCT_STABLE = 0.10  # hard cap emergenza: SL primario è ATR-based; questo scatta solo se ATR > 10% (stabile: AAVE, LINK)
 SIGNAL_EXPIRY_MIN_AGE_H = 24   # ore minime di vita prima che signal expiry sia valutata (zombie stop)
 
+# Active Loss Trailing (ALT) — ratchet speculare verso le perdite
+# Se il trade non mostra momentum positivo (mfe_roi < soglia) entro le prime ore,
+# stringe progressivamente lo SL: -1×R → -0.65×R (4h) → -0.40×R (8h)
+ALT_CONFIRM_ROI = 5.0   # ROI% minimo per considerare il trade "confermato" (≈ 0.25R a 10x)
+ALT_STEP1_H     = 4     # ore: Step 1 scatta se non confermato entro 4h
+ALT_STEP2_H     = 8     # ore: Step 2 scatta se non confermato entro 8h
+ALT_STEP1_MULT  = 0.65  # Step 1: SL = entry - 0.65×r_dist (35% perdita in meno)
+ALT_STEP2_MULT  = 0.40  # Step 2: SL = entry - 0.40×r_dist (60% perdita in meno)
+
 # >>> NEW: regime + drawdown giornaliero (LONG)
 DAILY_DD_CAP_PCT = 0.04
 WEEKLY_DD_CAP_PCT = float(os.getenv("WEEKLY_DD_CAP_PCT", "0.08"))  # Gap3: blocca nuovi ingressi se equity < -8% rispetto a 7gg fa
@@ -2308,11 +2317,85 @@ def get_portfolio_value():
     return total_equity, usdt_balance, coin_values
 
  
+def active_loss_trailing_worker_long():
+    """
+    Active Loss Trailing (ALT) — il ratchet "al contrario".
+    Se il trade non mostra momentum positivo (mfe_roi < ALT_CONFIRM_ROI) entro
+    le prime ore, stringe progressivamente lo SL riducendo la perdita massima:
+      Step 0 (0-4h):   SL invariato = entry - 1.0×r_dist
+      Step 1 (4-8h):   SL = entry - 0.65×r_dist  (-35% perdita potenziale)
+      Step 2 (>8h):    SL = entry - 0.40×r_dist  (-60% perdita potenziale)
+    Non tocca posizioni già protette da ratchet (floor_roi) o breakeven (be_locked).
+    """
+    log("[ALT-LONG] Worker avviato")
+    while True:
+        try:
+            for symbol in list(open_positions):
+                with _state_lock:
+                    entry = position_data.get(symbol)
+                if not entry:
+                    continue
+                # Non toccare posizioni già protette
+                if entry.get("be_locked") or entry.get("floor_roi") is not None:
+                    continue
+                # Se il trade ha già confermato momentum positivo → non interferire
+                if entry.get("mfe_roi", 0.0) >= ALT_CONFIRM_ROI:
+                    continue
+                r_dist = entry.get("r_dist")
+                if not r_dist or float(r_dist) <= 0:
+                    continue
+                entry_price = entry.get("entry_price")
+                entry_time = entry.get("entry_time", time.time())
+                if not entry_price:
+                    continue
+                age_h = (time.time() - entry_time) / 3600
+                current_alt_step = entry.get("alt_step", 0)
+                # Determina step applicabile basato sull'età
+                target_step = 0
+                if age_h >= ALT_STEP2_H:
+                    target_step = 2
+                elif age_h >= ALT_STEP1_H:
+                    target_step = 1
+                if target_step == 0 or target_step <= current_alt_step:
+                    continue  # troppo presto o già applicato
+                mult = ALT_STEP1_MULT if target_step == 1 else ALT_STEP2_MULT
+                new_sl = float(entry_price) - (mult * float(r_dist))
+                current_sl = float(entry.get("sl", 0.0))
+                # Il nuovo SL deve essere strettamente più alto di quello corrente
+                if new_sl <= current_sl:
+                    entry["alt_step"] = target_step
+                    set_position(symbol, entry)
+                    continue
+                # Il nuovo SL non può mai essere sopra il prezzo corrente
+                price_now = get_last_price(symbol)
+                if not price_now or new_sl >= price_now:
+                    continue
+                ok = set_position_stoploss_long(symbol, new_sl)
+                entry["alt_step"] = target_step
+                entry["sl"] = new_sl
+                with _state_lock:
+                    position_data[symbol] = entry
+                tlog(f"alt_long:{symbol}",
+                     f"[ALT][LONG] {symbol} Step{target_step} età={age_h:.1f}h mfe={entry.get('mfe_roi',0.0):.1f}% "
+                     f"SL {current_sl:.6f}→{new_sl:.6f} (×{mult:.2f}R) set={ok}", 60)
+                notify_telegram(
+                    f"⚡ [ALT][LONG] SL stretto — {symbol}\n"
+                    f"Età: {age_h:.1f}h senza conferma momentum\n"
+                    f"SL: {current_sl:.6f} → {new_sl:.6f}\n"
+                    f"Perdita max ridotta del {(1-mult)*100:.0f}%"
+                )
+        except Exception as _e:
+            log(f"[ALT-LONG][CRASH] {_e}")
+        time.sleep(30)
+
+
 # >>> PATCH: avvio worker di breakeven lock (LONG)
 be_lock_thread_long = threading.Thread(target=breakeven_lock_worker_long, daemon=True)
 be_lock_thread_long.start()
 profit_floor_thread_long = threading.Thread(target=profit_floor_worker_long, daemon=True)
 profit_floor_thread_long.start()
+alt_thread_long = threading.Thread(target=active_loss_trailing_worker_long, daemon=True)
+alt_thread_long.start()
 
 def sl_watchdog_worker_long():
     """
