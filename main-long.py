@@ -111,10 +111,12 @@ SIGNAL_EXPIRY_MIN_AGE_H = 24   # ore minime di vita prima che signal expiry sia 
 # Se il trade non mostra momentum positivo (mfe_roi < soglia) entro le prime ore,
 # stringe progressivamente lo SL: -1×R → -0.65×R (4h) → -0.40×R (8h)
 ALT_CONFIRM_ROI = 5.0   # ROI% minimo per considerare il trade "confermato" (≈ 0.25R a 10x)
-ALT_STEP1_H     = 4     # ore: Step 1 scatta se non confermato entro 4h
-ALT_STEP2_H     = 8     # ore: Step 2 scatta se non confermato entro 8h
+ALT_STEP1_H     = 1.5   # ore: Step 1 scatta se non confermato entro 1.5h (era 4h)
+ALT_STEP2_H     = 3.0   # ore: Step 2 scatta se non confermato entro 3h (era 8h)
 ALT_STEP1_MULT  = 0.65  # Step 1: SL = entry - 0.65×r_dist (35% perdita in meno)
 ALT_STEP2_MULT  = 0.40  # Step 2: SL = entry - 0.40×r_dist (60% perdita in meno)
+ALT_BIG_LOSS_USDT   = 0.30  # soglia: se perdita > 0.30 USDT → cooldown esteso
+ALT_BIG_LOSS_CD_MIN = 1440  # cooldown 24h (in minuti) dopo perdita grande
 
 # >>> NEW: regime + drawdown giornaliero (LONG)
 DAILY_DD_CAP_PCT = 0.04
@@ -1739,11 +1741,21 @@ def record_exit(symbol: str, entry_price: float, exit_price: float, side: str):
     last_exit_time[symbol] = time.time()
     if side == "LONG":
         pnl_pct = ((exit_price - entry_price) / entry_price) * 100.0
+        pnl_usdt_est = (exit_price - entry_price)  # stima direzione, sizing non disponibile qui
     else:  # SHORT
         pnl_pct = ((entry_price - exit_price) / entry_price) * 100.0
+        pnl_usdt_est = (entry_price - exit_price)
     if pnl_pct < 0:
         recent_losses[symbol] = recent_losses.get(symbol, 0) + 1
         last_exit_was_loss[symbol] = True
+        # Fix B: perdita grande → cooldown esteso 24h per evitare re-entry immediato sulla stessa coin
+        # Usiamo MAX_LOSS_CAP_PCT come proxy: se pnl_pct peggio di -X% → perdita "grande"
+        if abs(pnl_pct) >= (MAX_LOSS_CAP_PCT * 0.5 * 100):  # oltre metà del cap = perdita grande
+            _extended_cd_until = time.time() + (ALT_BIG_LOSS_CD_MIN * 60)
+            last_exit_time[symbol] = _extended_cd_until - (COOLDOWN_MINUTES * 60)
+            # Sovrascrive il last_exit_time in modo che il cooldown standard calcoli 24h di attesa
+            last_exit_time[symbol] = time.time() - (COOLDOWN_MINUTES * 60) + (ALT_BIG_LOSS_CD_MIN * 60)
+            tlog(f"big_loss_cd:{symbol}", f"[BIG-LOSS-CD][LONG] {symbol} perdita grande ({pnl_pct:.1f}%) → cooldown 24h", 3600)
     else:
         recent_losses[symbol] = 0
         last_exit_was_loss[symbol] = False
