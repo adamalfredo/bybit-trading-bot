@@ -124,6 +124,8 @@ WEEKLY_DD_CAP_PCT = float(os.getenv("WEEKLY_DD_CAP_PCT", "0.08"))  # Gap3: blocc
 _btc_favorable_long = False    # True se BTC 4h in uptrend → contesto favorevole per LONG
 _btc_favorable_long_prev = False  # Gap1: stato precedente per rilevare transizione True→False
 _btc_dumping_long = False      # True se BTC 15m scende > -1.5% in 30 min (dump guard)
+_btc_daily_regime_ok = True    # True = BTC sopra EMA50 daily = regime bull = LONG consentiti
+_btc_daily_regime_ts = 0.0     # timestamp ultimo check regime daily
 _btc_ctx_ts = 0
 _btc_4h_chg_long: float = 0.0  # Imp1/Imp2: variazione BTC su 4h, usato per RS relativa e pesi adattivi
 _daily_start_equity = None
@@ -383,6 +385,7 @@ def _update_btc_context_long():
     Fix #1: calcola momentum 15m per rilevare dump improvvisi (dump guard).
     Gap1: rileva transizione True→False e attiva regime change handler."""
     global _btc_favorable_long, _btc_favorable_long_prev, _btc_dumping_long, _btc_ctx_ts, _btc_4h_chg_long
+    global _btc_daily_regime_ok, _btc_daily_regime_ts
     if time.time() - _btc_ctx_ts > 180:
         _prev = _btc_favorable_long
         try:
@@ -427,7 +430,28 @@ def _update_btc_context_long():
         except Exception:
             pass
         _btc_ctx_ts = time.time()
-        tlog("btc_ctx", f"[CTX] BTC 4h uptrend={_btc_favorable_long} | dumping={_btc_dumping_long} | btc_4h_chg={_btc_4h_chg_long:+.2f}%", 180)
+        # Regime daily: check ogni 4h — BTC vs EMA50 daily
+        # Se BTC < EMA50 daily = correzione/bear macro in corso → blocca nuovi LONG
+        if time.time() - _btc_daily_regime_ts > 14400:
+            try:
+                _rd = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/kline",
+                                  params={"category": "linear", "symbol": "BTCUSDT",
+                                          "interval": "D", "limit": 60}, timeout=10)
+                _dd = _rd.json()
+                if _dd.get("retCode") == 0 and _dd["result"]["list"]:
+                    _df_d = pd.DataFrame(_dd["result"]["list"],
+                                         columns=["ts","O","H","L","C","V","T"])
+                    _df_d["C"] = pd.to_numeric(_df_d["C"], errors="coerce")
+                    _df_d = _df_d.iloc[::-1].reset_index(drop=True)  # oldest-first
+                    _ema50d = EMAIndicator(close=_df_d["C"], window=50).ema_indicator()
+                    _btc_daily_regime_ok = float(_df_d["C"].iloc[-1]) > float(_ema50d.iloc[-1])
+                    tlog("btc_daily_regime",
+                         f"[CTX] BTC daily regime={'BULL' if _btc_daily_regime_ok else 'BEAR'} "
+                         f"| close={_df_d['C'].iloc[-1]:.0f} vs EMA50d={_ema50d.iloc[-1]:.0f}", 14400)
+                _btc_daily_regime_ts = time.time()
+            except Exception:
+                pass
+        tlog("btc_ctx", f"[CTX] BTC 4h uptrend={_btc_favorable_long} | dumping={_btc_dumping_long} | daily_regime={'BULL' if _btc_daily_regime_ok else 'BEAR'} | btc_4h_chg={_btc_4h_chg_long:+.2f}%", 180)
         # Gap1: transizione bull→bear → stringi SL posizioni non protette
         if _prev and not _btc_favorable_long and open_positions:
             try:
@@ -2515,6 +2539,10 @@ while True:
             # >>> BACKTEST MODE: blocca tutti i nuovi ingressi se ENTRY_PAUSED=1
             if ENTRY_PAUSED:
                 tlog(f"entry_paused:{symbol}", f"[ENTRY-PAUSED][LONG] ingressi sospesi (backtest mode), skip {symbol}", 600)
+                continue
+            # >>> REGIME DAILY: BTC sotto EMA50 daily = correzione macro → skip LONG
+            if not _btc_daily_regime_ok:
+                tlog(f"daily_regime:{symbol}", f"[DAILY-REGIME][LONG] BTC in downtrend daily (sotto EMA50d), skip {symbol}", 600)
                 continue
             # >>> GATE: blocca solo le NUOVE APERTURE (non gli exit)
             if ENABLE_DD_PAUSE and time.time() < _trading_paused_until:

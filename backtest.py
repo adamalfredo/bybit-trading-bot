@@ -63,31 +63,59 @@ DEFAULT_SYMBOLS = [
 # ─────────────────────────────────────────────
 
 def fetch_ohlcv(symbol: str, interval: int, days: int) -> Optional[pd.DataFrame]:
-    """Scarica dati OHLCV da Bybit. Interval in minuti."""
-    limit = min(1000, days * 24 * 60 // interval)
+    """Scarica dati OHLCV da Bybit con paginazione. Interval in minuti.
+    Bybit limita a 1000 candele per chiamata, quindi per 90gg su 60m
+    (2160 candele) servono 3 chiamate paginate all'indietro.
+    """
+    needed = days * 24 * 60 // interval + 250  # +250 barre warmup indicatori
     url = f"{BYBIT_BASE}/v5/market/kline"
-    params = {
-        "category": "linear",
-        "symbol": symbol,
-        "interval": str(interval),
-        "limit": limit,
-    }
-    try:
-        r = requests.get(url, params=params, timeout=15)
-        data = r.json()
-        if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
+    all_rows: list = []
+    end_ts: Optional[int] = None  # timestamp fine (ms) per paginazione
+
+    while len(all_rows) < needed:
+        params: dict = {
+            "category": "linear",
+            "symbol": symbol,
+            "interval": str(interval),
+            "limit": 1000,
+        }
+        if end_ts is not None:
+            params["end"] = end_ts
+        try:
+            r = requests.get(url, params=params, timeout=15)
+            data = r.json()
+        except Exception as e:
+            print(f"  [WARN] fetch_ohlcv {symbol}: {e}")
             return None
-        rows = data["result"]["list"]
-        df = pd.DataFrame(rows, columns=["ts","Open","High","Low","Close","Volume","turnover"])
+        if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
+            break
+        batch = data["result"]["list"]
+        if not batch:
+            break
+        all_rows = batch + all_rows  # batch è già ordinato desc → inversione
+        # La candela più vecchia del batch diventa il nuovo end_ts (esclusa)
+        oldest_ts = int(batch[-1][0])  # ts in ms
+        if end_ts is not None and oldest_ts >= end_ts:
+            break  # nessun progresso → fermati
+        end_ts = oldest_ts
+        if len(batch) < 1000:
+            break  # fine dati disponibili
+        time.sleep(0.1)
+
+    if not all_rows:
+        return None
+    try:
+        df = pd.DataFrame(all_rows, columns=["ts","Open","High","Low","Close","Volume","turnover"])
         for c in ("Open","High","Low","Close","Volume","turnover"):
             df[c] = pd.to_numeric(df[c], errors="coerce")
         df["ts"] = pd.to_numeric(df["ts"]) // 1000
         df.sort_values("ts", inplace=True)
+        df.drop_duplicates(subset="ts", inplace=True)
         df.reset_index(drop=True, inplace=True)
         df.dropna(subset=["Close"], inplace=True)
         return df
     except Exception as e:
-        print(f"  [WARN] fetch_ohlcv {symbol}: {e}")
+        print(f"  [WARN] fetch_ohlcv parse {symbol}: {e}")
         return None
 
 
@@ -110,11 +138,17 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["macd_sig"] = macd_obj.macd_signal()
     df["adx"]      = ADXIndicator(high=high, low=low, close=close).adx()
     df["atr"]      = AverageTrueRange(high=high, low=low, close=close, window=ATR_WINDOW).average_true_range()
-    df["vol_avg20"]= df["Volume"].rolling(20).mean().shift(1)  # vol medio CHIUSO (shift=1)
+    df["vol_avg20"]    = df["Volume"].rolling(20).mean().shift(1)  # vol medio CHIUSO (shift=1)
+    df["swing_high_20"] = df["High"].rolling(20).max().shift(1)   # massimo swing CHIUSO (resistance)
+    df["swing_low_20"]  = df["Low"].rolling(20).min().shift(1)    # minimo swing CHIUSO (support)
     df.dropna(inplace=True)
     df.reset_index(drop=True, inplace=True)
     return df
 
+
+# Parametri filtro qualità ingresso
+RR_MIN_ROOM   = 1.5   # room-to-run minima: distanza a swing high >= 1.5 × SL dist
+RSI_ENTRY_MAX = 68.0  # non entrare se RSI già overbought (movimento maturo)
 
 # ─────────────────────────────────────────────
 # Logica segnale ingresso (identica al bot)
@@ -150,6 +184,19 @@ def signal_entry(row, prev, sl_mult: float) -> bool:
     ext_cap = row["ema20"] + 1.5 * row["atr"]
     ext_ok = row["Close"] <= ext_cap
 
+    # ── FILTRI QUALITÀ INGRESSO ──────────────────────────────────────────
+    # 1. Macro trend filter: il prezzo deve essere sopra EMA200 al momento
+    #    dell'ingresso. Comprare sotto EMA200 significa comprare contro la
+    #    tendenza macro (downtrend) → R:R strutturalmente sfavorevole.
+    if row["Close"] < row["ema200"]:
+        return False
+
+    # 2. RSI cap: non entrare se il movimento è già maturo (RSI già overbought).
+    #    Il segnale ottimale è RSI 54-68: in trend ma non ancora esausto.
+    if row["rsi"] > RSI_ENTRY_MAX:
+        return False
+    # ────────────────────────────────────────────────────────────────────
+
     return event and (conf >= min_conf or conf >= MIN_CONFLUENCE) and adx_ok and vol_ok and ext_ok
 
 
@@ -161,11 +208,74 @@ def signal_exit(row, prev) -> bool:
 
 
 # ─────────────────────────────────────────────
+# Regime BTC (macro filter)
+# ─────────────────────────────────────────────
+
+def fetch_btc_regime(days: int) -> pd.Series:
+    """Scarica BTC daily e ritorna una Series bool indicizzata per giorno.
+    True = BTC sopra EMA200 daily = regime bull = LONG consentiti.
+    False = BTC sotto EMA200 daily = regime bear = LONG bloccati.
+    """
+    # Usiamo interval=D (daily) su Bybit: interval=1 giorno = 'D'
+    url = f"{BYBIT_BASE}/v5/market/kline"
+    needed = days + 250  # +250 barre warmup EMA200
+    all_rows: list = []
+    end_ts: Optional[int] = None
+
+    while len(all_rows) < needed:
+        params: dict = {
+            "category": "linear",
+            "symbol":   "BTCUSDT",
+            "interval": "D",
+            "limit":    1000,
+        }
+        if end_ts is not None:
+            params["end"] = end_ts
+        try:
+            r = requests.get(url, params=params, timeout=15)
+            data = r.json()
+        except Exception:
+            break
+        if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
+            break
+        batch = data["result"]["list"]
+        if not batch:
+            break
+        all_rows = batch + all_rows
+        oldest_ts = int(batch[-1][0])
+        if end_ts is not None and oldest_ts >= end_ts:
+            break
+        end_ts = oldest_ts
+        if len(batch) < 1000:
+            break
+        time.sleep(0.1)
+
+    if not all_rows:
+        return pd.Series(dtype=bool)  # se fallisce, non filtrare
+
+    df = pd.DataFrame(all_rows, columns=["ts","Open","High","Low","Close","Volume","turnover"])
+    df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+    df["ts"] = pd.to_numeric(df["ts"]) // 1000
+    df.sort_values("ts", inplace=True)
+    df.drop_duplicates(subset="ts", inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    df.dropna(subset=["Close"], inplace=True)
+
+    ema50 = EMAIndicator(close=df["Close"], window=50).ema_indicator()
+    bull = df["Close"] > ema50
+    # Indice = giorno (date) dalla colonna ts (unix seconds)
+    bull.index = pd.to_datetime(df["ts"], unit="s").dt.date
+    return bull
+
+
+# ─────────────────────────────────────────────
 # Simulazione trade su singolo simbolo
 # ─────────────────────────────────────────────
 
 def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
-             initial_equity: float = 100.0, risk_pct: float = 0.012) -> dict:
+             initial_equity: float = 100.0, risk_pct: float = 0.012,
+             trail_mult: float = TRAIL_ATR_MULT,
+             btc_regime: Optional[pd.Series] = None) -> dict:
     """
     Simula tutti i trade su df. Gestisce SL ATR-based, exit signal, ratchet.
     Ritorna dict con metriche e lista trade.
@@ -192,6 +302,17 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
 
             if not signal_entry(prev, df.iloc[i-2], sl_mult):
                 continue
+
+            # ── MACRO REGIME FILTER ────────────────────────────────────────
+            # Non aprire LONG se BTC è sotto la sua EMA200 daily.
+            # In downtrend macro una strategia momentum-long perde sistematicamente.
+            # btc_regime è un dict {date: bool} precomputato (lookup O(1))
+            if btc_regime is not None:
+                candle_date = pd.to_datetime(row["ts"], unit="s").date()
+                is_bull = btc_regime.get(candle_date, True)  # default True se data non trovata
+                if not is_bull:
+                    continue  # BTC in downtrend → skip ingresso LONG
+            # ──────────────────────────────────────────────────────────────
 
             # Calcola sizing: rischia risk_pct dell'equity
             atr = prev["atr"]
@@ -227,11 +348,11 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
             r_dist = entry_price - sl_price
             if high_now >= entry_price + TRAIL_START_R * r_dist and not trail_active:
                 trail_active = True
-                trail_dist   = TRAIL_ATR_MULT * atr_now
+                trail_dist   = trail_mult * atr_now
                 trail_sl     = max(trail_sl, entry_price)  # almeno BE
 
             if trail_active:
-                trail_dist = TRAIL_ATR_MULT * atr_now
+                trail_dist = trail_mult * atr_now
                 trail_sl   = max(trail_sl, high_now - trail_dist)
 
             # Check SL hit (usa low della candela)
@@ -248,7 +369,12 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
                 continue
 
             # Check exit signal (solo se no trail attivo e ha tenuto >3 barre)
-            if (not trail_active and i - entry_idx > 3 and signal_exit(row, prev)):
+            # can_exit: come nel bot live, uscita via signal solo se siamo a ≥0.5R profitto
+            # (evita di chiudere con profitti minimi prima che il trade sviluppi)
+            r_current = (close_now - entry_price) / r_dist if r_dist > 0 else 0
+            if (not trail_active and i - entry_idx > 3
+                    and signal_exit(row, prev)
+                    and r_current >= 0.5):
                 exit_price = close_now
                 pnl = (exit_price - entry_price) * pos_size * (1 - FEES_PCT * 2)
                 trades.append({"symbol": symbol, "entry": entry_price, "exit": exit_price,
@@ -329,7 +455,7 @@ def print_report(results: list, days: int, sl_mult: float):
         max_dd = max(max_dd, dd)
 
     print("\n" + "═"*70)
-    print(f"  BACKTEST REPORT — ultimi {days}gg | SL {sl_mult}×ATR | {len(results)} simboli")
+    print(f"  BACKTEST REPORT — ultimi {days}gg | SL {sl_mult}×ATR | Trail {trail_mult}×ATR | RSI<{RSI_ENTRY_MAX:.0f} | {len(results)} simboli")
     print("═"*70)
     print(f"\n{'Simbolo':<20} {'Trade':>6} {'WR':>7} {'PnL':>9} {'PF':>7} {'AvgW':>8} {'AvgL':>8}")
     print("─"*70)
@@ -387,19 +513,49 @@ def main():
     parser.add_argument("--days",       type=int,   default=90,    help="Giorni di storia (default 90)")
     parser.add_argument("--symbols",    type=str,   default="",    help="Simboli CSV (default: lista built-in)")
     parser.add_argument("--sl-mult",    type=float, default=SL_ATR_MULT, help=f"Moltiplicatore SL (default {SL_ATR_MULT})")
-    parser.add_argument("--adx-thresh", type=float, default=ENTRY_ADX_THRESH, help=f"Soglia ADX (default {ENTRY_ADX_THRESH})")
+    parser.add_argument("--adx-thresh", type=float, default=24.0,  help="Soglia ADX (default 24.0)")
+    parser.add_argument("--rr-room",    type=float, default=1.5,   help="Room-to-run minima in R (default 1.5)")
+    parser.add_argument("--rsi-max",    type=float, default=68.0,  help="RSI max all ingresso (default 68.0)")
     parser.add_argument("--risk-pct",   type=float, default=0.012, help="Rischio per trade (default 0.012)")
+    parser.add_argument("--trail-mult",  type=float, default=TRAIL_ATR_MULT, help=f"Trailing ATR mult (default {TRAIL_ATR_MULT})")
     args = parser.parse_args()
 
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()] or DEFAULT_SYMBOLS
 
     # Override globali
-    global ENTRY_ADX_THRESH
+    global ENTRY_ADX_THRESH, RR_MIN_ROOM, RSI_ENTRY_MAX, trail_mult  # noqa: PLW0603
     ENTRY_ADX_THRESH = args.adx_thresh
+    RR_MIN_ROOM      = args.rr_room
+    RSI_ENTRY_MAX    = args.rsi_max
+    trail_mult       = args.trail_mult
 
     print(f"\n{'─'*70}")
-    print(f"  Backtest — {args.days}gg | SL {args.sl_mult}×ATR | ADX>{args.adx_thresh:.0f} | {len(symbols)} simboli")
+    print(f"  Backtest — {args.days}gg | SL {args.sl_mult}×ATR | Trail {args.trail_mult}×ATR | ADX>{args.adx_thresh:.0f} | RSI<{args.rsi_max:.0f} | {len(symbols)} simboli")
     print(f"{'─'*70}")
+
+    trail_mult = args.trail_mult
+
+    # Scarica regime BTC daily (una volta sola per tutti i simboli)
+    print("  Scarico regime BTC daily (EMA200)...", end=" ", flush=True)
+    btc_regime_raw = fetch_btc_regime(args.days)
+    if len(btc_regime_raw) > 0:
+        bull_days  = btc_regime_raw.sum()
+        total_days = len(btc_regime_raw)
+        pct_bull   = bull_days / total_days * 100
+        print(f"✅ {total_days} giorni | BTC in uptrend {pct_bull:.0f}% del tempo")
+        # Converti in dict date→bool per lookup O(1)
+        btc_regime_dict = dict(zip(btc_regime_raw.index, btc_regime_raw.values))
+        # Precomputa: per ogni data, qual è il regime del giorno precedente
+        sorted_dates = sorted(btc_regime_dict.keys())
+        # Cache: data → is_bull (usando il giorno precedente disponibile)
+        btc_regime_cache: dict = {}
+        for idx_d, day in enumerate(sorted_dates):
+            prev_day = sorted_dates[idx_d - 1] if idx_d > 0 else None
+            btc_regime_cache[day] = bool(btc_regime_dict[prev_day]) if prev_day is not None else True
+        btc_regime = btc_regime_cache
+    else:
+        print("⚠️  fallito — regime filter disattivato")
+        btc_regime = None
 
     results = []
     for i, symbol in enumerate(symbols):
@@ -412,7 +568,8 @@ def main():
         if len(df) < 50:
             print("⚠️  indicatori insufficienti dopo dropna")
             continue
-        result = simulate(symbol, df, sl_mult=args.sl_mult, risk_pct=args.risk_pct)
+        result = simulate(symbol, df, sl_mult=args.sl_mult, risk_pct=args.risk_pct,
+                           trail_mult=args.trail_mult, btc_regime=btc_regime)
         results.append(result)
         pf_str = f"{result['pf']:.2f}" if result['pf'] != float("inf") else "∞"
         sign = "✅" if result["pnl_total"] > 0 else "❌"
