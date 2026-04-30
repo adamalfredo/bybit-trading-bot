@@ -145,6 +145,7 @@ _daily_pnl_sum: float = 0.0   # somma PnL % netti del giorno
 _last_report_day: str = ""     # "YYYY-MM-DD" dell'ultimo report inviato
 # BEGIN PATCH: throttle DD (no pausa forzata di default)
 ENABLE_DD_PAUSE = os.getenv("ENABLE_DD_PAUSE", "0") == "1"
+ENTRY_PAUSED    = os.getenv("ENTRY_PAUSED", "0") == "1"       # se "1" blocca TUTTI i nuovi ingressi (backtest mode)
 DD_PAUSE_MINUTES = int(os.getenv("DD_PAUSE_MINUTES", "120"))
 RISK_THROTTLE_LEVEL = 0  # 0=off, 1=DD > cap, 2=DD > 2*cap
 ORDER_USDT = 50.0
@@ -2568,6 +2569,10 @@ while True:
 
         # ✅ ENTRATA SHORT
         if signal == "entry":
+            # >>> BACKTEST MODE: blocca tutti i nuovi ingressi se ENTRY_PAUSED=1
+            if ENTRY_PAUSED:
+                tlog(f"entry_paused:{symbol}", f"[ENTRY-PAUSED][SHORT] ingressi sospesi (backtest mode), skip {symbol}", 600)
+                continue
             # GATE: blocca solo le NUOVE APERTURE (non le uscite)
             if ENABLE_DD_PAUSE and time.time() < _trading_paused_until:
                  tlog(f"paused:{symbol}", f"[PAUSE] trading sospeso (DD cap), skip SHORT {symbol}", 600)
