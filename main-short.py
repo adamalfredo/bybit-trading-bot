@@ -76,6 +76,7 @@ def save_positions_state():
             for sym in last_exit_time
         }
         state["__cooldown__"] = cooldown_state
+        state["__blacklist__"] = {sym: ts for sym, ts in symbol_blacklist_until.items()}
         with open(STATE_FILE, "w") as f:
             json.dump(state, f)
     except Exception as _e:
@@ -160,6 +161,9 @@ position_data = {}
 last_exit_time = {}
 last_exit_was_loss = {}  # True se l'ultima uscita su quel simbolo era una perdita
 recent_losses = {}          # conteggio loss consecutivi per simbolo
+symbol_blacklist_until: dict = {}  # blacklist dinamica: symbol → timestamp fino a cui è bloccato
+BLACKLIST_CONSEC_LOSSES = 3   # dopo N loss consecutive → blacklist 24h
+BLACKLIST_HOURS = 24           # ore di blocco dopo trigger blacklist
 MAX_CONSEC_LOSSES = 2       # dopo 2 loss consecutivi blocca nuovi ingressi
 FORCED_WAIT_MIN = 90        # attesa minima (minuti) se il contesto resta sfavorevole
 # ---- Logging flags (accensione selettiva via env) ----
@@ -358,6 +362,9 @@ def _check_weekly_dd_short(portfolio_value: float) -> bool:
     """
     global _weekly_start_equity, _weekly_anchor_ts, _weekly_protection_active
     now = time.time()
+    # Guard: errore API porta equity=0 → falso positivo se abbiamo posizioni aperte
+    if portfolio_value < 1.0 and open_positions:
+        return _weekly_protection_active
     # Inizializza snapshot se mai impostato
     if _weekly_start_equity is None or _weekly_anchor_ts == 0.0:
         _weekly_start_equity = portfolio_value
@@ -1797,6 +1804,13 @@ def record_exit(symbol: str, entry_price: float, exit_price: float, side: str):
     if pnl_pct < 0:
         recent_losses[symbol] = recent_losses.get(symbol, 0) + 1
         last_exit_was_loss[symbol] = True
+        # Blacklist dinamica: N loss consecutive → blocco duro per 24h
+        if recent_losses[symbol] >= BLACKLIST_CONSEC_LOSSES:
+            until_ts = time.time() + BLACKLIST_HOURS * 3600
+            symbol_blacklist_until[symbol] = until_ts
+            tlog(f"blacklist:{symbol}",
+                 f"[BLACKLIST][SHORT] {symbol} {BLACKLIST_CONSEC_LOSSES} loss consecutive → bloccato per {BLACKLIST_HOURS}h", 3600)
+            notify_telegram(f"🚫 [BLACKLIST][SHORT] {symbol} — {BLACKLIST_CONSEC_LOSSES} loss di fila\nBloccato per {BLACKLIST_HOURS}h, riprende alle {__import__('datetime').datetime.fromtimestamp(until_ts).strftime('%H:%M')} UTC")
         # Fix B: perdita grande → cooldown esteso 24h per evitare re-entry immediato sulla stessa coin
         if abs(pnl_pct) >= (MAX_LOSS_CAP_PCT * 0.5 * 100):  # oltre metà del cap = perdita grande
             last_exit_time[symbol] = time.time() - (COOLDOWN_MINUTES * 60) + (ALT_BIG_LOSS_CD_MIN * 60)
@@ -1804,6 +1818,10 @@ def record_exit(symbol: str, entry_price: float, exit_price: float, side: str):
     else:
         recent_losses[symbol] = 0
         last_exit_was_loss[symbol] = False
+        # Rimuovi dalla blacklist se torna positivo
+        if symbol in symbol_blacklist_until:
+            del symbol_blacklist_until[symbol]
+            log(f"[BLACKLIST][SHORT] {symbol} rimosso dalla blacklist dopo trade vincente")
 
 def analyze_asset(symbol: str):
     funding_rate = None  # funding rate corrente (da tickers API), usato come filtro
@@ -2022,6 +2040,14 @@ def analyze_asset(symbol: str):
             300
         )
 
+        # Blacklist dinamica: blocco duro se il simbolo ha triggerato N loss consecutive
+        _bl_until = symbol_blacklist_until.get(symbol, 0)
+        if _bl_until > time.time():
+            _bl_rem = (_bl_until - time.time()) / 3600
+            tlog(f"blacklist:{symbol}", f"[BLACKLIST][SHORT] {symbol} bloccato ancora {_bl_rem:.1f}h", 300)
+            return None, None, None
+        elif symbol in symbol_blacklist_until:
+            del symbol_blacklist_until[symbol]  # scaduta, pulisci
         # Guardrail loss consecutivi (SHORT): se troppe perdite recenti e prezzo sopra ema50 → aspetta
         if recent_losses.get(symbol, 0) >= MAX_CONSEC_LOSSES:
             wait_min = (time.time() - last_exit_time.get(symbol, 0)) / 60
@@ -2332,6 +2358,16 @@ try:
         log(f"[COOLDOWN-RESTORE] Ripristinati cooldown per {list(_cd_state.keys())}")
 except Exception as _e:
     log(f"[COOLDOWN-RESTORE] Errore: {_e}")
+try:
+    _bl_state = load_positions_state().get("__blacklist__", {})
+    _now_ts = __import__('time').time()
+    for _sym, _until in _bl_state.items():
+        if float(_until) > _now_ts:  # scartate le blacklist scadute
+            symbol_blacklist_until[_sym] = float(_until)
+    if symbol_blacklist_until:
+        log(f"[BLACKLIST-RESTORE] Attive: {list(symbol_blacklist_until.keys())}")
+except Exception as _e:
+    log(f"[BLACKLIST-RESTORE] Errore: {_e}")
 
 def get_usdt_balance() -> float:
     return get_free_qty("USDT")
