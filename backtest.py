@@ -53,6 +53,10 @@ LINEAR_MIN_TURNOVER  = 50_000_000
 PARTIAL_TP_R         = 1.5      # prendi profitto parziale quando il trade è a +1.5R
 PARTIAL_TP_PCT       = 0.5      # chiudi questa percentuale della posizione
 
+# Pullback entry: aspetta che il prezzo torni a EMA20 prima di entrare
+PULLBACK_BARS_MAX    = 8        # max barre di attesa pullback (8×60m = 8 ore)
+PULLBACK_ZONE_PCT    = 0.010    # tollera fino a +1% sopra EMA20 come zona valida
+
 # Simboli di default: le coin più attive degli ultimi 90gg dal bot
 DEFAULT_SYMBOLS = [
     "SOLUSDT","ETHUSDT","ADAUSDT","XRPUSDT","DOGEUSDT",
@@ -280,10 +284,14 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
              initial_equity: float = 100.0, risk_pct: float = 0.012,
              trail_mult: float = TRAIL_ATR_MULT,
              btc_regime: Optional[pd.Series] = None,
-             partial_tp: bool = True) -> dict:
+             partial_tp: bool = True,
+             pullback_entry: bool = False) -> dict:
     """
     Simula tutti i trade su df. Gestisce SL ATR-based, exit signal, ratchet.
-    partial_tp=True: chiude il 50% a +1.5R e sposta SL a BE, lascia correre il resto.
+    partial_tp=True:    chiude il 50% a +1.5R e sposta SL a BE, lascia correre il resto.
+    pullback_entry=True: NON entra subito al segnale; aspetta che il prezzo torni a
+                         EMA20 (zona di supporto del trend) entro PULLBACK_BARS_MAX barre.
+                         Vantaggio: entry price migliore, SL più stretto, R:R maggiore.
     Ritorna dict con metriche e lista trade.
     """
     trades = []
@@ -294,6 +302,20 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
     entry_idx   = 0
     cooldown    = 0
     max_equity  = equity
+
+    # Stato pending per pullback_entry
+    pending      = False   # segnale scattato, in attesa del pullback
+    pending_bars = 0       # barre trascorse dall'evento
+    pending_btc_ok = True  # regime BTC al momento del segnale
+
+    def _open_trade(ep, atr_val):
+        """Helper: apre il trade da entry price ep, ritorna (ok, state_dict)."""
+        sd = sl_mult * atr_val
+        if sd <= 0 or ep - sd <= 0 or atr_val / ep > ATR_RATIO_MAX_ENTRY:
+            return False, {}
+        ps = (equity * risk_pct) / sd
+        return True, {"entry_price": ep, "sl_price": ep - sd,
+                      "pos_size": ps, "remaining_size": ps}
 
     for i in range(2, len(df)):
         row  = df.iloc[i]
@@ -306,6 +328,46 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
                 cooldown -= 1
                 continue
 
+            # ── MODALITÀ PULLBACK: gestisci stato pending ─────────────────
+            if pullback_entry and pending:
+                pending_bars += 1
+
+                # Condizioni di invalidazione (cancella attesa)
+                signal_dead = (
+                    row["rsi"] < 45 or                              # momentum perso
+                    (row["macd"] < row["macd_sig"] and             # MACD tornato bearish
+                     prev["macd"] >= prev["macd_sig"]) or
+                    pending_bars >= PULLBACK_BARS_MAX               # timeout
+                )
+                if signal_dead:
+                    pending = False
+                    pending_bars = 0
+                    continue
+
+                # Zona pullback: Low scende a toccare EMA20 ± PULLBACK_ZONE_PCT
+                pb_level = row["ema20"] * (1 + PULLBACK_ZONE_PCT)
+                touched_ema20 = row["Low"] <= pb_level and row["Close"] > row["ema20"] * 0.985
+
+                if touched_ema20:
+                    # Entra all'EMA20 (prezzo realistico = ema20, simulato come tocco intra-barra)
+                    ep = row["ema20"]
+                    ok, st = _open_trade(ep, row["atr"])
+                    if ok:
+                        in_trade       = True
+                        entry_price    = st["entry_price"]
+                        sl_price       = st["sl_price"]
+                        pos_size       = st["pos_size"]
+                        remaining_size = st["remaining_size"]
+                        trail_sl       = sl_price
+                        trail_active   = False
+                        mfe            = entry_price
+                        partial_done   = False
+                        entry_idx      = i
+                    pending = False
+                    pending_bars = 0
+                continue
+            # ─────────────────────────────────────────────────────────────
+
             if not signal_entry(prev, df.iloc[i-2], sl_mult):
                 continue
 
@@ -317,6 +379,31 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
                     continue
             # ──────────────────────────────────────────────────────────────
 
+            if pullback_entry:
+                # Controlla se siamo GIÀ vicini a EMA20 (pullback immediato nella stessa barra)
+                pb_level = row["ema20"] * (1 + PULLBACK_ZONE_PCT)
+                if row["Close"] <= pb_level:
+                    # Siamo già nella zona: entra subito
+                    ep = row["Close"]
+                    ok, st = _open_trade(ep, row["atr"])
+                    if ok:
+                        in_trade       = True
+                        entry_price    = st["entry_price"]
+                        sl_price       = st["sl_price"]
+                        pos_size       = st["pos_size"]
+                        remaining_size = st["remaining_size"]
+                        trail_sl       = sl_price
+                        trail_active   = False
+                        mfe            = entry_price
+                        partial_done   = False
+                        entry_idx      = i
+                else:
+                    # Segnale scattato ma troppo lontano da EMA20: metti in pending
+                    pending      = True
+                    pending_bars = 0
+                continue
+
+            # ── ENTRY IMMEDIATA (modalità classica) ───────────────────────
             atr = prev["atr"]
             sl_dist = sl_mult * atr
             if sl_dist <= 0:
@@ -539,6 +626,7 @@ def main():
     parser.add_argument("--risk-pct",   type=float, default=0.012, help="Rischio per trade (default 0.012)")
     parser.add_argument("--trail-mult",  type=float, default=TRAIL_ATR_MULT, help=f"Trailing ATR mult (default {TRAIL_ATR_MULT})")
     parser.add_argument("--no-partial-tp", action="store_true", help="Disabilita partial TP a +1.5R (confronto)")
+    parser.add_argument("--pullback",      action="store_true", help="Pullback entry: aspetta ritorno a EMA20 prima di entrare")
     args = parser.parse_args()
 
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()] or DEFAULT_SYMBOLS
@@ -591,7 +679,8 @@ def main():
             continue
         result = simulate(symbol, df, sl_mult=args.sl_mult, risk_pct=args.risk_pct,
                            trail_mult=args.trail_mult, btc_regime=btc_regime,
-                           partial_tp=not args.no_partial_tp)
+                           partial_tp=not args.no_partial_tp,
+                           pullback_entry=args.pullback)
         results.append(result)
         pf_str = f"{result['pf']:.2f}" if result['pf'] != float("inf") else "∞"
         sign = "✅" if result["pnl_total"] > 0 else "❌"

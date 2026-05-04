@@ -7,8 +7,8 @@
         "${workspaceFolder}/bybit_mcp_server.py"
       ],
       "env": {
-        "BYBIT_API_KEY": "93GlxBPCnXKbwuaT7Z",
-        "BYBIT_API_SECRET": "Udkwu3wGwGNMSBOx5HQftEvPL7DNn5JOCuPs",
+        "BYBIT_API_KEY": "raVHBu8GgeCOTLeaZ9",
+        "BYBIT_API_SECRET": "6qtU6u36kvkfINwSs3qzMfaUhSh4ofklj8ST",
         "BYBIT_BASE_URL": "https://api.bybit.com",
         "RAILWAY_TOKEN": "2c50f7d8-dec8-4596-aef6-bfbea4030331",
         "RAILWAY_PROJECT_ID": "451a9d49-9127-453a-923d-f7a029c6e620",
