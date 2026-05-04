@@ -49,6 +49,10 @@ COOLDOWN_BARS        = 3        # barre di cooldown dopo un'uscita
 FEES_PCT             = 0.00055  # 0.055% taker per lato
 LINEAR_MIN_TURNOVER  = 50_000_000
 
+# Partial TP: chiude il 50% della posizione a +1.5R, sposta SL a BE sull'altra metà
+PARTIAL_TP_R         = 1.5      # prendi profitto parziale quando il trade è a +1.5R
+PARTIAL_TP_PCT       = 0.5      # chiudi questa percentuale della posizione
+
 # Simboli di default: le coin più attive degli ultimi 90gg dal bot
 DEFAULT_SYMBOLS = [
     "SOLUSDT","ETHUSDT","ADAUSDT","XRPUSDT","DOGEUSDT",
@@ -275,9 +279,11 @@ def fetch_btc_regime(days: int) -> pd.Series:
 def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
              initial_equity: float = 100.0, risk_pct: float = 0.012,
              trail_mult: float = TRAIL_ATR_MULT,
-             btc_regime: Optional[pd.Series] = None) -> dict:
+             btc_regime: Optional[pd.Series] = None,
+             partial_tp: bool = True) -> dict:
     """
     Simula tutti i trade su df. Gestisce SL ATR-based, exit signal, ratchet.
+    partial_tp=True: chiude il 50% a +1.5R e sposta SL a BE, lascia correre il resto.
     Ritorna dict con metriche e lista trade.
     """
     trades = []
@@ -304,22 +310,18 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
                 continue
 
             # ── MACRO REGIME FILTER ────────────────────────────────────────
-            # Non aprire LONG se BTC è sotto la sua EMA200 daily.
-            # In downtrend macro una strategia momentum-long perde sistematicamente.
-            # btc_regime è un dict {date: bool} precomputato (lookup O(1))
             if btc_regime is not None:
                 candle_date = pd.to_datetime(row["ts"], unit="s").date()
-                is_bull = btc_regime.get(candle_date, True)  # default True se data non trovata
+                is_bull = btc_regime.get(candle_date, True)
                 if not is_bull:
-                    continue  # BTC in downtrend → skip ingresso LONG
+                    continue
             # ──────────────────────────────────────────────────────────────
 
-            # Calcola sizing: rischia risk_pct dell'equity
             atr = prev["atr"]
             sl_dist = sl_mult * atr
             if sl_dist <= 0:
                 continue
-            entry_price = row["Open"]  # entra alla candela successiva (open)
+            entry_price = row["Open"]
             sl_price    = entry_price - sl_dist
             if sl_price <= 0:
                 continue
@@ -327,39 +329,59 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
             if atr_ratio > ATR_RATIO_MAX_ENTRY:
                 continue
 
-            pos_size = (equity * risk_pct) / sl_dist  # qty in contratti
+            pos_size = (equity * risk_pct) / sl_dist
             notional = pos_size * entry_price
-            in_trade    = True
-            entry_idx   = i
-            trail_sl    = sl_price
-            trail_active= False
-            mfe         = entry_price
+            in_trade       = True
+            entry_idx      = i
+            trail_sl       = sl_price
+            trail_active   = False
+            mfe            = entry_price
+            partial_done   = False   # True dopo che il 50% è stato chiuso a +1.5R
+            remaining_size = pos_size  # dimensione posizione residua
 
         else:
-            high_now = row["High"]
-            low_now  = row["Low"]
+            high_now  = row["High"]
+            low_now   = row["Low"]
             close_now = row["Close"]
-            atr_now  = row["atr"]
+            atr_now   = row["atr"]
 
-            # Aggiorna MFE
             mfe = max(mfe, high_now)
-
-            # Ratchet semplificato: trailing attivato dopo +1R
             r_dist = entry_price - sl_price
+
+            # ── PARTIAL TP a +1.5R ────────────────────────────────────────
+            if partial_tp and not partial_done and r_dist > 0:
+                partial_tp_price = entry_price + PARTIAL_TP_R * r_dist
+                if high_now >= partial_tp_price:
+                    # Chiude il 50% della posizione a partial_tp_price
+                    partial_size = pos_size * PARTIAL_TP_PCT
+                    partial_pnl  = (partial_tp_price - entry_price) * partial_size * (1 - FEES_PCT * 2)
+                    trades.append({"symbol": symbol, "entry": entry_price,
+                                   "exit": partial_tp_price, "pnl": partial_pnl,
+                                   "bars": i - entry_idx, "reason": "PartialTP"})
+                    equity      += partial_pnl
+                    max_equity   = max(max_equity, equity)
+                    partial_done = True
+                    remaining_size = pos_size * (1 - PARTIAL_TP_PCT)
+                    # Sposta SL a breakeven sull'altra metà
+                    sl_price     = entry_price
+                    trail_sl     = entry_price
+            # ──────────────────────────────────────────────────────────────
+
+            # Ratchet: trailing attivato dopo +1R
             if high_now >= entry_price + TRAIL_START_R * r_dist and not trail_active:
                 trail_active = True
                 trail_dist   = trail_mult * atr_now
-                trail_sl     = max(trail_sl, entry_price)  # almeno BE
+                trail_sl     = max(trail_sl, entry_price)
 
             if trail_active:
                 trail_dist = trail_mult * atr_now
                 trail_sl   = max(trail_sl, high_now - trail_dist)
 
-            # Check SL hit (usa low della candela)
+            # Check SL hit
             effective_sl = max(sl_price, trail_sl)
             if low_now <= effective_sl:
                 exit_price = effective_sl
-                pnl = (exit_price - entry_price) * pos_size * (1 - FEES_PCT * 2)
+                pnl = (exit_price - entry_price) * remaining_size * (1 - FEES_PCT * 2)
                 trades.append({"symbol": symbol, "entry": entry_price, "exit": exit_price,
                                 "pnl": pnl, "bars": i - entry_idx, "reason": "SL/Trail"})
                 equity += pnl
@@ -368,15 +390,13 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
                 cooldown   = COOLDOWN_BARS
                 continue
 
-            # Check exit signal (solo se no trail attivo e ha tenuto >3 barre)
-            # can_exit: come nel bot live, uscita via signal solo se siamo a ≥0.5R profitto
-            # (evita di chiudere con profitti minimi prima che il trade sviluppi)
+            # Check exit signal
             r_current = (close_now - entry_price) / r_dist if r_dist > 0 else 0
             if (not trail_active and i - entry_idx > 3
                     and signal_exit(row, prev)
                     and r_current >= 0.5):
                 exit_price = close_now
-                pnl = (exit_price - entry_price) * pos_size * (1 - FEES_PCT * 2)
+                pnl = (exit_price - entry_price) * remaining_size * (1 - FEES_PCT * 2)
                 trades.append({"symbol": symbol, "entry": entry_price, "exit": exit_price,
                                 "pnl": pnl, "bars": i - entry_idx, "reason": "ExitSignal"})
                 equity += pnl
@@ -387,7 +407,7 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
     # Chiudi posizione aperta all'ultima barra
     if in_trade:
         exit_price = df.iloc[-1]["Close"]
-        pnl = (exit_price - entry_price) * pos_size * (1 - FEES_PCT * 2)
+        pnl = (exit_price - entry_price) * remaining_size * (1 - FEES_PCT * 2)
         trades.append({"symbol": symbol, "entry": entry_price, "exit": exit_price,
                         "pnl": pnl, "bars": len(df) - entry_idx, "reason": "EndOfData"})
         equity += pnl
@@ -518,6 +538,7 @@ def main():
     parser.add_argument("--rsi-max",    type=float, default=68.0,  help="RSI max all ingresso (default 68.0)")
     parser.add_argument("--risk-pct",   type=float, default=0.012, help="Rischio per trade (default 0.012)")
     parser.add_argument("--trail-mult",  type=float, default=TRAIL_ATR_MULT, help=f"Trailing ATR mult (default {TRAIL_ATR_MULT})")
+    parser.add_argument("--no-partial-tp", action="store_true", help="Disabilita partial TP a +1.5R (confronto)")
     args = parser.parse_args()
 
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()] or DEFAULT_SYMBOLS
@@ -569,7 +590,8 @@ def main():
             print("⚠️  indicatori insufficienti dopo dropna")
             continue
         result = simulate(symbol, df, sl_mult=args.sl_mult, risk_pct=args.risk_pct,
-                           trail_mult=args.trail_mult, btc_regime=btc_regime)
+                           trail_mult=args.trail_mult, btc_regime=btc_regime,
+                           partial_tp=not args.no_partial_tp)
         results.append(result)
         pf_str = f"{result['pf']:.2f}" if result['pf'] != float("inf") else "∞"
         sign = "✅" if result["pnl_total"] > 0 else "❌"

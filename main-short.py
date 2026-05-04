@@ -189,8 +189,8 @@ LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 RISK_PCT = float(os.getenv("RISK_PCT", "0.0075"))   # 0.75% equity per trade
 MAX_MIN_QTY_RISK_FACTOR = 1.5  # max 1.5× il rischio atteso dopo bump min_qty (evita token come RAVEUSDT con minQty enorme)
 SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "2.0"))   # FIX: era 1.4, SL più largo per ridurre noise-stop
-TP1_R = float(os.getenv("TP1_R", "2.5"))             # FIX: era 1.0, R:R almeno 2.5:1
-TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.65"))  # OPT: alzato da 0.50 a 0.65 — incassa più profitto al TP1, migliora avg win
+TP1_R = float(os.getenv("TP1_R", "1.5"))             # PARTIAL-TP: chiude 50% a +1.5R (era 2.5R), validato in backtest +13% PnL
+TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.50"))  # PARTIAL-TP: era 0.65, 50% è la quota ottimale validata in backtest
 BE_AT_R = float(os.getenv("BE_AT_R", "1.0"))
 TRAIL_START_R = float(os.getenv("TRAIL_START_R", "1.0"))  # FIX: alzato da 0.5 a 1.0 — a 0.5R il BE floor era sopra il prezzo → Bybit rifiutava SL
 TRAIL_ATR_MULT = float(os.getenv("TRAIL_ATR_MULT", "1.3"))
@@ -2780,9 +2780,8 @@ while True:
             if not qty or qty == 0:
                 log(f"❌ Nessuna quantità shortata per {symbol}. Non registro la posizione.")
                 continue
-            # >>> TP1 a 1R (parziale) e SL tramite trading-stop
-            # TP1_R regime-aware: in BTC favorevole lascia correre (2.5R), altrimenti prende profitto prima
-            _tp1_r = TP1_R if _btc_favorable_short else 1.8
+            # >>> TP1 partial: chiude 50% a +1.5R (validato in backtest +13% PnL vs trailing puro)
+            _tp1_r = TP1_R  # fisso a 1.5R — nessun regime-aware (1.8 era > 1.5, ora superfluo)
             tp_oid = None
             price_now = get_last_price(symbol) or price
             tp1_price = price_now - (_tp1_r * r_dist)
