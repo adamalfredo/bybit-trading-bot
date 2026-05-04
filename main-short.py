@@ -160,6 +160,7 @@ DD_PAUSE_MINUTES = int(os.getenv("DD_PAUSE_MINUTES", "120"))
 RISK_THROTTLE_LEVEL = 0  # 0=off, 1=DD > cap, 2=DD > 2*cap
 ORDER_USDT = 50.0
 ORDER_USDT_MAX = float(os.getenv("ORDER_USDT_MAX", "1000"))  # cap notionale per singolo trade (default 1000 USDT)
+ENABLE_BREAKOUT_FILTER = False  # FIX2: disabilitato - il breakdown obbligatorio causa late-entry dopo il minimo
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
 ASSETS = []
 LESS_VOLATILE_ASSETS = []
