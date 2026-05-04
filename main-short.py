@@ -77,6 +77,8 @@ def save_positions_state():
         }
         state["__cooldown__"] = cooldown_state
         state["__blacklist__"] = {sym: ts for sym, ts in symbol_blacklist_until.items()}
+        # Persisti pending pullback: sopravvive ai restart (scaduti verranno ignorati al carico)
+        state["__pending_pullbacks__"] = {sym: pb for sym, pb in pending_pullbacks.items()}
         with open(STATE_FILE, "w") as f:
             json.dump(state, f)
     except Exception as _e:
@@ -164,6 +166,13 @@ recent_losses = {}          # conteggio loss consecutivi per simbolo
 symbol_blacklist_until: dict = {}  # blacklist dinamica: symbol → timestamp fino a cui è bloccato
 BLACKLIST_CONSEC_LOSSES = 3   # dopo N loss consecutive → blacklist 24h
 BLACKLIST_HOURS = 24           # ore di blocco dopo trigger blacklist
+# --- PULLBACK ENTRY ---
+# Invece di entrare subito al segnale (= bottom del movimento), aspetta che il prezzo
+# torni a EMA20 (resistenza del trend) prima di aprire lo SHORT.
+# Speculare alla logica LONG: PF 1.54 vs 1.24, MaxDD 5.8% vs 11.2%.
+pending_pullbacks: dict = {}   # symbol → {ema20, r_dist, strategy, expiry_ts, atr}
+PULLBACK_EXPIRY_H  = 8         # ore max di attesa prima di cancellare il pending
+PULLBACK_ZONE_PCT  = 0.010     # accetta entry fino a -1% sotto EMA20 (tolleranza short)
 MAX_CONSEC_LOSSES = 2       # dopo 2 loss consecutivi blocca nuovi ingressi
 FORCED_WAIT_MIN = 90        # attesa minima (minuti) se il contesto resta sfavorevole
 # ---- Logging flags (accensione selettiva via env) ----
@@ -2368,6 +2377,16 @@ try:
         log(f"[BLACKLIST-RESTORE] Attive: {list(symbol_blacklist_until.keys())}")
 except Exception as _e:
     log(f"[BLACKLIST-RESTORE] Errore: {_e}")
+try:
+    _pb_state = load_positions_state().get("__pending_pullbacks__", {})
+    _now_ts = __import__('time').time()
+    for _sym, _pb in _pb_state.items():
+        if float(_pb.get("expiry_ts", 0)) > _now_ts:  # scarta scaduti
+            pending_pullbacks[_sym] = _pb
+    if pending_pullbacks:
+        log(f"[PULLBACK-RESTORE] Pending ripristinati: {list(pending_pullbacks.keys())}")
+except Exception as _e:
+    log(f"[PULLBACK-RESTORE] Errore: {_e}")
 
 def get_usdt_balance() -> float:
     return get_free_qty("USDT")
@@ -2544,6 +2563,87 @@ sl_watchdog_thread_short = threading.Thread(target=sl_watchdog_worker_short, dae
 sl_watchdog_thread_short.start()
 
 while True:
+    # ══════════════════════════════════════════════════════════════════
+    # PULLBACK ENTRY SHORT: controlla ogni ciclo se un pending ha risalito a EMA20
+    # Per SHORT: il pullback è verso l'alto (prezzo risale a EMA20 = resistenza)
+    # ══════════════════════════════════════════════════════════════════
+    for _pb_sym in list(pending_pullbacks.keys()):
+        try:
+            _pb = pending_pullbacks[_pb_sym]
+            # 1. Scaduto?
+            if time.time() > _pb["expiry_ts"]:
+                del pending_pullbacks[_pb_sym]
+                tlog(f"pb_exp:{_pb_sym}", f"[PULLBACK] {_pb_sym} pending scaduto (8h), cancellato", 60)
+                continue
+            # 2. Segnale invalidato? RSI > 55 = momentum rialzista tornato
+            _pb_df = fetch_history(_pb_sym)
+            if _pb_df is None or len(_pb_df) < 3:
+                continue
+            _pb_rsi = RSIIndicator(close=_pb_df["Close"]).rsi().iloc[-1]
+            _pb_macd = MACD(close=_pb_df["Close"])
+            _pb_macd_val = _pb_macd.macd().iloc[-1]
+            _pb_macd_sig = _pb_macd.macd_signal().iloc[-1]
+            if _pb_rsi > 55 or _pb_macd_val > _pb_macd_sig:
+                del pending_pullbacks[_pb_sym]
+                tlog(f"pb_inv:{_pb_sym}", f"[PULLBACK] {_pb_sym} segnale SHORT invalidato (RSI={_pb_rsi:.0f}, MACD bullish), cancellato", 60)
+                continue
+            # 3. Il prezzo ha risalito alla zona EMA20 (resistenza per short)?
+            _pb_price = get_last_price(_pb_sym)
+            if not _pb_price:
+                continue
+            _pb_ema20 = _pb["ema20"]
+            _pb_zone   = _pb_ema20 * (1 - PULLBACK_ZONE_PCT)  # SHORT: accetta fino a -1% sotto EMA20
+            if _pb_price >= _pb_zone:
+                # Prezzo risalito a EMA20: possiamo entrare short
+                if _pb_sym in open_positions or len(open_positions) >= MAX_OPEN_POSITIONS:
+                    del pending_pullbacks[_pb_sym]
+                    continue
+                if ENTRY_PAUSED or not (_btc_favorable_short or _btc_daily_down_short) or _btc_pumping_short or _weekly_block:
+                    del pending_pullbacks[_pb_sym]
+                    continue
+                _pb_r_dist = _pb["r_dist"]
+                _pb_atr    = _pb["atr"]
+                _pb_strategy = _pb.get("strategy", "Pullback EMA20")
+                log(f"[PULLBACK-TRIGGER][SHORT] {_pb_sym} prezzo={_pb_price:.4f} ≥ zona EMA20={_pb_zone:.4f} → ENTRY SHORT")
+                del pending_pullbacks[_pb_sym]
+                # Esegui entry short al prezzo corrente ≈ EMA20
+                portfolio_value_pb, usdt_balance_pb, _ = get_portfolio_value()
+                risk_usdt_pb    = portfolio_value_pb * RISK_PCT
+                order_amount_pb = min(risk_usdt_pb / (_pb_r_dist / _pb_price), usdt_balance_pb * 0.95, ORDER_USDT_MAX)
+                order_amount_pb = max(order_amount_pb, ORDER_USDT)
+                qty_str_pb = calculate_quantity(_pb_sym, order_amount_pb)
+                if not qty_str_pb:
+                    continue
+                qty_pb = market_short(_pb_sym, order_amount_pb, qty_exact=qty_str_pb)
+                if not qty_pb or qty_pb == 0:
+                    continue
+                _entry_price_pb = get_last_price(_pb_sym) or _pb_price
+                _sl_pb = min(_entry_price_pb + _pb_r_dist, _entry_price_pb * 1.05)
+                _tp1_pb = _entry_price_pb - TP1_R * _pb_r_dist
+                _qty_tp1_pb = qty_pb * TP1_PARTIAL
+                ok_pos_sl_pb = set_position_stoploss_short(_pb_sym, _sl_pb)
+                if not ok_pos_sl_pb:
+                    place_conditional_sl_short(_pb_sym, _sl_pb, qty_pb, trigger_by="MarkPrice")
+                tp_oid_pb = None
+                if _qty_tp1_pb > 0:
+                    ok_tp_pb, tp_oid_pb = place_takeprofit_short(_pb_sym, _tp1_pb, _qty_tp1_pb)
+                set_position(_pb_sym, {
+                    "entry_price": _entry_price_pb, "tp": _tp1_pb,
+                    "tp_order_id": tp_oid_pb, "sl_order_id": None,
+                    "sl": _sl_pb, "entry_cost": qty_pb * _entry_price_pb,
+                    "qty": qty_pb, "entry_time": time.time(),
+                    "trailing_active": False, "p_min": _entry_price_pb,
+                    "r_dist": _pb_r_dist, "breakout_exempt": False,
+                })
+                add_open(_pb_sym)
+                _daily_trades_opened += 1
+                _trade_log("entry", _pb_sym, "SHORT", entry_price=_entry_price_pb, qty=qty_pb,
+                           sl=_sl_pb, tp=_tp1_pb, r_dist=_pb_r_dist, extra={"pullback": True})
+                notify_telegram(f"🔴📉 SHORT aperto {_pb_sym} (PULLBACK EMA20)\nPrezzo: {_entry_price_pb:.4f}\nStrategia: {_pb_strategy}\nSL: {_sl_pb:.4f}\nTP1: {_tp1_pb:.4f}")
+        except Exception as _pb_exc:
+            tlog(f"pb_exc:{_pb_sym}", f"[PULLBACK-EXC][SHORT] {_pb_sym}: {_pb_exc}", 300)
+    # ══════════════════════════════════════════════════════════════════
+
     # Aggiorna la lista asset dinamicamente ogni ciclo
     update_assets()
     _update_daily_anchor_and_btc_context()
@@ -2728,6 +2828,34 @@ while True:
                 tlog(f"atr_zero:{symbol}", f"[SKIP] ATR nullo per {symbol}", 600)
                 continue
             r_dist = atr_val * SL_ATR_MULT
+
+            # ── PULLBACK ENTRY LOGIC (SHORT) ──────────────────────────────────
+            # Non entrare subito al segnale (= bottom del movimento ribassista).
+            # Aspetta che il prezzo risalga a EMA20 (resistenza) prima di shortare.
+            # Eccezione: RS-Breakdown e Rimbalzo-BEAR entrano subito (già su resistenza).
+            _is_pullback_signal = "Rimbalzo" in (strategy or "") or "RS-Breakdown" in (strategy or "")
+            if not _is_pullback_signal:
+                _df_1h = fetch_history(symbol, interval=INTERVAL_MINUTES)
+                _ema20_val = None
+                if _df_1h is not None and len(_df_1h) >= 22:
+                    _ema20_val = float(EMAIndicator(close=_df_1h["Close"], window=20).ema_indicator().iloc[-1])
+                if _ema20_val and _ema20_val > 0:
+                    _pb_zone = _ema20_val * (1 - PULLBACK_ZONE_PCT)  # SHORT: soglia = EMA20 - 1%
+                    _already_at_ema20 = price_now_calc >= _pb_zone
+                    if not _already_at_ema20:
+                        if symbol not in pending_pullbacks:
+                            pending_pullbacks[symbol] = {
+                                "ema20":      _ema20_val,
+                                "r_dist":     r_dist,
+                                "atr":        atr_val,
+                                "strategy":   strategy,
+                                "expiry_ts":  time.time() + PULLBACK_EXPIRY_H * 3600,
+                            }
+                            tlog(f"pb_pending:{symbol}", f"[PULLBACK][SHORT] {symbol} segnale → in attesa rimbalzo a EMA20={_ema20_val:.4f} (prezzo={price_now_calc:.4f}, distanza={((1-price_now_calc/_ema20_val))*100:.1f}%), scade in {PULLBACK_EXPIRY_H}h", 60)
+                            notify_telegram(f"⏳ Segnale SHORT {symbol} → in attesa rimbalzo\nPrezzo: {price_now_calc:.4f}\nTarget EMA20: {_ema20_val:.4f}\nScade in {PULLBACK_EXPIRY_H}h")
+                        continue
+            # ─────────────────────────────────────────────────────────────────
+
             risk_usdt = max(0.0, float(portfolio_value) * RISK_PCT)
             qty_target = risk_usdt / max(1e-9, r_dist)
             notional_target = qty_target * price_now_calc
