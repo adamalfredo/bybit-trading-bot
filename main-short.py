@@ -159,7 +159,7 @@ ENTRY_PAUSED    = os.getenv("ENTRY_PAUSED", "0") == "1"       # se "1" blocca TU
 DD_PAUSE_MINUTES = int(os.getenv("DD_PAUSE_MINUTES", "120"))
 RISK_THROTTLE_LEVEL = 0  # 0=off, 1=DD > cap, 2=DD > 2*cap
 ORDER_USDT = 50.0
-ENABLE_BREAKOUT_FILTER = False  # FIX2: disabilitato - il breakdown obbligatorio causa late-entry dopo il minimo
+ORDER_USDT_MAX = float(os.getenv("ORDER_USDT_MAX", "1000"))  # cap notionale per singolo trade (default 1000 USDT)
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
 ASSETS = []
 LESS_VOLATILE_ASSETS = []
@@ -2634,7 +2634,7 @@ while True:
                 # Esegui entry short al prezzo corrente ≈ EMA20
                 portfolio_value_pb, usdt_balance_pb, _ = get_portfolio_value()
                 risk_usdt_pb    = portfolio_value_pb * RISK_PCT
-                order_amount_pb = min(risk_usdt_pb / (_pb_r_dist / _pb_price), usdt_balance_pb * 0.95, 1000.0)
+                order_amount_pb = min(risk_usdt_pb / (_pb_r_dist / _pb_price), usdt_balance_pb * 0.95, ORDER_USDT_MAX)
                 order_amount_pb = max(order_amount_pb, ORDER_USDT)
                 qty_str_pb = calculate_quantity(_pb_sym, order_amount_pb)
                 if not qty_str_pb:
@@ -2895,7 +2895,7 @@ while True:
             notional_target = qty_target * price_now_calc
             # Limiti: group budget e margine
             max_notional_by_margin = usdt_balance * DEFAULT_LEVERAGE * MARGIN_USE_PCT
-            order_amount = min(notional_target * max(0.5, min(1.0, strength)), group_available, max_notional_by_margin, 1000.0)
+            order_amount = min(notional_target * max(0.5, min(1.0, strength)), group_available, max_notional_by_margin, ORDER_USDT_MAX)
             tlog(
                 f"risk_sizing:{symbol}",
                 f"[RISK] {symbol} ATR={atr_val:.6f} r_dist={r_dist:.6f} riskUSDT={risk_usdt:.2f} notional={order_amount:.2f}",
@@ -2913,7 +2913,7 @@ while True:
                 max_by_margin = max_notional_by_margin
                 if max_by_margin >= bump:
                     old = order_amount
-                    order_amount = min(bump, max_by_margin, 1000.0)
+                    order_amount = min(bump, max_by_margin, ORDER_USDT_MAX)
                     tlog(f"bump_notional:{symbol}", f"[BUMP-NOTIONAL][{symbol}] alzato notional da {old:.2f} a {order_amount:.2f} per rispettare min_qty/min_notional", 600)
                 else:
                     tlog(f"min_notional:{symbol}", f"❌ Notional richiesto {order_amount:.2f} < minimo {min_notional:.2f} per {symbol} (min_qty={min_qty}, price={price_now_chk})", 300)
