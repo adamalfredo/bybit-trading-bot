@@ -2602,7 +2602,7 @@ while True:
                 # Calcola sizing basato su r_dist originale del segnale
                 portfolio_value_pb, usdt_balance_pb, _ = get_portfolio_value()
                 risk_usdt_pb    = portfolio_value_pb * RISK_PCT
-                order_amount_pb = min(risk_usdt_pb / (_pb_r_dist / _pb_price), usdt_balance_pb * 0.95, ORDER_USDT_MAX)
+                order_amount_pb = min(risk_usdt_pb / (_pb_r_dist / _pb_price), usdt_balance_pb * 0.95, 1000.0)
                 order_amount_pb = max(order_amount_pb, ORDER_USDT)
                 qty_str_pb = calculate_quantity(_pb_sym, order_amount_pb)
                 if not qty_str_pb:
