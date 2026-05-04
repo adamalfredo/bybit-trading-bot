@@ -136,6 +136,13 @@ _weekly_start_equity: float | None = None   # Gap3: equity snapshot di 7gg fa
 _weekly_anchor_ts: float = 0.0              # Gap3: timestamp ultimo aggiornamento settimanale
 _weekly_protection_active: bool = False     # Gap3: True = nessun nuovo ingresso LONG
 _trading_paused_until = 0
+# --- FEAR & GREED INDEX (Alternative.me, aggiornato ogni 6h) ---
+_fear_greed_value: int   = 50   # default neutro finché non aggiornato
+_fear_greed_label: str   = "Neutral"
+_fear_greed_ts: float    = 0.0
+FEAR_GREED_UPDATE_SECS   = 6 * 3600   # aggiorna ogni 6 ore
+FEAR_GREED_SKIP_LONG     = 20          # F&G < 20: salta nuovi LONG (panico estremo)
+FEAR_GREED_REDUCE_LONG   = 35          # F&G 20-35: riduci sizing del 25%
 # Report giornaliero
 _daily_trades_opened: int = 0
 _daily_trades_closed: int = 0
@@ -394,6 +401,23 @@ def _check_weekly_dd_long(portfolio_value: float) -> bool:
     return _weekly_protection_active
 
 
+def _update_fear_greed():
+    """Aggiorna il Fear & Greed Index da Alternative.me ogni 6 ore."""
+    global _fear_greed_value, _fear_greed_label, _fear_greed_ts
+    if time.time() - _fear_greed_ts < FEAR_GREED_UPDATE_SECS:
+        return
+    try:
+        r = SESSION.get("https://api.alternative.me/fng/?limit=1", timeout=8)
+        d = r.json()
+        item = d.get("data", [{}])[0]
+        _fear_greed_value = int(item.get("value", 50))
+        _fear_greed_label = item.get("value_classification", "Neutral")
+        _fear_greed_ts = time.time()
+        tlog("fear_greed", f"[F&G] Fear & Greed Index = {_fear_greed_value} ({_fear_greed_label})", 3600)
+    except Exception as _fge:
+        tlog("fear_greed_err", f"[F&G] Errore aggiornamento: {_fge}", 3600)
+
+
 def _update_btc_context_long():
     """Aggiorna il contesto BTC ogni 3 min.
     Fix #3: se BTC 24h in negativo forza btc_fav=False anche se 4h uptrend.
@@ -516,6 +540,7 @@ def _equity_now():
 
 def _update_daily_anchor_and_btc_context():
     """Aggiorna ancora giornaliera di equity e contesto BTC."""
+    _update_fear_greed()
     global _daily_start_equity
     if _daily_start_equity is None or time.strftime("%Y-%m-%d") != time.strftime("%Y-%m-%d", time.gmtime()):
         _daily_start_equity = _equity_now()
@@ -2681,6 +2706,10 @@ while True:
             if _btc_dumping_long:
                 tlog(f"dump_gate:{symbol}", f"[DUMP-GATE][LONG] BTC dump attivo, skip entry {symbol}", 300)
                 continue
+            # Fear & Greed gate: panico estremo = mercato in capitolazione, evita LONG
+            if _fear_greed_value < FEAR_GREED_SKIP_LONG:
+                tlog(f"fg_gate:{symbol}", f"[F&G-GATE][LONG] F&G={_fear_greed_value} ({_fear_greed_label}) < {FEAR_GREED_SKIP_LONG}, skip entry {symbol}", 600)
+                continue
             # Regime gate rimosso: analyze_asset gestisce già i requisiti più stringenti quando BTC è sfavorevole
 
             if symbol in last_exit_time:
@@ -2748,6 +2777,11 @@ while True:
                 strength *= 0.7
             elif RISK_THROTTLE_LEVEL >= 2:
                 strength *= 0.5
+            # Fear & Greed: zona Fear (20-35) → riduci sizing del 25%
+            # (< 20 è già bloccato dal gate sopra, quindi qui siamo nel range 20-35)
+            if _fear_greed_value < FEAR_GREED_REDUCE_LONG:
+                strength *= 0.75
+                tlog(f"fg_reduce:{symbol}", f"[F&G] F&G={_fear_greed_value} ({_fear_greed_label}) in Fear → sizing -25%", 1800)
 
             df_hist = fetch_history(symbol)
             if df_hist is not None and "Close" in df_hist.columns:
