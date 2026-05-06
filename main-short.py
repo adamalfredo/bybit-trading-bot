@@ -1745,6 +1745,10 @@ def place_conditional_sl_short(symbol: str, stop_price: float, qty: float, trigg
         qty_str = _format_qty_with_step(float(qty), qty_step)
         stop_str = format_price_bybit(stop_price, price_step)     # <<< aggiunto
 
+        # Cancella stop order esistenti prima di crearne uno nuovo.
+        # Bybit limita a 10 stop order condizionali per simbolo (retCode 110009).
+        cancel_all_orders(symbol, order_filter="StopOrder")
+
         body = {
             "category": "linear",
             "symbol": symbol,
