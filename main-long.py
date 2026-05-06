@@ -174,6 +174,8 @@ LIQUIDITY_MIN_VOLUME = 1_000_000  # Soglia minima volume 24h USDT (consigliato)
 # --- SYNC POSIZIONI APERTE DA WALLET ALL'AVVIO ---
 open_positions = set()
 position_data = {}
+# Cache TP/SL naturali per segnali swing-level (aggiornata da analyze_asset, letta da execution)
+_swing_entry_meta: dict = {}  # symbol → {"tp": resistance, "sl": sl_nat, "r_dist": sl_dist}
 last_exit_time = {}
 last_exit_was_loss = {}  # True se l'ultima uscita su quel simbolo era una perdita
 recent_losses = {}          # conteggio loss consecutivi per simbolo
@@ -2055,6 +2057,7 @@ def analyze_asset(symbol: str):
                                     tlog(f"swing_long:{symbol}",
                                          f"[SWING-LEVEL][LONG] {symbol} | sup={_support:.6f} dist={_dist_support/(_sw_atr or 1):.2f}×ATR | RSI={_sw_rsi:.1f} | R:R={_rr:.2f} | vol={_sw_vol/_sw_vol_avg20:.2f}x",
                                          300)
+                                    _swing_entry_meta[symbol] = {"tp": _resistance, "sl": _sl_nat, "r_dist": _sl_dist}
                                     return "entry", f"Swing-Level Support (R:R {_rr:.1f})", price
             except Exception as _sw_exc:
                 tlog(f"swing_exc:{symbol}", f"[SWING-EXC][LONG] {symbol}: {_sw_exc}", 300)
@@ -2990,9 +2993,20 @@ while True:
                     log(f"❌ LONG non aperto per {symbol}")
                 continue
 
-            # TP1_R partial: chiude 50% a +1.5R (validato in backtest +13% PnL vs trailing puro)
-            _tp1_r = TP1_R  # fisso a 1.5R — nessun regime-aware (1.8 era > 1.5, ora superfluo)
-            tp1_price = price_now + (_tp1_r * r_dist)
+            # TP1: per segnali Swing-Level usa la resistenza naturale (TP fisso strutturale);
+            # per gli altri usa il classico +1.5R (partial TP validato in backtest)
+            _swing_meta = _swing_entry_meta.pop(symbol, {})
+            _is_swing_entry = "Swing-Level" in (strategy or "")
+            if _is_swing_entry and _swing_meta.get("tp") and _swing_meta.get("sl"):
+                tp1_price = float(_swing_meta["tp"])   # resistenza strutturale
+                r_dist    = float(_swing_meta["r_dist"])  # distanza SL swing (più stretta)
+                final_sl  = float(_swing_meta["sl"])   # SL naturale sotto supporto
+                # Ri-applica hard cap di sicurezza (non andare mai oltre MAX_LOSS_CAP_PCT)
+                _hard_cap = MAX_LOSS_CAP_PCT if symbol in VOLATILE_ASSETS else MAX_LOSS_CAP_PCT_STABLE
+                final_sl = max(final_sl, price_now * (1.0 - _hard_cap))
+                log(f"[SWING-TP][LONG] {symbol} TP naturale={tp1_price:.6f} SL={final_sl:.6f} R:R={(tp1_price-price_now)/(price_now-final_sl):.2f}")
+            else:
+                tp1_price = price_now + (TP1_R * r_dist)
             qty_tp1 = max(0.0, qty * TP1_PARTIAL)
             tp_oid = None
             if qty_tp1 > 0:
@@ -3004,9 +3018,11 @@ while True:
             
             # SL basato su ATR (adattivo alla volatilità reale dell'asset)
             # Hard cap solo come fallback di emergenza se ATR è fuori range
-            _hard_cap = MAX_LOSS_CAP_PCT if symbol in VOLATILE_ASSETS else MAX_LOSS_CAP_PCT_STABLE
-            sl_hard_floor = price_now * (1.0 - _hard_cap)
-            final_sl = max(price_now - r_dist, sl_hard_floor)
+            # Per segnali swing, final_sl è già calcolato sopra (SL naturale sotto supporto)
+            if not _is_swing_entry:
+                _hard_cap = MAX_LOSS_CAP_PCT if symbol in VOLATILE_ASSETS else MAX_LOSS_CAP_PCT_STABLE
+                sl_hard_floor = price_now * (1.0 - _hard_cap)
+                final_sl = max(price_now - r_dist, sl_hard_floor)
             ok_pos_sl = set_position_stoploss_long(symbol, final_sl)
             # Backup: piazza anche uno Stop-Market reduceOnly
             ok_cond_sl = False
