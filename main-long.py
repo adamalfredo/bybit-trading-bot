@@ -2577,12 +2577,6 @@ def active_loss_trailing_worker_long():
                 tlog(f"alt_long:{symbol}",
                      f"[ALT][LONG] {symbol} Step{target_step} età={age_h:.1f}h mfe={entry.get('mfe_roi',0.0):.1f}% "
                      f"SL {current_sl:.6f}→{new_sl:.6f} (×{mult:.2f}R) set={ok}", 60)
-                notify_telegram(
-                    f"⚡ [ALT][LONG] SL stretto — {symbol}\n"
-                    f"Età: {age_h:.1f}h senza conferma momentum\n"
-                    f"SL: {current_sl:.6f} → {new_sl:.6f}\n"
-                    f"Perdita max ridotta del {(1-mult)*100:.0f}%"
-                )
         except Exception as _e:
             log(f"[ALT-LONG][CRASH] {_e}")
         time.sleep(30)
@@ -2935,7 +2929,6 @@ while True:
                                 "expiry_ts":  time.time() + PULLBACK_EXPIRY_H * 3600,
                             }
                             tlog(f"pb_pending:{symbol}", f"[PULLBACK] {symbol} segnale → in attesa pullback a EMA20={_ema20_val:.4f} (prezzo={price_now_calc:.4f}, distanza={((price_now_calc/_ema20_val)-1)*100:.1f}%), scade in {PULLBACK_EXPIRY_H}h", 60)
-                            notify_telegram(f"⏳ Segnale LONG {symbol} → in attesa pullback\nPrezzo: {price_now_calc:.4f}\nTarget EMA20: {_ema20_val:.4f}\nScade in {PULLBACK_EXPIRY_H}h")
                         continue
             # ─────────────────────────────────────────────────────────────────
 
