@@ -135,6 +135,7 @@ _btc_favorable_short_prev = False  # Gap1: stato precedente per rilevare transiz
 _btc_uptrend_short = False      # True se BTC 4h in uptrend → blocco totale nuove aperture SHORT
 _btc_daily_down_short = False   # True se BTC daily in downtrend (EMA200 descend + price < ema200)
 _btc_pumping_short = False      # True se BTC 15m sale > +1.5% in 30 min (pump guard)
+_btc_soft_pump_short = False    # True se BTC 15m sale > +0.7% in 30 min (portfolio heat guard)
 _btc_ctx_ts = 0                 # timestamp ultimo aggiornamento contesto BTC
 _btc_4h_chg_short: float = 0.0  # Imp1/Imp2: variazione BTC su 4h per RS relativa e pesi adattivi
 _daily_start_equity = None
@@ -448,7 +449,7 @@ def _update_btc_context_short():
     Fix #1: pump guard 15m.
     Uptrend guard: blocco totale se 4h uptrend.
     Gap1: rileva transizione True→False e attiva regime change handler."""
-    global _btc_favorable_short, _btc_favorable_short_prev, _btc_uptrend_short, _btc_daily_down_short, _btc_pumping_short, _btc_ctx_ts, _btc_4h_chg_short
+    global _btc_favorable_short, _btc_favorable_short_prev, _btc_uptrend_short, _btc_daily_down_short, _btc_pumping_short, _btc_soft_pump_short, _btc_ctx_ts, _btc_4h_chg_short
     if time.time() - _btc_ctx_ts > 180:
         try:
             _btc_favorable_short = is_trending_down("BTCUSDT", "240")
@@ -499,6 +500,7 @@ def _update_btc_context_short():
                 _cls = _d2["result"]["list"]  # ordine Bybit: [0]=più recente
                 _chg_30m = (float(_cls[0][4]) - float(_cls[2][4])) / float(_cls[2][4]) * 100
                 _btc_pumping_short = _chg_30m > 1.5
+                _btc_soft_pump_short = _chg_30m > 0.7  # soglia soft per portfolio heat guard
                 if _btc_pumping_short:
                     tlog("btc_pump", f"[CTX] BTC 15m pump={_chg_30m:+.2f}% → PUMP-GATE attivo", 60)
         except Exception:
@@ -1448,7 +1450,26 @@ def set_position_stoploss_short(symbol: str, sl_price: float) -> bool:
 def breakeven_lock_worker_short():
     # Porta lo stop della POSIZIONE a breakeven e piazza anche uno Stop-Market a BE
     while True:
-        for symbol in list(open_positions):
+        # --- PORTFOLIO HEAT GUARD: calcolo pre-loop (SHORT) ---
+        # Se >= 2 posizioni SHORT sono simultaneamente sopra entry (perdita) + BTC soft pump
+        _sym_snapshot = list(open_positions)
+        _above_entry_syms: list = []
+        if len(_sym_snapshot) >= 2 and _btc_soft_pump_short:
+            for _s in _sym_snapshot:
+                with _state_lock:
+                    _e = position_data.get(_s, {})
+                _ep = _e.get("entry_price")
+                _p = get_last_price(_s)
+                if _ep and _p and _p > _ep:  # SHORT in perdita = prezzo sopra entry
+                    _above_entry_syms.append(_s)
+        _portfolio_heat_active = len(_above_entry_syms) >= 2
+        if _portfolio_heat_active:
+            tlog("port_heat_short", f"[PORT-HEAT][SHORT] {len(_above_entry_syms)}/{len(_sym_snapshot)} pos sopra entry | BTC soft pump → guard attivo", 60)
+            try:
+                notify_telegram(f"⚠️ PORT-HEAT GUARD SHORT: {len(_above_entry_syms)}/{len(_sym_snapshot)} pos in perdita + BTC soft pump → protezione collettiva")
+            except Exception:
+                pass
+        for symbol in _sym_snapshot:
             with _state_lock:
                 entry = position_data.get(symbol)
             if not entry:
@@ -1514,6 +1535,31 @@ def breakeven_lock_worker_short():
                 except Exception:
                     pass
                 continue
+
+            # --- PORTFOLIO HEAT GUARD: perdita collettiva correlata (SHORT) ---
+            if _portfolio_heat_active:
+                if price_now < entry_price:  # SHORT in profitto = prezzo sotto entry
+                    # In profitto: porta a BE
+                    be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)  # BREAKEVEN_BUFFER negativo per SHORT
+                    be_price = max(be_price, price_now * 1.001)  # Guard: be sopra prezzo per SHORT
+                    ok_psl = set_position_stoploss_short(symbol, be_price)
+                    if ok_psl:
+                        entry["be_locked"] = True
+                        entry["be_price"] = be_price
+                        set_position(symbol, entry)
+                        tlog(f"heat_be_short:{symbol}", f"[PORT-HEAT][SHORT] {symbol} SL→BE {be_price:.6f} (heat guard, profitto)", 60)
+                    continue
+                else:
+                    # In perdita: limita perdita ulteriore a ~0.3×ATR dal prezzo corrente
+                    if not entry.get("heat_sl_set", False):
+                        _r = entry.get("r_dist") or 0.0
+                        if _r > 0:
+                            _atr_est = _r / max(1e-9, SL_ATR_MULT)
+                            _heat_sl = price_now + (0.3 * _atr_est)  # SHORT: SL sopra il prezzo
+                            if set_position_stoploss_short(symbol, _heat_sl):
+                                entry["heat_sl_set"] = True
+                                set_position(symbol, entry)
+                                tlog(f"heat_sl_short:{symbol}", f"[PORT-HEAT][SHORT] {symbol} SL→{_heat_sl:.6f} (heat guard, perdita)", 60)
 
             r_dist = entry.get("r_dist")  # distanza 1R in prezzo
             # Se abbiamo r_dist, be quando prezzo ha guadagnato 1R
