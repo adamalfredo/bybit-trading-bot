@@ -128,6 +128,7 @@ WEEKLY_DD_CAP_PCT = float(os.getenv("WEEKLY_DD_CAP_PCT", "0.08"))  # Gap3: blocc
 _btc_favorable_long = False    # True se BTC 4h in uptrend → contesto favorevole per LONG
 _btc_favorable_long_prev = False  # Gap1: stato precedente per rilevare transizione True→False
 _btc_dumping_long = False      # True se BTC 15m scende > -1.5% in 30 min (dump guard)
+_btc_soft_dump_long = False    # True se BTC 15m scende > -0.7% in 30 min (portfolio heat guard)
 _btc_daily_regime_ok = True    # True = BTC sopra EMA50 daily = regime bull = LONG consentiti
 _btc_daily_regime_ts = 0.0     # timestamp ultimo check regime daily
 _btc_ctx_ts = 0
@@ -435,7 +436,7 @@ def _update_btc_context_long():
     Fix #3: se BTC 24h in negativo forza btc_fav=False anche se 4h uptrend.
     Fix #1: calcola momentum 15m per rilevare dump improvvisi (dump guard).
     Gap1: rileva transizione True→False e attiva regime change handler."""
-    global _btc_favorable_long, _btc_favorable_long_prev, _btc_dumping_long, _btc_ctx_ts, _btc_4h_chg_long
+    global _btc_favorable_long, _btc_favorable_long_prev, _btc_dumping_long, _btc_soft_dump_long, _btc_ctx_ts, _btc_4h_chg_long
     global _btc_daily_regime_ok, _btc_daily_regime_ts
     if time.time() - _btc_ctx_ts > 180:
         _prev = _btc_favorable_long
@@ -465,6 +466,7 @@ def _update_btc_context_long():
                 _cls = _d2["result"]["list"]  # ordine Bybit: [0]=più recente
                 _chg_30m = (float(_cls[0][4]) - float(_cls[2][4])) / float(_cls[2][4]) * 100
                 _btc_dumping_long = _chg_30m < -1.5
+                _btc_soft_dump_long = _chg_30m < -0.7  # soglia soft per portfolio heat guard
                 if _btc_dumping_long:
                     tlog("btc_dump", f"[CTX] BTC 15m dump={_chg_30m:+.2f}% → DUMP-GATE attivo", 60)
         except Exception:
@@ -1440,7 +1442,26 @@ def set_position_stoploss_long(symbol: str, sl_price: float) -> bool:
 def breakeven_lock_worker_long():
     # Porta lo stop della POSIZIONE a breakeven e piazza anche uno Stop-Market a BE
     while True:
-        for symbol in list(open_positions):
+        # --- PORTFOLIO HEAT GUARD: calcolo pre-loop ---
+        # Se >= 2 posizioni sono simultaneamente sotto entry + BTC soft dump → protezione collettiva
+        _sym_snapshot = list(open_positions)
+        _below_entry_syms: list = []
+        if len(_sym_snapshot) >= 2 and _btc_soft_dump_long:
+            for _s in _sym_snapshot:
+                with _state_lock:
+                    _e = position_data.get(_s, {})
+                _ep = _e.get("entry_price")
+                _p = get_last_price(_s)
+                if _ep and _p and _p < _ep:
+                    _below_entry_syms.append(_s)
+        _portfolio_heat_active = len(_below_entry_syms) >= 2
+        if _portfolio_heat_active:
+            tlog("port_heat", f"[PORT-HEAT][LONG] {len(_below_entry_syms)}/{len(_sym_snapshot)} pos sotto entry | BTC soft dump → guard attivo", 60)
+            try:
+                notify_telegram(f"⚠️ PORT-HEAT GUARD LONG: {len(_below_entry_syms)}/{len(_sym_snapshot)} pos in perdita + BTC soft dump → protezione collettiva")
+            except Exception:
+                pass
+        for symbol in _sym_snapshot:
             with _state_lock:
                 entry = position_data.get(symbol)
             if not entry:
@@ -1509,6 +1530,33 @@ def breakeven_lock_worker_long():
                 except Exception:
                     pass
                 continue
+
+            # --- PORTFOLIO HEAT GUARD: perdita collettiva correlata ---
+            if _portfolio_heat_active:
+                if price_now > entry_price:
+                    # In profitto: porta a BE (come dump guard ma soglia più bassa -0.7%)
+                    be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
+                    be_price = min(be_price, price_now * 0.999)
+                    ok_psl = set_position_stoploss_long(symbol, be_price)
+                    if ok_psl:
+                        entry["be_locked"] = True
+                        entry["be_price"] = be_price
+                        with _state_lock:
+                            position_data[symbol] = entry
+                        tlog(f"heat_be:{symbol}", f"[PORT-HEAT][LONG] {symbol} SL→BE {be_price:.6f} (heat guard, profitto)", 60)
+                    continue
+                else:
+                    # In perdita: limita perdita ulteriore a ~0.3×ATR dal prezzo corrente (solo prima volta)
+                    if not entry.get("heat_sl_set", False):
+                        _r = entry.get("r_dist") or 0.0
+                        if _r > 0:
+                            _atr_est = _r / max(1e-9, SL_ATR_MULT)
+                            _heat_sl = price_now - (0.3 * _atr_est)
+                            if set_position_stoploss_long(symbol, _heat_sl):
+                                entry["heat_sl_set"] = True
+                                with _state_lock:
+                                    position_data[symbol] = entry
+                                tlog(f"heat_sl:{symbol}", f"[PORT-HEAT][LONG] {symbol} SL→{_heat_sl:.6f} (heat guard, perdita)", 60)
 
             r_dist = entry.get("r_dist")
             cond_be = (r_dist is not None and price_now >= entry_price + (BE_AT_R * r_dist))
