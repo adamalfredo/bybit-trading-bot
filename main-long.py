@@ -41,7 +41,7 @@ ATR_WINDOW = 14
 TRAILING_MIN = 0.02   # trailing più conservativo
 TRAILING_MAX = 0.08   # trailing più conservativo
 # Nuovi parametri per protezione guadagni (stop_floor)
-TRIGGER_BY = "LastPrice"    # "LastPrice" o "MarkPrice" per trigger degli stop exchange
+TRIGGER_BY = "MarkPrice"    # trigger degli stop exchange
 
 # Persistenza stato ratchet tra deploy
 STATE_FILE = "/tmp/position_state_long.json"
@@ -2760,7 +2760,6 @@ while True:
     if _weekly_block:
         tlog("weekly_dd", f"[WEEKLY-DD] ⛔ Protezione settimanale attiva, skip nuovi LONG", 600)
 
-    portfolio_value, usdt_balance, coin_values = get_portfolio_value()
     volatile_budget = portfolio_value * 0.4
     stable_budget = portfolio_value * 0.6
     volatile_invested = sum(coin_values.get(s, 0) for s in open_positions if s in VOLATILE_ASSETS)

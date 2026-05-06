@@ -38,8 +38,6 @@ MARGIN_USE_PCT = 0.35
 
 INTERVAL_MINUTES = 60  # era 15
 ATR_WINDOW = 14
-TP_FACTOR = 2.5
-SL_FACTOR = 1.2
 TRAILING_MIN = 0.02   # trailing più conservativo
 TRAILING_MAX = 0.08   # trailing più conservativo
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
@@ -47,7 +45,7 @@ COOLDOWN_MINUTES = 60
 MAX_OPEN_POSITIONS = 2         # massimo posizioni simultanee (ridotto: esposizione correlata in rally)
 FUNDING_SHORT_MIN = -0.0005    # blocca nuovi SHORT se funding < -0.05% (shorts sovraccaricati = pressione rialzista)
 # Nuovi parametri protezione guadagni (SHORT)
-TRIGGER_BY = "LastPrice"
+TRIGGER_BY = "MarkPrice"
 
 # Persistenza stato ratchet tra deploy
 STATE_FILE = "/tmp/position_state_short.json"
@@ -2405,8 +2403,7 @@ def sync_positions_from_wallet():
                     atr_val = price * 0.02
             else:
                 atr_val = price * 0.02
-            tp = price - (atr_val * TP_FACTOR)
-            sl_atr = entry_price + (atr_val * SL_FACTOR)       # riferimento entry
+            sl_atr = entry_price + (atr_val * SL_ATR_MULT)    # coerente con live trading
             _hard_cap = MAX_LOSS_CAP_PCT if symbol in VOLATILE_ASSETS else MAX_LOSS_CAP_PCT_STABLE
             sl_hard_ceil = entry_price * (1.0 + _hard_cap)     # hard cap emergenza
             final_sl = min(sl_atr, sl_hard_ceil)
@@ -2436,7 +2433,6 @@ def sync_positions_from_wallet():
 
             position_data[symbol] = {
                 "entry_price": entry_price,
-                "tp": tp,
                 "sl": final_sl,
                 "entry_cost": entry_cost,
                 "qty": qty,
@@ -2460,7 +2456,7 @@ def sync_positions_from_wallet():
                     position_data[symbol]["floor_updated_ts"] = saved.get("floor_updated_ts", 0)
                     log(f"[SYNC-STATE][SHORT] {symbol} FloorROI ripristinato: {saved['floor_roi']:.1f}%")
             trovate += 1
-            log(f"[SYNC] Posizione trovata: {symbol} qty={qty} entry={entry_price:.4f} SL={final_sl:.4f} TP={tp:.4f}")
+            log(f"[SYNC] Posizione trovata: {symbol} qty={qty} entry={entry_price:.4f} SL={final_sl:.4f}")
             set_position_stoploss_short(symbol, final_sl)
             place_conditional_sl_short(symbol, final_sl, qty, trigger_by="MarkPrice")
             # Sync TP: verifica e ripristina il TP order se mancante su Bybit
@@ -2792,7 +2788,6 @@ while True:
         tlog("weekly_dd", f"[WEEKLY-DD] ⛔ Protezione settimanale attiva, skip nuovi SHORT", 600)
 
     # sync_positions_from_wallet()  # evita di resettare position_data/trailing ad ogni ciclo
-    portfolio_value, usdt_balance, coin_values = get_portfolio_value()
     # SHORT: più conservativo sui volatili, più aggressivo su large cap
     volatile_budget = portfolio_value * 0.4  # Era 0.7
     stable_budget = portfolio_value * 0.6    # Era 0.3
