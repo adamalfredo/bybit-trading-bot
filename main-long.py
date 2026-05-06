@@ -1437,10 +1437,13 @@ def breakeven_lock_worker_long():
         _portfolio_heat_active = len(_below_entry_syms) >= 2
         if _portfolio_heat_active:
             tlog("port_heat", f"[PORT-HEAT][LONG] {len(_below_entry_syms)}/{len(_sym_snapshot)} pos sotto entry | BTC soft dump → guard attivo", 60)
-            try:
-                notify_telegram(f"⚠️ PORT-HEAT GUARD LONG: {len(_below_entry_syms)}/{len(_sym_snapshot)} pos in perdita + BTC soft dump → protezione collettiva")
-            except Exception:
-                pass
+            _now = time.time()
+            if _now - _last_log_times.get("port_heat_notify", 0) >= 3600:
+                _last_log_times["port_heat_notify"] = _now
+                try:
+                    notify_telegram(f"⚠️ PORT-HEAT GUARD LONG: {len(_below_entry_syms)}/{len(_sym_snapshot)} pos in perdita + BTC soft dump → protezione collettiva")
+                except Exception:
+                    pass
         for symbol in _sym_snapshot:
             with _state_lock:
                 entry = position_data.get(symbol)
