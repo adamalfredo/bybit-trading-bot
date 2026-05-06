@@ -8,6 +8,7 @@ import hashlib
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 import requests
 import pandas as pd
+import numpy as np
 from ta.volatility import BollingerBands, AverageTrueRange
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD, ADXIndicator, SMAIndicator
@@ -155,7 +156,15 @@ _daily_pnl_sum: float = 0.0   # somma PnL % netti del giorno
 _last_report_day: str = ""     # "YYYY-MM-DD" dell'ultimo report inviato
 # BEGIN PATCH: throttle DD (no pausa forzata di default)
 ENABLE_DD_PAUSE = os.getenv("ENABLE_DD_PAUSE", "0") == "1"
-ENTRY_PAUSED    = os.getenv("ENTRY_PAUSED", "0") == "1"       # se "1" blocca TUTTI i nuovi ingressi (backtest mode)
+ENTRY_PAUSED    = os.getenv("ENTRY_PAUSED", "0") == "1"
+# --- PARAMETRI STRATEGIA SWING-LEVEL SHORT (entra su resistenze strutturali) ---
+SWING_LOOKBACK        = 40    # barre 1h per identificare swing low/high locali
+SWING_NEAR_ATR        = 1.5   # entra se il prezzo è entro SWING_NEAR_ATR × ATR dalla resistenza
+SWING_SL_ABOVE_ATR    = 0.3   # SL = resistenza + SWING_SL_ABOVE_ATR × ATR (SHORT: sopra la resistenza)
+SWING_RSI_MIN_SHORT   = 45.0  # RSI min SHORT (non entrare già in crollo)
+SWING_RSI_MAX_SHORT   = 72.0  # RSI max SHORT (zona satura ma non estrema)
+SWING_VOL_MIN         = 1.0   # volume corrente >= 1.0× media 20 periodi
+SWING_RR_MIN          = 1.8   # R:R minimo
 DD_PAUSE_MINUTES = int(os.getenv("DD_PAUSE_MINUTES", "120"))
 RISK_THROTTLE_LEVEL = 0  # 0=off, 1=DD > cap, 2=DD > 2*cap
 ORDER_USDT = 50.0
@@ -1858,6 +1867,47 @@ def record_exit(symbol: str, entry_price: float, exit_price: float, side: str):
             del symbol_blacklist_until[symbol]
             log(f"[BLACKLIST][SHORT] {symbol} rimosso dalla blacklist dopo trade vincente")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Strategia swing-level SHORT: funzioni di supporto (O(n) via numpy precompute)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _precompute_swing_pivots(df: pd.DataFrame):
+    """Precomputa pivot lows/highs con numpy. Ritorna (is_pivot_low, is_pivot_high)."""
+    half = max(4, SWING_LOOKBACK // 8)
+    lows  = df["Low"].to_numpy(dtype=float)
+    highs = df["High"].to_numpy(dtype=float)
+    n = len(lows)
+    is_pivot_low  = np.zeros(n, dtype=bool)
+    is_pivot_high = np.zeros(n, dtype=bool)
+    for i in range(half, n - half):
+        window_lo = lows[i - half: i + half + 1]
+        window_hi = highs[i - half: i + half + 1]
+        if lows[i]  == window_lo.min():
+            is_pivot_low[i]  = True
+        if highs[i] == window_hi.max():
+            is_pivot_high[i] = True
+    return is_pivot_low, is_pivot_high
+
+
+def _find_swing_levels(df: pd.DataFrame, pivot_lows, pivot_highs):
+    """Lookup O(SWING_LOOKBACK): supporto e resistenza più vicini al prezzo corrente."""
+    idx = len(df)
+    price_now = float(df.iloc[idx - 1]["Close"])
+    start = max(0, idx - SWING_LOOKBACK)
+    lows_w  = df["Low"].to_numpy(dtype=float)[start:idx]
+    highs_w = df["High"].to_numpy(dtype=float)[start:idx]
+    pl_mask = pivot_lows[start:idx]
+    ph_mask = pivot_highs[start:idx]
+    pivot_low_vals  = lows_w[pl_mask]
+    pivot_high_vals = highs_w[ph_mask]
+    below = pivot_low_vals[pivot_low_vals < price_now]
+    above = pivot_high_vals[pivot_high_vals > price_now]
+    support    = float(below.max()) if len(below) > 0 else None
+    resistance = float(above.min()) if len(above) > 0 else None
+    return support, resistance
+
+
 def analyze_asset(symbol: str):
     funding_rate = None  # funding rate corrente (da tickers API), usato come filtro
     # Telemetria: raccogliamo segnali e contesto per misurare l'edge
@@ -2005,6 +2055,47 @@ def analyze_asset(symbol: str):
         prev = df.iloc[-3]       # candela chiusa precedente
         price = float(df["Close"].iloc[-1])  # prezzo attuale
         tf_tag = f"({tf_minutes}m)"
+
+        # ── STRATEGIA SWING-LEVEL SHORT ───────────────────────────────────────
+        # Ingresso strutturale su resistenza swing: R:R naturale ≥ 1.8
+        # Entra PRIMA della logica classica; se attiva, bypassa EMA/MACD.
+        if len(df) >= SWING_LOOKBACK + 5:
+            try:
+                _sw_price    = float(last["Close"])
+                _sw_atr      = float(last["atr"])
+                _sw_rsi      = float(last["rsi"])
+                _sw_vol      = float(last["Volume"])
+                _sw_ema200   = float(last["ema200"])
+                _sw_ema200p  = float(prev["ema200"])
+                _sw_rsi_prev = float(prev["rsi"])
+                _sw_vol_series = pd.to_numeric(df["Volume"], errors="coerce")
+                _sw_vol_avg20  = float(_sw_vol_series.iloc[-22:-2].mean()) if len(_sw_vol_series) >= 22 else float(_sw_vol_series.mean())
+
+                # Filtro macro: prezzo sotto EMA200 e EMA200 in discesa (downtrend strutturale)
+                if (_sw_price <= _sw_ema200 * 1.02
+                        and _sw_ema200 <= _sw_ema200p
+                        and SWING_RSI_MIN_SHORT <= _sw_rsi <= SWING_RSI_MAX_SHORT
+                        and _sw_rsi < _sw_rsi_prev
+                        and _sw_vol >= SWING_VOL_MIN * _sw_vol_avg20):
+                    _pivot_lows, _pivot_highs = _precompute_swing_pivots(df)
+                    _support, _resistance = _find_swing_levels(df, _pivot_lows, _pivot_highs)
+                    if _support is not None and _resistance is not None:
+                        _dist_resistance = _resistance - _sw_price
+                        if (_dist_resistance <= SWING_NEAR_ATR * _sw_atr
+                                and _sw_price < _resistance):
+                            _sl_nat  = _resistance + SWING_SL_ABOVE_ATR * _sw_atr
+                            _sl_dist = _sl_nat - _sw_price
+                            if _sl_dist > 0:
+                                _rr = (_sw_price - _support) / _sl_dist
+                                if _rr >= SWING_RR_MIN:
+                                    tlog(f"swing_short:{symbol}",
+                                         f"[SWING-LEVEL][SHORT] {symbol} | res={_resistance:.6f} dist={_dist_resistance/(_sw_atr or 1):.2f}×ATR | RSI={_sw_rsi:.1f} | R:R={_rr:.2f} | vol={_sw_vol/_sw_vol_avg20:.2f}x",
+                                         300)
+                                    return "entry", f"Swing-Level Resistance (R:R {_rr:.1f})", price
+            except Exception as _sw_exc:
+                tlog(f"swing_exc:{symbol}", f"[SWING-EXC][SHORT] {symbol}: {_sw_exc}", 300)
+        # ─────────────────────────────────────────────────────────────────────
+
         # Filtro estensione: evita SHORT troppo sotto EMA20 - k*ATR (rischio rimbalzo)
         # Per breakout-exempt k è rilassato (3.5x) perché la coin è PER DEFINIZIONE estesa
         ema20v = float(last["ema20"]); atrv = float(last["atr"])
@@ -2805,6 +2896,8 @@ while True:
 
             # 📊 Valuta la forza del segnale in base alla strategia (usata solo come attenuatore 0.5-1.0)
             weights_no_tf = {
+                # Swing-level strategy (nuovo)
+                "Swing-Level Resistance": 0.90,
                 # Nuovi nomi (confluenza)
                 "EMA Bearish": 0.75,
                 "MACD Bearish": 0.70,
@@ -2868,7 +2961,7 @@ while True:
             # Non entrare subito al segnale (= bottom del movimento ribassista).
             # Aspetta che il prezzo risalga a EMA20 (resistenza) prima di shortare.
             # Eccezione: RS-Breakdown e Rimbalzo-BEAR entrano subito (già su resistenza).
-            _is_pullback_signal = "Rimbalzo" in (strategy or "") or "RS-Breakdown" in (strategy or "")
+            _is_pullback_signal = "Rimbalzo" in (strategy or "") or "RS-Breakdown" in (strategy or "") or "Swing-Level" in (strategy or "")
             if not _is_pullback_signal:
                 _df_1h = fetch_history(symbol, interval=INTERVAL_MINUTES)
                 _ema20_val = None

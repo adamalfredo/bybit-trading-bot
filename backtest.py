@@ -154,6 +154,173 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ─────────────────────────────────────────────
+# Swing-level entry (nuova strategia strutturale)
+# ─────────────────────────────────────────────
+
+# Parametri nuova strategia
+SWING_LOOKBACK        = 40    # barre 1h per identificare swing low/high locali (40h ≈ 2 giorni)
+SWING_MIN_PROMINENCE  = 0.5   # il pivot deve essere più basso/alto dei SWING_LOOKBACK/2 vicini di almeno 0.5×ATR
+SWING_NEAR_ATR        = 1.0   # entra se il prezzo è entro SWING_NEAR_ATR × ATR dal supporto
+SWING_SL_BELOW_ATR   = 0.3   # SL = supporto - SWING_SL_BELOW_ATR × ATR (sotto il livello)
+SWING_RSI_MAX         = 50.0  # RSI max al momento dell'ingresso (non in momentum già maturo)
+SWING_RSI_MIN         = 28.0  # RSI min (non comprare in free-fall)
+SWING_VOL_MIN         = 1.2   # volume corrente >= 1.2× media (domanda che assorbe)
+SWING_RR_MIN          = 1.8   # R:R minimo: distanza a resistenza / distanza a SL
+
+
+def precompute_swing_pivots(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Precomputa pivot lows e pivot highs sull'intero dataframe con numpy.
+    Ritorna due array booleani della stessa lunghezza di df:
+      - is_pivot_low[i]  = True se df.iloc[i] è un pivot low locale
+      - is_pivot_high[i] = True se df.iloc[i] è un pivot high locale
+
+    Un pivot low è il minimo locale entro ±half barre.
+    Viene calcolato una sola volta per df e poi usato da find_swing_levels
+    tramite lookup O(SWING_LOOKBACK) invece del loop Python O(n²).
+    """
+    half = max(4, SWING_LOOKBACK // 8)
+    lows  = df["Low"].to_numpy(dtype=float)
+    highs = df["High"].to_numpy(dtype=float)
+    n = len(lows)
+
+    is_pivot_low  = np.zeros(n, dtype=bool)
+    is_pivot_high = np.zeros(n, dtype=bool)
+
+    for i in range(half, n - half):
+        window_lo = lows[i - half: i + half + 1]
+        window_hi = highs[i - half: i + half + 1]
+        if lows[i]  == window_lo.min():
+            is_pivot_low[i]  = True
+        if highs[i] == window_hi.max():
+            is_pivot_high[i] = True
+
+    return is_pivot_low, is_pivot_high
+
+
+def find_swing_levels(df: pd.DataFrame, idx: int,
+                      pivot_lows: np.ndarray,
+                      pivot_highs: np.ndarray) -> tuple[Optional[float], Optional[float]]:
+    """
+    Lookup O(SWING_LOOKBACK) del supporto e resistenza più vicini al prezzo corrente,
+    usando gli array di pivot precomputati da precompute_swing_pivots().
+
+    Ritorna (support_level, resistance_level) o (None, None) se non trovati.
+    """
+    price_now = float(df.iloc[idx - 1]["Close"])
+
+    # Finestra: ultime SWING_LOOKBACK barre chiuse (esclusa la corrente)
+    start = max(0, idx - SWING_LOOKBACK)
+    end   = idx  # escluso
+
+    # Estrai i valori pivot nella finestra tramite maschera numpy
+    lows_in_window  = df["Low"].to_numpy(dtype=float)[start:end]
+    highs_in_window = df["High"].to_numpy(dtype=float)[start:end]
+    pl_mask = pivot_lows[start:end]
+    ph_mask = pivot_highs[start:end]
+
+    pivot_low_vals  = lows_in_window[pl_mask]
+    pivot_high_vals = highs_in_window[ph_mask]
+
+    # Supporto: pivot low più alto ancora sotto il prezzo
+    below = pivot_low_vals[pivot_low_vals < price_now]
+    support = float(below.max()) if len(below) > 0 else None
+
+    # Resistenza: pivot high più basso ancora sopra il prezzo
+    above = pivot_high_vals[pivot_high_vals > price_now]
+    resistance = float(above.min()) if len(above) > 0 else None
+
+    return support, resistance
+
+
+def signal_entry_swing(df: pd.DataFrame, idx: int,
+                       pivot_lows: np.ndarray,
+                       pivot_highs: np.ndarray) -> tuple[bool, Optional[float], Optional[float], Optional[float]]:
+    """
+    Nuova logica di ingresso strutturale basata su swing levels.
+
+    Condizioni di ingresso:
+    1. Prezzo vicino a un supporto (swing low) identificato su 1h
+    2. RSI in zona di ipervenduto relativo (28-50): non in free-fall, non già partito
+    3. Volume ≥ 1.2× media: domanda che assorbe a quel livello
+    4. EMA200 (1h) in pendenza positiva: macro trend favorevole
+    5. R:R naturale ≥ 1.8: resistenza abbastanza lontana
+    6. Candela corrente chiude SOPRA il supporto (rimbalzo confermato)
+
+    Ritorna (segnale, sl_price, tp_price, entry_price) oppure (False, None, None, None).
+    """
+    if idx < SWING_LOOKBACK + 5:
+        return False, None, None, None
+
+    row  = df.iloc[idx - 1]  # candela appena chiusa
+    prev = df.iloc[idx - 2]
+
+    price   = float(row["Close"])
+    atr     = float(row["atr"])
+    rsi     = float(row["rsi"])
+    vol     = float(row["Volume"])
+    vol_avg = float(row["vol_avg20"]) if row["vol_avg20"] > 0 else 1.0
+    ema200  = float(row["ema200"])
+
+    # Filtro macro: prezzo sopra EMA200 (non comprare in downtrend macro)
+    if price < ema200 * 0.98:
+        return False, None, None, None
+
+    # EMA200 in salita (macro trend sano)
+    ema200_prev = float(prev["ema200"])
+    if ema200 < ema200_prev:
+        return False, None, None, None
+
+    # ATR filter: meme coin troppo volatili
+    if atr / price > ATR_RATIO_MAX_ENTRY:
+        return False, None, None, None
+
+    # Cerca livelli swing (lookup O(SWING_LOOKBACK) su pivot precomputati)
+    support, resistance = find_swing_levels(df, idx, pivot_lows, pivot_highs)
+    if support is None or resistance is None:
+        return False, None, None, None
+
+    # 1. Prezzo vicino al supporto
+    dist_to_support = price - support
+    if dist_to_support > SWING_NEAR_ATR * atr:
+        return False, None, None, None  # troppo lontano dal supporto
+
+    # 2. RSI in zona reversal (non in free-fall, non già in momentum)
+    if not (SWING_RSI_MIN <= rsi <= SWING_RSI_MAX):
+        return False, None, None, None
+
+    # 3. RSI sta risalendo (conferma della domanda che assorbe)
+    rsi_prev = float(prev["rsi"])
+    if rsi <= rsi_prev:
+        return False, None, None, None
+
+    # 4. Volume ≥ minimo (domanda reale)
+    if vol < SWING_VOL_MIN * vol_avg:
+        return False, None, None, None
+
+    # 5. Candela chiude SOPRA il supporto (no breakdown confermato)
+    if price <= support:
+        return False, None, None, None
+
+    # 6. Calcola SL naturale (sotto il supporto) e TP naturale (alla resistenza)
+    sl_natural  = support - SWING_SL_BELOW_ATR * atr
+    if sl_natural <= 0:
+        return False, None, None, None
+    sl_dist = price - sl_natural
+    if sl_dist <= 0:
+        return False, None, None, None
+
+    tp_natural  = resistance
+    rr_natural  = (tp_natural - price) / sl_dist
+
+    # 7. R:R minimo
+    if rr_natural < SWING_RR_MIN:
+        return False, None, None, None
+
+    return True, sl_natural, tp_natural, price
+
+
 # Parametri filtro qualità ingresso
 RR_MIN_ROOM   = 1.5   # room-to-run minima: distanza a swing high >= 1.5 × SL dist
 RSI_ENTRY_MAX = 68.0  # non entrare se RSI già overbought (movimento maturo)
@@ -285,13 +452,19 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
              trail_mult: float = TRAIL_ATR_MULT,
              btc_regime: Optional[pd.Series] = None,
              partial_tp: bool = True,
-             pullback_entry: bool = False) -> dict:
+             pullback_entry: bool = False,
+             tp_r: float = PARTIAL_TP_R,
+             swing_entry: bool = False) -> dict:
     """
     Simula tutti i trade su df. Gestisce SL ATR-based, exit signal, ratchet.
     partial_tp=True:    chiude il 50% a +1.5R e sposta SL a BE, lascia correre il resto.
     pullback_entry=True: NON entra subito al segnale; aspetta che il prezzo torni a
                          EMA20 (zona di supporto del trend) entro PULLBACK_BARS_MAX barre.
                          Vantaggio: entry price migliore, SL più stretto, R:R maggiore.
+    swing_entry=True:   Nuova strategia strutturale. Ignora EMA/MACD cross e aspetta
+                        che il prezzo si avvicini a un livello di supporto (swing low)
+                        con RSI in risalita e volume di assorbimento. SL sotto supporto,
+                        TP alla resistenza naturale. R:R sempre >= SWING_RR_MIN.
     Ritorna dict con metriche e lista trade.
     """
     trades = []
@@ -307,6 +480,12 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
     pending      = False   # segnale scattato, in attesa del pullback
     pending_bars = 0       # barre trascorse dall'evento
     pending_btc_ok = True  # regime BTC al momento del segnale
+
+    # Precomputa pivot per swing entry (una volta sola, O(n))
+    if swing_entry:
+        _pivot_lows, _pivot_highs = precompute_swing_pivots(df)
+    else:
+        _pivot_lows = _pivot_highs = None
 
     def _open_trade(ep, atr_val):
         """Helper: apre il trade da entry price ep, ritorna (ok, state_dict)."""
@@ -327,6 +506,34 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
             if cooldown > 0:
                 cooldown -= 1
                 continue
+
+            # ── MODALITÀ SWING ENTRY (nuova strategia strutturale) ────────
+            if swing_entry:
+                ok, sl_swing, tp_swing, ep_swing = signal_entry_swing(df, i, _pivot_lows, _pivot_highs)
+                if not ok:
+                    continue
+
+                # Macro regime filter
+                if btc_regime is not None:
+                    candle_date = pd.to_datetime(row["ts"], unit="s").date()
+                    is_bull = btc_regime.get(candle_date, True)
+                    if not is_bull:
+                        continue
+
+                entry_price    = ep_swing
+                sl_price       = sl_swing
+                tp_full        = tp_swing
+                r_dist_swing   = entry_price - sl_price
+                pos_size       = (equity * risk_pct) / r_dist_swing
+                remaining_size = pos_size
+                in_trade       = True
+                entry_idx      = i
+                trail_sl       = sl_price
+                trail_active   = False
+                mfe            = entry_price
+                partial_done   = False
+                continue
+            # ─────────────────────────────────────────────────────────────
 
             # ── MODALITÀ PULLBACK: gestisci stato pending ─────────────────
             if pullback_entry and pending:
@@ -435,9 +642,23 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
             mfe = max(mfe, high_now)
             r_dist = entry_price - sl_price
 
-            # ── PARTIAL TP a +1.5R ────────────────────────────────────────
-            if partial_tp and not partial_done and r_dist > 0:
-                partial_tp_price = entry_price + PARTIAL_TP_R * r_dist
+            # ── SWING: TP fisso alla resistenza naturale ──────────────────
+            if swing_entry and not partial_done:
+                if high_now >= tp_full:
+                    pnl = (tp_full - entry_price) * remaining_size * (1 - FEES_PCT * 2)
+                    trades.append({"symbol": symbol, "entry": entry_price,
+                                   "exit": tp_full, "pnl": pnl,
+                                   "bars": i - entry_idx, "reason": "SwingTP"})
+                    equity    += pnl
+                    max_equity = max(max_equity, equity)
+                    in_trade   = False
+                    cooldown   = COOLDOWN_BARS
+                    continue
+            # ─────────────────────────────────────────────────────────────
+
+            # ── PARTIAL TP a +tp_r×R ─────────────────────────────────────
+            if partial_tp and not swing_entry and not partial_done and r_dist > 0:
+                partial_tp_price = entry_price + tp_r * r_dist
                 if high_now >= partial_tp_price:
                     # Chiude il 50% della posizione a partial_tp_price
                     partial_size = pos_size * PARTIAL_TP_PCT
@@ -454,13 +675,13 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
                     trail_sl     = entry_price
             # ──────────────────────────────────────────────────────────────
 
-            # Ratchet: trailing attivato dopo +1R
-            if high_now >= entry_price + TRAIL_START_R * r_dist and not trail_active:
+            # Ratchet: trailing attivato dopo +1R (non in swing — gestisce già il TP fisso)
+            if not swing_entry and high_now >= entry_price + TRAIL_START_R * r_dist and not trail_active:
                 trail_active = True
                 trail_dist   = trail_mult * atr_now
                 trail_sl     = max(trail_sl, entry_price)
 
-            if trail_active:
+            if trail_active and not swing_entry:
                 trail_dist = trail_mult * atr_now
                 trail_sl   = max(trail_sl, high_now - trail_dist)
 
@@ -477,9 +698,9 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
                 cooldown   = COOLDOWN_BARS
                 continue
 
-            # Check exit signal
+            # Check exit signal (non in swing — la swing ha solo SL e TP fisso)
             r_current = (close_now - entry_price) / r_dist if r_dist > 0 else 0
-            if (not trail_active and i - entry_idx > 3
+            if (not swing_entry and not trail_active and i - entry_idx > 3
                     and signal_exit(row, prev)
                     and r_current >= 0.5):
                 exit_price = close_now
@@ -616,6 +837,8 @@ def print_report(results: list, days: int, sl_mult: float):
 # ─────────────────────────────────────────────
 
 def main():
+    global ENTRY_ADX_THRESH, RR_MIN_ROOM, RSI_ENTRY_MAX, trail_mult  # noqa: PLW0603
+    global SWING_RSI_MAX, SWING_RSI_MIN, SWING_NEAR_ATR, SWING_RR_MIN, SWING_VOL_MIN  # noqa: PLW0603
     parser = argparse.ArgumentParser(description="Backtest segnali bot LONG")
     parser.add_argument("--days",       type=int,   default=90,    help="Giorni di storia (default 90)")
     parser.add_argument("--symbols",    type=str,   default="",    help="Simboli CSV (default: lista built-in)")
@@ -627,19 +850,31 @@ def main():
     parser.add_argument("--trail-mult",  type=float, default=TRAIL_ATR_MULT, help=f"Trailing ATR mult (default {TRAIL_ATR_MULT})")
     parser.add_argument("--no-partial-tp", action="store_true", help="Disabilita partial TP a +1.5R (confronto)")
     parser.add_argument("--pullback",      action="store_true", help="Pullback entry: aspetta ritorno a EMA20 prima di entrare")
+    parser.add_argument("--tp-r",          type=float, default=PARTIAL_TP_R, help=f"Multiplo R per partial TP (default {PARTIAL_TP_R})")
+    parser.add_argument("--swing",         action="store_true", help="Nuova strategia swing-level: entry su supporto strutturale con R:R naturale")
+    parser.add_argument("--swing-rsi-max",  type=float, default=SWING_RSI_MAX, help=f"RSI max per swing entry (default {SWING_RSI_MAX})")
+    parser.add_argument("--swing-rsi-min",  type=float, default=SWING_RSI_MIN, help=f"RSI min per swing entry (default {SWING_RSI_MIN})")
+    parser.add_argument("--swing-near-atr", type=float, default=SWING_NEAR_ATR, help=f"Distanza max dal supporto in ATR (default {SWING_NEAR_ATR})")
+    parser.add_argument("--swing-rr-min",   type=float, default=SWING_RR_MIN,  help=f"R:R minimo per swing entry (default {SWING_RR_MIN})")
+    parser.add_argument("--swing-vol-min",  type=float, default=SWING_VOL_MIN, help=f"Moltiplicatore volume minimo (default {SWING_VOL_MIN})")
     args = parser.parse_args()
 
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()] or DEFAULT_SYMBOLS
 
     # Override globali
-    global ENTRY_ADX_THRESH, RR_MIN_ROOM, RSI_ENTRY_MAX, trail_mult  # noqa: PLW0603
     ENTRY_ADX_THRESH = args.adx_thresh
     RR_MIN_ROOM      = args.rr_room
     RSI_ENTRY_MAX    = args.rsi_max
     trail_mult       = args.trail_mult
+    SWING_RSI_MAX    = args.swing_rsi_max
+    SWING_RSI_MIN    = args.swing_rsi_min
+    SWING_NEAR_ATR   = args.swing_near_atr
+    SWING_RR_MIN     = args.swing_rr_min
+    SWING_VOL_MIN    = args.swing_vol_min
 
     print(f"\n{'─'*70}")
-    print(f"  Backtest — {args.days}gg | SL {args.sl_mult}×ATR | Trail {args.trail_mult}×ATR | ADX>{args.adx_thresh:.0f} | RSI<{args.rsi_max:.0f} | {len(symbols)} simboli")
+    mode_tag = "SWING-LEVEL" if args.swing else ("PULLBACK" if args.pullback else "CLASSICO")
+    print(f"  Backtest — {args.days}gg | {mode_tag} | SL {args.sl_mult}×ATR | Trail {args.trail_mult}×ATR | ADX>{args.adx_thresh:.0f} | RSI<{args.rsi_max:.0f} | {len(symbols)} simboli")
     print(f"{'─'*70}")
 
     trail_mult = args.trail_mult
@@ -680,7 +915,9 @@ def main():
         result = simulate(symbol, df, sl_mult=args.sl_mult, risk_pct=args.risk_pct,
                            trail_mult=args.trail_mult, btc_regime=btc_regime,
                            partial_tp=not args.no_partial_tp,
-                           pullback_entry=args.pullback)
+                           pullback_entry=args.pullback,
+                           tp_r=args.tp_r,
+                           swing_entry=args.swing)
         results.append(result)
         pf_str = f"{result['pf']:.2f}" if result['pf'] != float("inf") else "∞"
         sign = "✅" if result["pnl_total"] > 0 else "❌"
