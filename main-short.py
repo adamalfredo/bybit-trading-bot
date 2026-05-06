@@ -35,17 +35,11 @@ SHORT_IDX = 2
 # --- Sizing per trade (notional) ---
 DEFAULT_LEVERAGE = 10          # leva usata sul conto (Cross/Isolated)
 MARGIN_USE_PCT = 0.35
-TARGET_NOTIONAL_PER_TRADE = 200.0
 
 INTERVAL_MINUTES = 60  # era 15
 ATR_WINDOW = 14
 TP_FACTOR = 2.5
 SL_FACTOR = 1.2
-# Soglie dinamiche consigliate
-TP_MIN = 2.0
-TP_MAX = 3.0
-SL_MIN = 1.0
-SL_MAX = 2.0
 TRAILING_MIN = 0.02   # trailing più conservativo
 TRAILING_MAX = 0.08   # trailing più conservativo
 INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
@@ -170,7 +164,6 @@ DD_PAUSE_MINUTES = int(os.getenv("DD_PAUSE_MINUTES", "120"))
 RISK_THROTTLE_LEVEL = 0  # 0=off, 1=DD > cap, 2=DD > 2*cap
 ORDER_USDT = 50.0
 ORDER_USDT_MAX = float(os.getenv("ORDER_USDT_MAX", "1000"))  # cap notionale per singolo trade (default 1000 USDT)
-ENABLE_BREAKOUT_FILTER = False  # FIX2: disabilitato - il breakdown obbligatorio causa late-entry dopo il minimo
 # --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
 ASSETS = []
 LESS_VOLATILE_ASSETS = []
@@ -604,18 +597,6 @@ def _send_daily_report():
         _daily_pnl_sum = 0.0
     except Exception as e:
         log(f"[DAILY-REPORT] Errore invio report: {e}")
-
-def is_breaking_weekly_low(symbol: str):
-    """
-    True se il prezzo attuale è sotto il minimo delle ultime 6 ore.
-    """
-    df = fetch_history(symbol, interval=INTERVAL_MINUTES)
-    bars = int(6 * 60 / INTERVAL_MINUTES)
-    if df is None or len(df) < bars:
-        return False
-    last_close = df["Close"].iloc[-1]
-    low = df["Low"].iloc[-bars:].min()
-    return last_close <= low * 0.995  # tolleranza 0.5% sotto il minimo
 
 def update_assets(top_n=12):
     """
@@ -2006,8 +1987,6 @@ def analyze_asset(symbol: str):
                 rsi1h = float(RSIIndicator(close=df1["Close"], window=14).rsi().iloc[-1]) if len(df1) >= 15 else None
             except:
                 rsi1h = None
-        # Breakout flag
-        breakout_ok = is_breaking_weekly_low(symbol) if ENABLE_BREAKOUT_FILTER else None
         # price24hPcnt e funding rate
         chg = None
         try:
@@ -2043,18 +2022,6 @@ def analyze_asset(symbol: str):
     if not _btc_favorable_short and not trend_ok and not _is_breakout_exempt:
         tlog(f"trend_short:{symbol}", f"[TREND-FILTER][{symbol}] BTC sfavorevole, trend non idoneo", 600)
         return None, None, None
-
-    # Breakout filter: permetti fallback se trend è forte anche senza breakdown
-    if ENABLE_BREAKOUT_FILTER:
-        brk = is_breaking_weekly_low(symbol)
-        if not brk:
-            adx_thresh = ENTRY_ADX_VOLATILE if (symbol in VOLATILE_ASSETS) else ENTRY_ADX_STABLE
-            ema_down = (ema200_slope is not None and ema200_slope < 0) or (ema100_slope is not None and ema100_slope < 0)
-            strong_trend = trend_ok and (adx1h is not None and adx1h >= adx_thresh) and ema_down
-            if not strong_trend and not _is_breakout_exempt:
-                if LOG_DEBUG_STRATEGY:
-                    tlog(f"breakout_short:{symbol}", f"[BREAKOUT-FILTER][{symbol}] No breakdown e fallback non soddisfatto → skip", 600)
-                return None, None, None
 
     try:
         is_volatile = symbol in VOLATILE_ASSETS
@@ -2770,7 +2737,6 @@ while True:
                 portfolio_value_pb, usdt_balance_pb, _ = get_portfolio_value()
                 risk_usdt_pb    = portfolio_value_pb * RISK_PCT
                 order_amount_pb = min(risk_usdt_pb / (_pb_r_dist / _pb_price), usdt_balance_pb * 0.95, ORDER_USDT_MAX)
-                order_amount_pb = max(order_amount_pb, ORDER_USDT)
                 qty_str_pb = calculate_quantity(_pb_sym, order_amount_pb)
                 if not qty_str_pb:
                     continue
