@@ -126,6 +126,8 @@ _btc_favorable_short = False    # True se BTC 4h in downtrend → contesto favor
 _btc_favorable_short_prev = False  # Gap1: stato precedente per rilevare transizione True→False
 _btc_uptrend_short = False      # True se BTC 4h in uptrend → blocco totale nuove aperture SHORT
 _btc_daily_down_short = False   # True se BTC daily in downtrend (EMA200 descend + price < ema200)
+_btc_daily_bull_short = False   # True se BTC daily sopra EMA21+EMA50 → bull confermato → SHORT più rischiosi
+_btc_daily_bull_ts_short = 0.0  # timestamp ultimo check regime daily SHORT
 _btc_pumping_short = False      # True se BTC 15m sale > +1.5% in 30 min (pump guard)
 _btc_soft_pump_short = False    # True se BTC 15m sale > +0.7% in 30 min (portfolio heat guard)
 _btc_ctx_ts = 0                 # timestamp ultimo aggiornamento contesto BTC
@@ -148,7 +150,7 @@ _daily_trades_closed: int = 0
 _daily_pnl_sum: float = 0.0   # somma PnL % netti del giorno
 _last_report_day: str = ""     # "YYYY-MM-DD" dell'ultimo report inviato
 # BEGIN PATCH: throttle DD (no pausa forzata di default)
-ENABLE_DD_PAUSE = os.getenv("ENABLE_DD_PAUSE", "0") == "1"
+ENABLE_DD_PAUSE = os.getenv("ENABLE_DD_PAUSE", "1") == "1"   # circuit breaker DD giornaliero
 ENTRY_PAUSED    = os.getenv("ENTRY_PAUSED", "0") == "1"
 # --- PARAMETRI STRATEGIA SWING-LEVEL SHORT (entra su resistenze strutturali) ---
 SWING_LOOKBACK        = 40    # barre 1h per identificare swing low/high locali
@@ -440,12 +442,34 @@ def _update_btc_context_short():
     Fix #1: pump guard 15m.
     Uptrend guard: blocco totale se 4h uptrend.
     Gap1: rileva transizione True→False e attiva regime change handler."""
-    global _btc_favorable_short, _btc_favorable_short_prev, _btc_uptrend_short, _btc_daily_down_short, _btc_pumping_short, _btc_soft_pump_short, _btc_ctx_ts, _btc_4h_chg_short
+    global _btc_favorable_short, _btc_favorable_short_prev, _btc_uptrend_short, _btc_daily_down_short, _btc_daily_bull_short, _btc_daily_bull_ts_short, _btc_pumping_short, _btc_soft_pump_short, _btc_ctx_ts, _btc_4h_chg_short
     if time.time() - _btc_ctx_ts > 180:
         try:
             _btc_favorable_short = is_trending_down("BTCUSDT", "240")
             # Bear confirmed: check BTC daily downtrend
             _btc_daily_down_short = is_trending_down("BTCUSDT", "D")
+            # Regime daily SHORT: BTC sopra EMA21+EMA50 daily = bull confermato → dimezza risk SHORT
+            if time.time() - _btc_daily_bull_ts_short > 14400:
+                try:
+                    _rd_s = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/kline",
+                                        params={"category": "linear", "symbol": "BTCUSDT",
+                                                "interval": "D", "limit": 60}, timeout=10)
+                    _dd_s = _rd_s.json()
+                    if _dd_s.get("retCode") == 0 and _dd_s["result"]["list"]:
+                        _df_ds = pd.DataFrame(_dd_s["result"]["list"],
+                                              columns=["ts","O","H","L","C","V","T"])
+                        _df_ds["C"] = pd.to_numeric(_df_ds["C"], errors="coerce")
+                        _df_ds = _df_ds.iloc[::-1].reset_index(drop=True)
+                        _btc_p_s = float(_df_ds["C"].iloc[-1])
+                        _e21_s = float(EMAIndicator(close=_df_ds["C"], window=21).ema_indicator().iloc[-1])
+                        _e50_s = float(EMAIndicator(close=_df_ds["C"], window=50).ema_indicator().iloc[-1])
+                        _btc_daily_bull_short = _btc_p_s > _e21_s and _btc_p_s > _e50_s
+                        tlog("btc_daily_bull_short",
+                             f"[CTX][SHORT] BTC daily bull={'SI' if _btc_daily_bull_short else 'NO'} "
+                             f"| close={_btc_p_s:.0f} EMA21d={_e21_s:.0f} EMA50d={_e50_s:.0f}", 14400)
+                    _btc_daily_bull_ts_short = time.time()
+                except Exception:
+                    pass
             # Uptrend guard: controlla se BTC 4h è in uptrend (EMA200 crescente + prezzo sopra EMA200)
             try:
                 from ta.trend import EMAIndicator as _EMA
@@ -509,7 +533,7 @@ def _update_btc_context_short():
             pass
         _btc_ctx_ts = time.time()
         _bear_confirmed = _btc_favorable_short and _btc_daily_down_short
-        tlog("btc_ctx", f"[CTX] BTC 4h_down={_btc_favorable_short} | daily_down={_btc_daily_down_short} | bear_confirmed={_bear_confirmed} | uptrend={_btc_uptrend_short} | pumping={_btc_pumping_short} | btc_4h_chg={_btc_4h_chg_short:+.2f}%", 180)
+        tlog("btc_ctx", f"[CTX] BTC 4h_down={_btc_favorable_short} | daily_down={_btc_daily_down_short} | bear_confirmed={_bear_confirmed} | daily_bull={_btc_daily_bull_short} | uptrend={_btc_uptrend_short} | pumping={_btc_pumping_short} | btc_4h_chg={_btc_4h_chg_short:+.2f}%", 180)
         # Gap1: transizione bear→bull → stringi SL posizioni SHORT non protette
         if _btc_favorable_short_prev and not _btc_favorable_short and open_positions:
             try:
@@ -2990,7 +3014,11 @@ while True:
                         continue
             # ─────────────────────────────────────────────────────────────────
 
-            risk_usdt = max(0.0, float(portfolio_value) * RISK_PCT)
+            # Regime daily BULL (BTC sopra EMA21+EMA50 daily): dimezza il rischio SHORT
+            _regime_mult_s = 0.5 if _btc_daily_bull_short else 1.0
+            if _regime_mult_s < 1.0:
+                tlog(f"regime_bull_short:{symbol}", f"[REGIME-BULL][SHORT] BTC daily bull → RISK dimezzato", 600)
+            risk_usdt = max(0.0, float(portfolio_value) * RISK_PCT * _regime_mult_s)
             qty_target = risk_usdt / max(1e-9, r_dist)
             notional_target = qty_target * price_now_calc
             # Limiti: group budget e margine

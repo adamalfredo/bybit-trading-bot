@@ -124,6 +124,7 @@ _btc_dumping_long = False      # True se BTC 15m scende > -1.5% in 30 min (dump 
 _btc_soft_dump_long = False    # True se BTC 15m scende > -0.7% in 30 min (portfolio heat guard)
 _btc_daily_regime_ok = True    # True = BTC sopra EMA50 daily = regime bull = LONG consentiti
 _btc_daily_regime_ts = 0.0     # timestamp ultimo check regime daily
+_btc_regime_level = 0          # 0=BULL (sopra EMA21+EMA50d), 1=CAUTION (sotto EMA21, sopra EMA50), 2=BEAR (sotto entrambe)
 _btc_ctx_ts = 0
 _btc_4h_chg_long: float = 0.0  # Imp1/Imp2: variazione BTC su 4h, usato per RS relativa e pesi adattivi
 _daily_start_equity = None
@@ -144,7 +145,7 @@ _daily_trades_closed: int = 0
 _daily_pnl_sum: float = 0.0   # somma PnL % netti del giorno
 _last_report_day: str = ""     # "YYYY-MM-DD" dell'ultimo report inviato
 # BEGIN PATCH: throttle DD (no pausa forzata di default)
-ENABLE_DD_PAUSE = os.getenv("ENABLE_DD_PAUSE", "0") == "1"   # se "1" mantiene la pausa forzata
+ENABLE_DD_PAUSE = os.getenv("ENABLE_DD_PAUSE", "1") == "1"   # circuit breaker DD giornaliero
 ENTRY_PAUSED    = os.getenv("ENTRY_PAUSED", "0") == "1"
 # --- PARAMETRI STRATEGIA SWING-LEVEL (config allargata validata su 180gg: PF 1.50, Exp +0.40) ---
 SWING_LOOKBACK        = 40    # barre 1h per identificare swing low/high locali
@@ -429,7 +430,7 @@ def _update_btc_context_long():
     Fix #1: calcola momentum 15m per rilevare dump improvvisi (dump guard).
     Gap1: rileva transizione True→False e attiva regime change handler."""
     global _btc_favorable_long, _btc_favorable_long_prev, _btc_dumping_long, _btc_soft_dump_long, _btc_ctx_ts, _btc_4h_chg_long
-    global _btc_daily_regime_ok, _btc_daily_regime_ts
+    global _btc_daily_regime_ok, _btc_daily_regime_ts, _btc_regime_level
     if time.time() - _btc_ctx_ts > 180:
         _prev = _btc_favorable_long
         try:
@@ -488,15 +489,24 @@ def _update_btc_context_long():
                                          columns=["ts","O","H","L","C","V","T"])
                     _df_d["C"] = pd.to_numeric(_df_d["C"], errors="coerce")
                     _df_d = _df_d.iloc[::-1].reset_index(drop=True)  # oldest-first
-                    _ema50d = EMAIndicator(close=_df_d["C"], window=50).ema_indicator()
-                    _btc_daily_regime_ok = float(_df_d["C"].iloc[-1]) > float(_ema50d.iloc[-1])
+                    _btc_price_d = float(_df_d["C"].iloc[-1])
+                    _ema21d_val = float(EMAIndicator(close=_df_d["C"], window=21).ema_indicator().iloc[-1])
+                    _ema50d_val = float(EMAIndicator(close=_df_d["C"], window=50).ema_indicator().iloc[-1])
+                    _btc_daily_regime_ok = _btc_price_d > _ema50d_val
+                    if _btc_price_d > _ema21d_val and _btc_price_d > _ema50d_val:
+                        _btc_regime_level = 0  # BULL
+                    elif _btc_price_d > _ema50d_val:
+                        _btc_regime_level = 1  # CAUTION: sotto EMA21, sopra EMA50
+                    else:
+                        _btc_regime_level = 2  # BEAR: sotto entrambe
+                    _regime_lbl = ["BULL", "CAUTION", "BEAR"][_btc_regime_level]
                     tlog("btc_daily_regime",
-                         f"[CTX] BTC daily regime={'BULL' if _btc_daily_regime_ok else 'BEAR'} "
-                         f"| close={_df_d['C'].iloc[-1]:.0f} vs EMA50d={_ema50d.iloc[-1]:.0f}", 14400)
+                         f"[CTX] BTC daily regime={_regime_lbl} "
+                         f"| close={_btc_price_d:.0f} EMA21d={_ema21d_val:.0f} EMA50d={_ema50d_val:.0f}", 14400)
                 _btc_daily_regime_ts = time.time()
             except Exception:
                 pass
-        tlog("btc_ctx", f"[CTX] BTC 4h uptrend={_btc_favorable_long} | dumping={_btc_dumping_long} | daily_regime={'BULL' if _btc_daily_regime_ok else 'BEAR'} | btc_4h_chg={_btc_4h_chg_long:+.2f}%", 180)
+        tlog("btc_ctx", f"[CTX] BTC 4h uptrend={_btc_favorable_long} | dumping={_btc_dumping_long} | daily_regime={['BULL','CAUTION','BEAR'][_btc_regime_level]} | btc_4h_chg={_btc_4h_chg_long:+.2f}%", 180)
         # Gap1: transizione bull→bear → stringi SL posizioni non protette
         if _prev and not _btc_favorable_long and open_positions:
             try:
@@ -2948,7 +2958,11 @@ while True:
                         continue
             # ─────────────────────────────────────────────────────────────────
 
-            risk_usdt = max(0.0, float(portfolio_value) * RISK_PCT)
+            # Regime CAUTION (BTC sotto EMA21 daily): dimezza il rischio per trade
+            _regime_mult = 0.5 if _btc_regime_level == 1 else 1.0
+            if _regime_mult < 1.0:
+                tlog(f"regime_caution:{symbol}", f"[REGIME-CAUTION][LONG] BTC sotto EMA21d → RISK dimezzato", 600)
+            risk_usdt = max(0.0, float(portfolio_value) * RISK_PCT * _regime_mult)
             qty_target = risk_usdt / max(1e-9, r_dist)
             notional_target = qty_target * price_now_calc
             max_notional_by_margin = usdt_balance * DEFAULT_LEVERAGE * MARGIN_USE_PCT
