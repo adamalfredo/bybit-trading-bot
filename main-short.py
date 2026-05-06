@@ -2096,6 +2096,17 @@ def analyze_asset(symbol: str):
         price = float(df["Close"].iloc[-1])  # prezzo attuale
         tf_tag = f"({tf_minutes}m)"
 
+        # ── FILTRO FORZA RELATIVA (RS) ────────────────────────────────────────
+        # Per SHORT: blocca ingressi su coin che stanno performando MEGLIO di BTC.
+        # Se il coin sale mentre BTC scende (rs_4h > soglia) → lo SHORT è controtendenza.
+        if rs_4h is not None:
+            _rs_threshold_s = 1.5 if not _btc_favorable_short else 3.0
+            if rs_4h > _rs_threshold_s:
+                tlog(f"rs_filter_short:{symbol}",
+                     f"[RS-FILTER][SHORT] {symbol} rs_4h={rs_4h:+.2f}% > soglia +{_rs_threshold_s:.1f}% → coin troppo forte vs BTC per SHORT, skip",
+                     600)
+                return None, None, None
+
         # ── STRATEGIA SWING-LEVEL SHORT ───────────────────────────────────────
         # Ingresso strutturale su resistenza swing: R:R naturale ≥ 1.8
         # Entra PRIMA della logica classica; se attiva, bypassa EMA/MACD.
