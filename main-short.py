@@ -2100,6 +2100,15 @@ def analyze_asset(symbol: str):
         price = float(df["Close"].iloc[-1])  # prezzo attuale
         tf_tag = f"({tf_minutes}m)"
 
+        # ── SESSION FILTER (no nuovi ingressi 01-07 UTC) ──────────────────────
+        # Analisi 180gg: fascia 01-06 UTC = 69% delle perdite totali con win rate < 40%
+        _utc_hour = datetime.datetime.utcnow().hour
+        if 1 <= _utc_hour <= 6:
+            tlog(f"session_filter_short:{symbol}",
+                 f"[SESSION-FILTER][SHORT] {symbol} ora UTC {_utc_hour:02d}:xx → fascia notturna bloccata (01-06 UTC)",
+                 600)
+            return None, None, None
+
         # ── FILTRO FORZA RELATIVA (RS) ────────────────────────────────────────
         # Per SHORT: blocca ingressi su coin che stanno performando MEGLIO di BTC.
         # Se il coin sale mentre BTC scende (rs_4h > soglia) → lo SHORT è controtendenza.

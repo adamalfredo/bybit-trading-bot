@@ -2054,6 +2054,15 @@ def analyze_asset(symbol: str):
         price = float(df["Close"].iloc[-1])  # prezzo attuale (candela in corso)
         tf_tag = f"({tf_minutes}m)"
 
+        # ── SESSION FILTER (no nuovi ingressi 01-07 UTC) ──────────────────────
+        # Analisi 180gg: fascia 01-06 UTC = 69% delle perdite totali con win rate < 40%
+        _utc_hour = datetime.datetime.utcnow().hour
+        if 1 <= _utc_hour <= 6:
+            tlog(f"session_filter:{symbol}",
+                 f"[SESSION-FILTER][LONG] {symbol} ora UTC {_utc_hour:02d}:xx → fascia notturna bloccata (01-06 UTC)",
+                 600)
+            return None, None, None
+
         # ── FILTRO FORZA RELATIVA (RS) ────────────────────────────────────────
         # Blocca ingressi su coin strutturalmente deboli vs BTC.
         # rs_4h = variazione coin 4h - variazione BTC 4h (già calcolato sopra in telemetria)
