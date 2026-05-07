@@ -2102,7 +2102,7 @@ def analyze_asset(symbol: str):
 
         # ── SESSION FILTER (no nuovi ingressi 01-07 UTC) ──────────────────────
         # Analisi 180gg: fascia 01-06 UTC = 69% delle perdite totali con win rate < 40%
-        _utc_hour = datetime.datetime.utcnow().hour
+        _utc_hour = time.gmtime().tm_hour
         if 1 <= _utc_hour <= 6:
             tlog(f"session_filter_short:{symbol}",
                  f"[SESSION-FILTER][SHORT] {symbol} ora UTC {_utc_hour:02d}:xx → fascia notturna bloccata (01-06 UTC)",
