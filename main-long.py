@@ -1421,6 +1421,9 @@ def set_position_stoploss_long(symbol: str, sl_price: float) -> bool:
             elif ret == 10001 and "lower" in (data.get("retMsg") or "").lower():
                 # SL sopra prezzo corrente: guard sopra dovrebbe prevenirlo, ma per sicurezza
                 tlog(f"sl_invalid_long:{symbol}", f"[POS-SL][LONG] {symbol} retCode=10001 SL stale ({stop_str} > prezzo), skip", 300)
+            elif ret == 10001 and "zero" in (data.get("retMsg") or "").lower():
+                # Posizione già chiusa dall'exchange (SL/TP hit) — normale, solo log
+                log(f"[POS-SL][LONG] {symbol} posizione già chiusa (zero position), skip SL {stop_str}")
             else:
                 log(f"[POS-SL][LONG] {symbol} FALLITO retCode={ret} msg={data.get('retMsg')} stopLoss={stop_str}")
                 notify_telegram(f"⚠️ [POS-SL][LONG] {symbol} position-SL FALLITO\nretCode={ret} {data.get('retMsg')}\nSL target={stop_str}")
