@@ -2675,7 +2675,6 @@ def sl_watchdog_worker_long():
                 ok_pos = set_position_stoploss_long(symbol, sl_price)
                 if ok_pos:
                     log(f"[SL-WATCHDOG][LONG] ✅ SL reimpostato su {symbol} @ {sl_price:.6f}")
-                    notify_telegram(f"⚠️ [SL-WATCHDOG] SL mancante rilevato e reimpostato\n{symbol} @ {sl_price:.4f}")
                 else:
                     log(f"[SL-WATCHDOG][LONG] 🚨 SL REIMPOSTAZIONE FALLITA su {symbol} @ {sl_price:.6f}")
                     notify_telegram(f"🚨 [SL-WATCHDOG] SL MANCANTE e FALLITO su {symbol}!\nEntry={entry.get('entry_price'):.4f} SL target={sl_price:.4f}\n⚠️ INTERVIENI MANUALMENTE")
