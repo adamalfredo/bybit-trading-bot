@@ -45,6 +45,7 @@ RSI_LONG_THRESHOLD   = 54.0
 ENTRY_ADX_THRESH     = 24.0
 MIN_CONFLUENCE       = 2
 ATR_RATIO_MAX_ENTRY  = 0.08     # skip se ATR/prezzo > 8%
+EXT_K                = 1.5      # prezzo max = EMA20 + EXT_K × ATR (filtro estensione)
 COOLDOWN_BARS        = 3        # barre di cooldown dopo un'uscita
 FEES_PCT             = 0.00055  # 0.055% taker per lato
 LINEAR_MIN_TURNOVER  = 50_000_000
@@ -167,6 +168,9 @@ SWING_RSI_MAX         = 50.0  # RSI max al momento dell'ingresso (non in momentu
 SWING_RSI_MIN         = 28.0  # RSI min (non comprare in free-fall)
 SWING_VOL_MIN         = 1.2   # volume corrente >= 1.2× media (domanda che assorbe)
 SWING_RR_MIN          = 1.8   # R:R minimo: distanza a resistenza / distanza a SL
+# SHORT swing
+SWING_RSI_MIN_SHORT   = 45.0  # RSI min per swing SHORT (non già in crollo)
+SWING_RSI_MAX_SHORT   = 72.0  # RSI max per swing SHORT (zona satura ribassista)
 
 
 def precompute_swing_pivots(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
@@ -321,6 +325,91 @@ def signal_entry_swing(df: pd.DataFrame, idx: int,
     return True, sl_natural, tp_natural, price
 
 
+def signal_entry_swing_short(df: pd.DataFrame, idx: int,
+                            pivot_lows: np.ndarray,
+                            pivot_highs: np.ndarray) -> tuple[bool, Optional[float], Optional[float], Optional[float]]:
+    """
+    Logica di ingresso swing SHORT: entry su resistenza strutturale.
+
+    Condizioni di ingresso:
+    1. Prezzo vicino a una resistenza (swing high) identificata su 1h
+    2. RSI in zona di ipercomprato relativo (45-72): non già in crollo, non in momentum
+    3. RSI sta SCENDENDO (pressione ribassista confermata)
+    4. Volume >= SWING_VOL_MIN × media
+    5. EMA200 (1h) in pendenza negativa: macro trend ribassista
+    6. Prezzo sotto EMA200 × 1.02 (non in recupero strutturale)
+
+    Ritorna (segnale, sl_price, tp_price, entry_price) oppure (False, None, None, None).
+    """
+    if idx < SWING_LOOKBACK + 5:
+        return False, None, None, None
+
+    row  = df.iloc[idx - 1]  # candela appena chiusa
+    prev = df.iloc[idx - 2]
+
+    price    = float(row["Close"])
+    atr      = float(row["atr"])
+    rsi      = float(row["rsi"])
+    vol      = float(row["Volume"])
+    vol_avg  = float(row["vol_avg20"]) if row["vol_avg20"] > 0 else 1.0
+    ema200   = float(row["ema200"])
+    ema200_prev = float(prev["ema200"])
+    rsi_prev = float(prev["rsi"])
+
+    # Filtro macro: prezzo sotto EMA200 (non shortare in uptrend strutturale)
+    if price > ema200 * 1.02:
+        return False, None, None, None
+
+    # EMA200 in discesa (macro trend ribassista confermato)
+    if ema200 > ema200_prev:
+        return False, None, None, None
+
+    # ATR filter: meme coin troppo volatili
+    if atr / price > ATR_RATIO_MAX_ENTRY:
+        return False, None, None, None
+
+    # Cerca livelli swing
+    support, resistance = find_swing_levels(df, idx, pivot_lows, pivot_highs)
+    if support is None or resistance is None:
+        return False, None, None, None
+
+    # 1. Prezzo vicino alla resistenza
+    dist_to_resistance = resistance - price
+    if dist_to_resistance > SWING_NEAR_ATR * atr:
+        return False, None, None, None  # troppo lontano dalla resistenza
+
+    # 2. RSI in zona ribassista (non già collassato, non ancora partito al ribasso)
+    if not (SWING_RSI_MIN_SHORT <= rsi <= SWING_RSI_MAX_SHORT):
+        return False, None, None, None
+
+    # 3. RSI sta scendendo (pressione di vendita che prende controllo)
+    if rsi >= rsi_prev:
+        return False, None, None, None
+
+    # 4. Volume >= minimo (vendita reale)
+    if vol < SWING_VOL_MIN * vol_avg:
+        return False, None, None, None
+
+    # 5. Candela chiude SOTTO la resistenza (no breakout confermato)
+    if price >= resistance:
+        return False, None, None, None
+
+    # 6. Calcola SL naturale (sopra la resistenza) e TP naturale (al supporto)
+    sl_natural = resistance + SWING_SL_BELOW_ATR * atr  # SL sopra resistenza
+    sl_dist    = sl_natural - price
+    if sl_dist <= 0:
+        return False, None, None, None
+
+    tp_natural = support  # TP al supporto strutturale
+    rr_natural = (price - tp_natural) / sl_dist
+
+    # 7. R:R minimo
+    if rr_natural < SWING_RR_MIN:
+        return False, None, None, None
+
+    return True, sl_natural, tp_natural, price
+
+
 # Parametri filtro qualità ingresso
 RR_MIN_ROOM   = 1.5   # room-to-run minima: distanza a swing high >= 1.5 × SL dist
 RSI_ENTRY_MAX = 68.0  # non entrare se RSI già overbought (movimento maturo)
@@ -329,7 +418,7 @@ RSI_ENTRY_MAX = 68.0  # non entrare se RSI già overbought (movimento maturo)
 # Logica segnale ingresso (identica al bot)
 # ─────────────────────────────────────────────
 
-def signal_entry(row, prev, sl_mult: float) -> bool:
+def signal_entry(row, prev, sl_mult: float, ext_k: float = None) -> bool:
     """Ritorna True se la candela 'row' (chiusa) genera un segnale di ingresso LONG."""
     # ATR filter
     atr_ratio = row["atr"] / row["Close"] if row["Close"] > 0 else 0
@@ -356,7 +445,8 @@ def signal_entry(row, prev, sl_mult: float) -> bool:
     vol_ok = (row["Volume"] / row["vol_avg20"]) >= 0.6 if row["vol_avg20"] > 0 else True
 
     # Prezzo non troppo esteso sopra EMA20
-    ext_cap = row["ema20"] + 1.5 * row["atr"]
+    _k = ext_k if ext_k is not None else EXT_K
+    ext_cap = row["ema20"] + _k * row["atr"]
     ext_ok = row["Close"] <= ext_cap
 
     # ── FILTRI QUALITÀ INGRESSO ──────────────────────────────────────────
@@ -454,7 +544,9 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
              partial_tp: bool = True,
              pullback_entry: bool = False,
              tp_r: float = PARTIAL_TP_R,
-             swing_entry: bool = False) -> dict:
+             swing_entry: bool = False,
+             direction: str = "long",
+             ext_k: float = None) -> dict:
     """
     Simula tutti i trade su df. Gestisce SL ATR-based, exit signal, ratchet.
     partial_tp=True:    chiude il 50% a +1.5R e sposta SL a BE, lascia correre il resto.
@@ -486,6 +578,7 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
         _pivot_lows, _pivot_highs = precompute_swing_pivots(df)
     else:
         _pivot_lows = _pivot_highs = None
+    _is_short = (direction == "short")
 
     def _open_trade(ep, atr_val):
         """Helper: apre il trade da entry price ep, ritorna (ok, state_dict)."""
@@ -507,32 +600,54 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
                 cooldown -= 1
                 continue
 
-            # ── MODALITÀ SWING ENTRY (nuova strategia strutturale) ────────
+            # ── MODALITÀ SWING ENTRY ──────────────────────────────────────
             if swing_entry:
-                ok, sl_swing, tp_swing, ep_swing = signal_entry_swing(df, i, _pivot_lows, _pivot_highs)
-                if not ok:
-                    continue
-
-                # Macro regime filter
-                if btc_regime is not None:
-                    candle_date = pd.to_datetime(row["ts"], unit="s").date()
-                    is_bull = btc_regime.get(candle_date, True)
-                    if not is_bull:
+                if _is_short:
+                    ok, sl_swing, tp_swing, ep_swing = signal_entry_swing_short(df, i, _pivot_lows, _pivot_highs)
+                    if not ok:
                         continue
-
-                entry_price    = ep_swing
-                sl_price       = sl_swing
-                tp_full        = tp_swing
-                r_dist_swing   = entry_price - sl_price
-                pos_size       = (equity * risk_pct) / r_dist_swing
-                remaining_size = pos_size
-                in_trade       = True
-                entry_idx      = i
-                trail_sl       = sl_price
-                trail_active   = False
-                mfe            = entry_price
-                partial_done   = False
-                continue
+                    # BTC regime filter SHORT: favorevole quando BTC è RIBASSISTA
+                    if btc_regime is not None:
+                        candle_date = pd.to_datetime(row["ts"], unit="s").date()
+                        is_bull = btc_regime.get(candle_date, True)
+                        if is_bull:  # SHORT: skip quando BTC è rialzista
+                            continue
+                    entry_price    = ep_swing
+                    sl_price       = sl_swing  # sopra entry
+                    tp_full        = tp_swing  # sotto entry (supporto)
+                    r_dist_swing   = sl_price - entry_price  # positivo
+                    pos_size       = (equity * risk_pct) / r_dist_swing
+                    remaining_size = pos_size
+                    in_trade       = True
+                    entry_idx      = i
+                    trail_sl       = sl_price
+                    trail_active   = False
+                    mfe            = entry_price
+                    partial_done   = False
+                    continue
+                else:
+                    ok, sl_swing, tp_swing, ep_swing = signal_entry_swing(df, i, _pivot_lows, _pivot_highs)
+                    if not ok:
+                        continue
+                    # BTC regime filter LONG: favorevole quando BTC è RIALZISTA
+                    if btc_regime is not None:
+                        candle_date = pd.to_datetime(row["ts"], unit="s").date()
+                        is_bull = btc_regime.get(candle_date, True)
+                        if not is_bull:
+                            continue
+                    entry_price    = ep_swing
+                    sl_price       = sl_swing
+                    tp_full        = tp_swing
+                    r_dist_swing   = entry_price - sl_price
+                    pos_size       = (equity * risk_pct) / r_dist_swing
+                    remaining_size = pos_size
+                    in_trade       = True
+                    entry_idx      = i
+                    trail_sl       = sl_price
+                    trail_active   = False
+                    mfe            = entry_price
+                    partial_done   = False
+                    continue
             # ─────────────────────────────────────────────────────────────
 
             # ── MODALITÀ PULLBACK: gestisci stato pending ─────────────────
@@ -575,7 +690,7 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
                 continue
             # ─────────────────────────────────────────────────────────────
 
-            if not signal_entry(prev, df.iloc[i-2], sl_mult):
+            if not signal_entry(prev, df.iloc[i-2], sl_mult, ext_k=ext_k):
                 continue
 
             # ── MACRO REGIME FILTER ────────────────────────────────────────
@@ -638,6 +753,35 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
             low_now   = row["Low"]
             close_now = row["Close"]
             atr_now   = row["atr"]
+
+            # ── SHORT SWING: gestione posizione invertita ─────────────────
+            if _is_short and swing_entry:
+                mfe = min(mfe, low_now)  # MFE per SHORT = prezzo più basso
+                # TP: il prezzo è sceso fino al supporto
+                if not partial_done and low_now <= tp_full:
+                    pnl = (entry_price - tp_full) * remaining_size * (1 - FEES_PCT * 2)
+                    trades.append({"symbol": symbol, "entry": entry_price,
+                                   "exit": tp_full, "pnl": pnl,
+                                   "bars": i - entry_idx, "reason": "SwingTP"})
+                    equity    += pnl
+                    max_equity = max(max_equity, equity)
+                    in_trade   = False
+                    cooldown   = COOLDOWN_BARS
+                    continue
+                # SL: il prezzo è salito sopra la resistenza
+                if high_now >= sl_price:
+                    exit_price = sl_price
+                    pnl = (entry_price - exit_price) * remaining_size * (1 - FEES_PCT * 2)
+                    trades.append({"symbol": symbol, "entry": entry_price,
+                                   "exit": exit_price, "pnl": pnl,
+                                   "bars": i - entry_idx, "reason": "SL"})
+                    equity    += pnl
+                    max_equity = max(max_equity, equity)
+                    in_trade   = False
+                    cooldown   = COOLDOWN_BARS
+                    continue
+                continue  # posizione SHORT ancora aperta, skip logica LONG
+            # ─────────────────────────────────────────────────────────────
 
             mfe = max(mfe, high_now)
             r_dist = entry_price - sl_price
@@ -715,7 +859,10 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
     # Chiudi posizione aperta all'ultima barra
     if in_trade:
         exit_price = df.iloc[-1]["Close"]
-        pnl = (exit_price - entry_price) * remaining_size * (1 - FEES_PCT * 2)
+        if _is_short:
+            pnl = (entry_price - exit_price) * remaining_size * (1 - FEES_PCT * 2)
+        else:
+            pnl = (exit_price - entry_price) * remaining_size * (1 - FEES_PCT * 2)
         trades.append({"symbol": symbol, "entry": entry_price, "exit": exit_price,
                         "pnl": pnl, "bars": len(df) - entry_idx, "reason": "EndOfData"})
         equity += pnl
@@ -759,7 +906,7 @@ def simulate(symbol: str, df: pd.DataFrame, sl_mult: float,
 # Report
 # ─────────────────────────────────────────────
 
-def print_report(results: list, days: int, sl_mult: float):
+def print_report(results: list, days: int, sl_mult: float, mode: str = "CLASSICO"):
     total_trades = sum(r["n_trades"] for r in results)
     total_wins   = sum(int(r["wr"] * r["n_trades"]) for r in results)
     all_trades   = [t for r in results for t in r["trades"]]
@@ -783,7 +930,7 @@ def print_report(results: list, days: int, sl_mult: float):
         max_dd = max(max_dd, dd)
 
     print("\n" + "═"*70)
-    print(f"  BACKTEST REPORT — ultimi {days}gg | SL {sl_mult}×ATR | Trail {trail_mult}×ATR | RSI<{RSI_ENTRY_MAX:.0f} | {len(results)} simboli")
+    print(f"  BACKTEST REPORT — ultimi {days}gg | {mode} | SL {sl_mult}×ATR | Trail {trail_mult}×ATR | {len(results)} simboli")
     print("═"*70)
     print(f"\n{'Simbolo':<20} {'Trade':>6} {'WR':>7} {'PnL':>9} {'PF':>7} {'AvgW':>8} {'AvgL':>8}")
     print("─"*70)
@@ -839,6 +986,7 @@ def print_report(results: list, days: int, sl_mult: float):
 def main():
     global ENTRY_ADX_THRESH, RR_MIN_ROOM, RSI_ENTRY_MAX, trail_mult  # noqa: PLW0603
     global SWING_RSI_MAX, SWING_RSI_MIN, SWING_NEAR_ATR, SWING_RR_MIN, SWING_VOL_MIN  # noqa: PLW0603
+    global SWING_RSI_MIN_SHORT, SWING_RSI_MAX_SHORT, EXT_K  # noqa: PLW0603
     parser = argparse.ArgumentParser(description="Backtest segnali bot LONG")
     parser.add_argument("--days",       type=int,   default=90,    help="Giorni di storia (default 90)")
     parser.add_argument("--symbols",    type=str,   default="",    help="Simboli CSV (default: lista built-in)")
@@ -857,6 +1005,10 @@ def main():
     parser.add_argument("--swing-near-atr", type=float, default=SWING_NEAR_ATR, help=f"Distanza max dal supporto in ATR (default {SWING_NEAR_ATR})")
     parser.add_argument("--swing-rr-min",   type=float, default=SWING_RR_MIN,  help=f"R:R minimo per swing entry (default {SWING_RR_MIN})")
     parser.add_argument("--swing-vol-min",  type=float, default=SWING_VOL_MIN, help=f"Moltiplicatore volume minimo (default {SWING_VOL_MIN})")
+    parser.add_argument("--ext-k",          type=float, default=None,          help="Filtro estensione: max = EMA20 + k*ATR (default: usa valore in codice 1.5)")
+    parser.add_argument("--short",               action="store_true", help="Backtest SHORT swing-level (speculare al LONG)")
+    parser.add_argument("--swing-rsi-min-short",  type=float, default=SWING_RSI_MIN_SHORT, help=f"RSI min per swing SHORT (default {SWING_RSI_MIN_SHORT})")
+    parser.add_argument("--swing-rsi-max-short",  type=float, default=SWING_RSI_MAX_SHORT, help=f"RSI max per swing SHORT (default {SWING_RSI_MAX_SHORT})")
     args = parser.parse_args()
 
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()] or DEFAULT_SYMBOLS
@@ -869,12 +1021,23 @@ def main():
     SWING_RSI_MAX    = args.swing_rsi_max
     SWING_RSI_MIN    = args.swing_rsi_min
     SWING_NEAR_ATR   = args.swing_near_atr
-    SWING_RR_MIN     = args.swing_rr_min
-    SWING_VOL_MIN    = args.swing_vol_min
+    SWING_RR_MIN          = args.swing_rr_min
+    SWING_VOL_MIN         = args.swing_vol_min
+    SWING_RSI_MIN_SHORT   = args.swing_rsi_min_short
+    SWING_RSI_MAX_SHORT   = args.swing_rsi_max_short
+    if args.ext_k is not None:
+        EXT_K = args.ext_k
 
     print(f"\n{'─'*70}")
-    mode_tag = "SWING-LEVEL" if args.swing else ("PULLBACK" if args.pullback else "CLASSICO")
-    print(f"  Backtest — {args.days}gg | {mode_tag} | SL {args.sl_mult}×ATR | Trail {args.trail_mult}×ATR | ADX>{args.adx_thresh:.0f} | RSI<{args.rsi_max:.0f} | {len(symbols)} simboli")
+    if args.swing and args.short:
+        mode_tag = "SWING-LEVEL SHORT"
+    elif args.swing:
+        mode_tag = "SWING-LEVEL LONG"
+    elif args.pullback:
+        mode_tag = "PULLBACK"
+    else:
+        mode_tag = "CLASSICO"
+    print(f"  Backtest — {args.days}gg | {mode_tag} | SL {args.sl_mult}×ATR | Trail {args.trail_mult}×ATR | ADX>{args.adx_thresh:.0f} | {len(symbols)} simboli")
     print(f"{'─'*70}")
 
     trail_mult = args.trail_mult
@@ -917,7 +1080,9 @@ def main():
                            partial_tp=not args.no_partial_tp,
                            pullback_entry=args.pullback,
                            tp_r=args.tp_r,
-                           swing_entry=args.swing)
+                           swing_entry=args.swing,
+                           direction="short" if args.short else "long",
+                           ext_k=args.ext_k)
         results.append(result)
         pf_str = f"{result['pf']:.2f}" if result['pf'] != float("inf") else "∞"
         sign = "✅" if result["pnl_total"] > 0 else "❌"
@@ -928,7 +1093,7 @@ def main():
         print("\n  Nessun risultato. Verifica la connessione a Bybit.")
         sys.exit(1)
 
-    print_report(results, days=args.days, sl_mult=args.sl_mult)
+    print_report(results, days=args.days, sl_mult=args.sl_mult, mode=mode_tag)
 
 
 if __name__ == "__main__":

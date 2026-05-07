@@ -152,13 +152,13 @@ _last_report_day: str = ""     # "YYYY-MM-DD" dell'ultimo report inviato
 # BEGIN PATCH: throttle DD (no pausa forzata di default)
 ENABLE_DD_PAUSE = os.getenv("ENABLE_DD_PAUSE", "1") == "1"   # circuit breaker DD giornaliero
 ENTRY_PAUSED    = os.getenv("ENTRY_PAUSED", "0") == "1"
-# --- PARAMETRI STRATEGIA SWING-LEVEL SHORT (entra su resistenze strutturali) ---
+# --- PARAMETRI STRATEGIA SWING-LEVEL SHORT (allineati al backtest 90gg) ---
 SWING_LOOKBACK        = 40    # barre 1h per identificare swing low/high locali
-SWING_NEAR_ATR        = 1.5   # entra se il prezzo è entro SWING_NEAR_ATR × ATR dalla resistenza
-SWING_SL_ABOVE_ATR    = 0.3   # SL = resistenza + SWING_SL_ABOVE_ATR × ATR (SHORT: sopra la resistenza)
-SWING_RSI_MIN_SHORT   = 45.0  # RSI min SHORT (non entrare già in crollo)
+SWING_NEAR_ATR        = 1.0   # entra se il prezzo e' entro SWING_NEAR_ATR x ATR dalla resistenza
+SWING_SL_ABOVE_ATR    = 0.3   # SL = resistenza + SWING_SL_ABOVE_ATR x ATR (SHORT: sopra la resistenza)
+SWING_RSI_MIN_SHORT   = 45.0  # RSI min SHORT (non entrare gia' in crollo)
 SWING_RSI_MAX_SHORT   = 72.0  # RSI max SHORT (zona satura ma non estrema)
-SWING_VOL_MIN         = 1.0   # volume corrente >= 1.0× media 20 periodi
+SWING_VOL_MIN         = 1.2   # volume corrente >= 1.2x media 20 periodi
 SWING_RR_MIN          = 1.8   # R:R minimo
 DD_PAUSE_MINUTES = int(os.getenv("DD_PAUSE_MINUTES", "120"))
 RISK_THROTTLE_LEVEL = 0  # 0=off, 1=DD > cap, 2=DD > 2*cap
@@ -2162,14 +2162,9 @@ def analyze_asset(symbol: str):
         # ─────────────────────────────────────────────────────────────────────
 
         # Filtro estensione: evita SHORT troppo sotto EMA20 - k*ATR (rischio rimbalzo)
-        # Per breakout-exempt k è rilassato (3.5x) perché la coin è PER DEFINIZIONE estesa
+        # k=0.8 ottimale da backtest sweep 90gg (WR 62.1%, PnL -0.96% vs -8.09% a k=1.5)
         ema20v = float(last["ema20"]); atrv = float(last["atr"])
-        if _is_breakout_exempt:
-            k = 3.5
-        elif symbol in LARGE_CAPS:
-            k = 1.8
-        else:
-            k = 1.5
+        k = 0.8
         ext_floor = ema20v - k * atrv
         if float(last["Close"]) < ext_floor:
             if LOG_DEBUG_STRATEGY:

@@ -147,13 +147,13 @@ _last_report_day: str = ""     # "YYYY-MM-DD" dell'ultimo report inviato
 # BEGIN PATCH: throttle DD (no pausa forzata di default)
 ENABLE_DD_PAUSE = os.getenv("ENABLE_DD_PAUSE", "1") == "1"   # circuit breaker DD giornaliero
 ENTRY_PAUSED    = os.getenv("ENTRY_PAUSED", "0") == "1"
-# --- PARAMETRI STRATEGIA SWING-LEVEL (config allargata validata su 180gg: PF 1.50, Exp +0.40) ---
+# --- PARAMETRI STRATEGIA SWING-LEVEL (allineati al backtest 90gg) ---
 SWING_LOOKBACK        = 40    # barre 1h per identificare swing low/high locali
-SWING_NEAR_ATR        = 1.5   # entra se il prezzo è entro SWING_NEAR_ATR × ATR dal supporto
-SWING_SL_BELOW_ATR    = 0.3   # SL = supporto - SWING_SL_BELOW_ATR × ATR
-SWING_RSI_MAX         = 55.0  # RSI max al momento dell'ingresso
+SWING_NEAR_ATR        = 1.0   # entra se il prezzo e' entro SWING_NEAR_ATR x ATR dal supporto
+SWING_SL_BELOW_ATR    = 0.3   # SL = supporto - SWING_SL_BELOW_ATR x ATR
+SWING_RSI_MAX         = 50.0  # RSI max al momento dell'ingresso
 SWING_RSI_MIN         = 28.0  # RSI min (non comprare in free-fall)
-SWING_VOL_MIN         = 1.0   # volume corrente >= 1.0× media 20 periodi
+SWING_VOL_MIN         = 1.2   # volume corrente >= 1.2x media 20 periodi
 SWING_RR_MIN          = 1.8   # R:R minimo: distanza a resistenza / distanza a SL
 DD_PAUSE_MINUTES = int(os.getenv("DD_PAUSE_MINUTES", "120"))
 RISK_THROTTLE_LEVEL = 0  # 0=off, 1=DD > cap, 2=DD > 2*cap
@@ -2116,14 +2116,9 @@ def analyze_asset(symbol: str):
         # ─────────────────────────────────────────────────────────────────────
 
         # Filtro estensione: evita LONG troppo sopra EMA20 + k*ATR
-        # Per breakout-exempt k è rilassato (3.5x) perché la coin è PER DEFINIZIONE estesa
+        # k=0.8 ottimale da backtest sweep 90gg (WR 62.1%, PnL -0.96% vs -8.09% a k=1.5)
         ema20v = float(last["ema20"]); atrv = float(last["atr"])
-        if _is_breakout_exempt:
-            k = 3.5
-        elif symbol in LARGE_CAPS:
-            k = 1.8
-        else:
-            k = 1.5
+        k = 0.8
         ext_cap = ema20v + k * atrv
         if float(last["Close"]) > ext_cap:
             if LOG_DEBUG_STRATEGY:
