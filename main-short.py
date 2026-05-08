@@ -2165,9 +2165,12 @@ def analyze_asset(symbol: str):
         # ─────────────────────────────────────────────────────────────────────
 
         # Filtro estensione: evita SHORT troppo sotto EMA20 - k*ATR (rischio rimbalzo)
-        # k=0.8 ottimale da backtest sweep 90gg (WR 62.1%, PnL -0.96% vs -8.09% a k=1.5)
+        # NOTA: k=0.8 era ottimale per LONG (sweep backtest) ma NON per SHORT.
+        # Per SHORT durante un dump il prezzo scende naturalmente 2-3 ATR sotto EMA20:
+        # k=0.8 bloccava TUTTE le entrate in un mercato in calo. k=2.0 permette entrate
+        # fino a 2 ATR sotto EMA20, ancora filtrando dump già esauriti (3+ ATR).
         ema20v = float(last["ema20"]); atrv = float(last["atr"])
-        k = 0.8
+        k = 2.0
         ext_floor = ema20v - k * atrv
         if float(last["Close"]) < ext_floor:
             if LOG_DEBUG_STRATEGY:
