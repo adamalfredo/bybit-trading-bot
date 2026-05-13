@@ -1,1873 +1,563 @@
-# STRATEGIA EMA20-PULLBACK 4H — validata Walk-Forward Run H
-# Train 2024-01-01→2025-06-30 | Test 2025-07-01→2026-05-13
-# Test: 77 trade, WR 57.1%, Ratio 1.68x, Exp +0.3655R — VALIDA
-# Params: SL=2.0ATR, Trail=3.0ATR@1.0R, RSI<50, Vol>1.2x, EMA20>EMA50+slope
-from typing import Optional
+# ─────────────────────────────────────────────────────────────────────────────
+# STRATEGIA: EMA20-Pullback 4h — Walk-Forward Run H
+# TRAIN 2024-01-01→2025-06-30 | TEST 2025-07-01→2026-05-13
+# Test: 77 trade, WR 57.1%, Ratio 1.68x, Exp +0.3655R
+# Parametri: SL=2×ATR, Trail=3×ATR@1.0R, RSI<50, Vol>1.2×MA, EMA20>EMA50+slope
+#
+# RISCRITTURA COMPLETA — nessun filtro extra rispetto al backtest.
+# Rimossi: F&G gate, dump guard, daily regime BTC, ALT worker,
+#           BE lock automatico, ratchet ROI, weekly DD, TP parziale,
+#           strength score, cooldown post-loss, blacklist.
+# Mantenuti (infrastruttura tecnica necessaria):
+#   - BTC gate EMA50 4h (era nel backtest)
+#   - MAX_OPEN_POSITIONS=4 (era nel backtest)
+#   - Daily DD cap 5% (sicurezza emergenza, non blocca posizioni aperte)
+#   - SL watchdog (sicurezza operativa)
+#   - Trailing worker (attiva @1.0R, distanza 3×ATR — esatto backtest)
+# ─────────────────────────────────────────────────────────────────────────────
+
 import os
 import time
 import hmac
-import json
 import hashlib
+import json
+import threading
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from typing import Optional
+
 import requests
 import pandas as pd
-import numpy as np
-from ta.volatility import BollingerBands, AverageTrueRange
+from ta.volatility import AverageTrueRange
 from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator, MACD, ADXIndicator, SMAIndicator
-import threading
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Env vars (Railway)
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+# ── ENV VARS ──────────────────────────────────────────────────────────────────
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
-BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
-KEY = BYBIT_API_KEY
-SECRET = BYBIT_API_SECRET
-BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
-BYBIT_BASE_URL = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
+KEY    = os.getenv("BYBIT_API_KEY", "")
+SECRET = os.getenv("BYBIT_API_SECRET", "")
+BYBIT_TESTNET      = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
+BYBIT_BASE_URL     = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
-# Indici posizione Bybit
-LONG_IDX = 1
+# ── PARAMETRI BACKTEST (Run H) ────────────────────────────────────────────────
+INTERVAL_MINUTES   = 240          # 4h
+ATR_WINDOW         = 14
+SL_ATR_MULT        = float(os.getenv("SL_ATR_MULT",    "2.0"))
+TRAIL_ATR_MULT     = float(os.getenv("TRAIL_ATR_MULT", "3.0"))
+TRAIL_START_R      = float(os.getenv("TRAIL_START_R",  "1.0"))
+RISK_PCT           = float(os.getenv("RISK_PCT",       "0.0075"))  # 0.75%
+MAX_OPEN_POSITIONS = 4
+DEFAULT_LEVERAGE   = 10
+MARGIN_USE_PCT     = 0.35
+ORDER_USDT_MAX     = float(os.getenv("ORDER_USDT_MAX", "1000"))
+
+# ── SICUREZZA OPERATIVA (non nel backtest, indispensabili in live) ────────────
+DAILY_DD_CAP_PCT = 0.05   # blocca nuovi LONG se equity cala >5% dall'apertura giornata
+FEES_TAKER_PCT   = 0.0006
+
+# ── COSTANTI BYBIT ────────────────────────────────────────────────────────────
+LONG_IDX  = 1
 SHORT_IDX = 2
 
-# --- Sizing per trade (notional) ---
-DEFAULT_LEVERAGE = 10          # leva usata sul conto (Cross/Isolated)
-MARGIN_USE_PCT = 0.35
-
-INTERVAL_MINUTES = 240  # 4h — allineato al backtest Run H
-ATR_WINDOW = 14
-TRAILING_MIN = 0.02   # trailing più conservativo
-TRAILING_MAX = 0.08   # trailing più conservativo
-# Nuovi parametri per protezione guadagni (stop_floor)
-TRIGGER_BY = "MarkPrice"    # trigger degli stop exchange
-
-# Persistenza stato ratchet tra deploy
-STATE_FILE = "/tmp/position_state_long.json"
-
-def save_positions_state():
-    """Salva mfe_roi, floor_roi e cooldown state su file per sopravvivere ai restart."""
-    try:
-        state = {}
-        for symbol in list(open_positions):
-            entry = position_data.get(symbol)
-            if entry:
-                state[symbol] = {
-                    "mfe_roi": entry.get("mfe_roi", 0.0),
-                    "floor_roi": entry.get("floor_roi"),
-                    "entry_price": entry.get("entry_price"),
-                    "floor_updated_ts": entry.get("floor_updated_ts", 0),
-                }
-        # Persisti cooldown post-loss: sopravvive ai restart di Railway
-        cooldown_state = {
-            sym: {"last_exit_time": last_exit_time[sym], "recent_losses": recent_losses.get(sym, 0)}
-            for sym in last_exit_time
-        }
-        state["__cooldown__"] = cooldown_state
-        state["__blacklist__"] = {sym: ts for sym, ts in symbol_blacklist_until.items()}
-        # Persisti pending pullback: sopravvive ai restart (scaduti verranno ignorati al carico)
-        state["__pending_pullbacks__"] = {sym: pb for sym, pb in pending_pullbacks.items()}
-        with open(STATE_FILE, "w") as f:
-            json.dump(state, f)
-    except Exception:
-        pass  # non bloccare il bot per un errore di salvataggio
-
-def load_positions_state() -> dict:
-    """Carica lo stato ratchet salvato, se esiste."""
-    try:
-        if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, "r") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return {}
-
-RATCHET_TIERS_ROI = [
-    (15, 7),    # FIX: era (30,15) → soglie realistiche a leva 10x
-    (25, 15),
-    (40, 25),
-    (60, 40),
-    (80, 60),
-    (100, 80),  # ENA-case: se arriva a +100% proteggi almeno +80%
-    (125, 100), # trade eccezionale: se +125% proteggi +100%
-    (150, 120), # moonshot: se +150% proteggi +120%
-]
-FLOOR_BUFFER_PCT = 0.0015          # 0.15% di prezzo per sicurezza esecuzione
-FLOOR_UPDATE_COOLDOWN_SEC = 45     # cooldown più lungo per evitare rumore
-FLOOR_TRIGGER_BY = "MarkPrice"     # usa Mark per coerenza con SL
-
-# >>> PATCH: parametri breakeven lock (LONG)
-BREAKEVEN_LOCK_PCT = 0.025  # FIX2: era 0.015, attiva BE al +2.5% di prezzo (più respiro prima del lock)
-BREAKEVEN_BUFFER   = 0.012  # FIX2: era 0.006, buffer più largo per evitare noise-stop su BE
-MAX_LOSS_CAP_PCT        = 0.15  # hard cap emergenza: SL primario è ATR-based; questo scatta solo se ATR > 15% (volatile)
-MAX_LOSS_CAP_PCT_STABLE = 0.10  # hard cap emergenza: SL primario è ATR-based; questo scatta solo se ATR > 10% (stabile: AAVE, LINK)
-SIGNAL_EXPIRY_MIN_AGE_H = 24   # ore minime di vita prima che signal expiry sia valutata (zombie stop)
-
-# Active Loss Trailing (ALT) — ratchet speculare verso le perdite
-# Se il trade non mostra momentum positivo (mfe_roi < soglia) entro le prime ore,
-# stringe progressivamente lo SL: -1×R → -0.65×R (4h) → -0.40×R (8h)
-ALT_CONFIRM_ROI = 5.0   # ROI% minimo per considerare il trade "confermato" (≈ 0.25R a 10x)
-ALT_STEP1_H     = 1.5   # ore: Step 1 scatta se non confermato entro 1.5h (era 4h)
-ALT_STEP2_H     = 3.0   # ore: Step 2 scatta se non confermato entro 3h (era 8h)
-ALT_STEP1_MULT  = 0.65  # Step 1: SL = entry - 0.65×r_dist (35% perdita in meno)
-ALT_STEP2_MULT  = 0.40  # Step 2: SL = entry - 0.40×r_dist (60% perdita in meno)
-ALT_BIG_LOSS_USDT   = 0.30  # soglia: se perdita > 0.30 USDT → cooldown esteso
-ALT_BIG_LOSS_CD_MIN = 1440  # cooldown 24h (in minuti) dopo perdita grande
-
-# >>> NEW: regime + drawdown giornaliero (LONG)
-DAILY_DD_CAP_PCT = 0.04
-WEEKLY_DD_CAP_PCT = float(os.getenv("WEEKLY_DD_CAP_PCT", "0.08"))  # Gap3: blocca nuovi ingressi se equity < -8% rispetto a 7gg fa
-_btc_favorable_long = False    # True se BTC 4h in uptrend → contesto favorevole per LONG
-_btc_favorable_long_prev = False  # Gap1: stato precedente per rilevare transizione True→False
-_btc_dumping_long = False      # True se BTC 15m scende > -1.5% in 30 min (dump guard)
-_btc_soft_dump_long = False    # True se BTC 15m scende > -0.7% in 30 min (portfolio heat guard)
-_btc_daily_regime_ok = True    # True = BTC sopra EMA50 daily = regime bull = LONG consentiti
-_btc_daily_regime_ts = 0.0     # timestamp ultimo check regime daily
-_btc_regime_level = 0          # 0=BULL (sopra EMA21+EMA50d), 1=CAUTION (sotto EMA21, sopra EMA50), 2=BEAR (sotto entrambe)
-_btc_ctx_ts = 0
-_btc_4h_chg_long: float = 0.0  # Imp1/Imp2: variazione BTC su 4h, usato per RS relativa e pesi adattivi
-_daily_start_equity = None
-_weekly_start_equity: float | None = None   # Gap3: equity snapshot di 7gg fa
-_weekly_anchor_ts: float = 0.0              # Gap3: timestamp ultimo aggiornamento settimanale
-_weekly_protection_active: bool = False     # Gap3: True = nessun nuovo ingresso LONG
-_trading_paused_until = 0
-# --- FEAR & GREED INDEX (Alternative.me, aggiornato ogni 6h) ---
-_fear_greed_value: int   = 50   # default neutro finché non aggiornato
-_fear_greed_label: str   = "Neutral"
-_fear_greed_ts: float    = 0.0
-FEAR_GREED_UPDATE_SECS   = 6 * 3600   # aggiorna ogni 6 ore
-FEAR_GREED_SKIP_LONG     = 20          # F&G < 20: salta nuovi LONG (panico estremo)
-FEAR_GREED_REDUCE_LONG   = 35          # F&G 20-35: riduci sizing del 25%
-# Report giornaliero
-_daily_trades_opened: int = 0
-_daily_trades_closed: int = 0
-_daily_pnl_sum: float = 0.0   # somma PnL % netti del giorno
-_last_report_day: str = ""     # "YYYY-MM-DD" dell'ultimo report inviato
-# BEGIN PATCH: throttle DD (no pausa forzata di default)
-ENABLE_DD_PAUSE = os.getenv("ENABLE_DD_PAUSE", "1") == "1"   # circuit breaker DD giornaliero
-ENTRY_PAUSED    = os.getenv("ENTRY_PAUSED", "0") == "1"
-# --- PARAMETRI STRATEGIA SWING-LEVEL (allineati al backtest 90gg) ---
-SWING_LOOKBACK        = 40    # barre 1h per identificare swing low/high locali
-SWING_NEAR_ATR        = 1.0   # entra se il prezzo e' entro SWING_NEAR_ATR x ATR dal supporto
-SWING_SL_BELOW_ATR    = 0.3   # SL = supporto - SWING_SL_BELOW_ATR x ATR
-SWING_RSI_MAX         = 50.0  # RSI max al momento dell'ingresso
-SWING_RSI_MIN         = 28.0  # RSI min (non comprare in free-fall)
-SWING_VOL_MIN         = 1.2   # volume corrente >= 1.2x media 20 periodi
-SWING_RR_MIN          = 1.8   # R:R minimo: distanza a resistenza / distanza a SL
-DD_PAUSE_MINUTES = int(os.getenv("DD_PAUSE_MINUTES", "120"))
-RISK_THROTTLE_LEVEL = 0  # 0=off, 1=DD > cap, 2=DD > 2*cap
-INITIAL_STOP_LOSS_PCT = 0.03          # era 0.02, SL iniziale più largo
-ORDER_USDT = 50.0
-ORDER_USDT_MAX = float(os.getenv("ORDER_USDT_MAX", "1000"))  # cap notionale per singolo trade (default 1000 USDT)
-# --- ASSET DINAMICI: aggiorna la lista dei migliori asset spot per volume 24h ---
-ASSETS = []
-LESS_VOLATILE_ASSETS = []
-VOLATILE_ASSETS = []
-LIQUIDITY_MIN_VOLUME = 1_000_000  # Soglia minima volume 24h USDT (consigliato)
-# --- SYNC POSIZIONI APERTE DA WALLET ALL'AVVIO ---
-open_positions = set()
-position_data = {}
-# Cache TP/SL naturali per segnali swing-level (aggiornata da analyze_asset, letta da execution)
-_swing_entry_meta: dict = {}  # symbol → {"tp": resistance, "sl": sl_nat, "r_dist": sl_dist}
-last_exit_time = {}
-last_exit_was_loss = {}  # True se l'ultima uscita su quel simbolo era una perdita
-recent_losses = {}          # conteggio loss consecutivi per simbolo
-symbol_blacklist_until: dict = {}  # blacklist dinamica: symbol → timestamp fino a cui è bloccato
-BLACKLIST_CONSEC_LOSSES = 3   # dopo N loss consecutive → blacklist 24h
-BLACKLIST_HOURS = 24           # ore di blocco dopo trigger blacklist
-# --- PULLBACK ENTRY ---
-# Invece di entrare subito al segnale (= top del movimento), aspetta che il prezzo
-# torni a EMA20 (supporto del trend). Backtest: PF 1.54 vs 1.24, MaxDD 5.8% vs 11.2%.
-pending_pullbacks: dict = {}   # symbol → {ema20, r_dist, strategy, expiry_ts, atr}
-PULLBACK_EXPIRY_H  = 8         # ore max di attesa prima di cancellare il pending
-PULLBACK_ZONE_PCT  = 0.010     # accetta entry fino a +1% sopra EMA20 (tolleranza)
-FORCED_WAIT_MIN = 90        # attesa minima (minuti) se il contesto resta sfavorevole
-# ---- Logging flags (accensione selettiva via env/Variables di Railway) ----
-LOG_DEBUG_ASSETS     = os.getenv("LOG_DEBUG_ASSETS", "0") == "1"
-LOG_DEBUG_DECIMALS   = os.getenv("LOG_DEBUG_DECIMALS", "0") == "1"
-LOG_DEBUG_SYNC       = os.getenv("LOG_DEBUG_SYNC", "0") == "1"
-LOG_DEBUG_STRATEGY   = os.getenv("LOG_DEBUG_STRATEGY", "0") == "1"
-LOG_DEBUG_PORTFOLIO  = os.getenv("LOG_DEBUG_PORTFOLIO", "0") == "1"
-# --- Loosening via env (ingressi più frequenti) ---
-MIN_CONFLUENCE = 2   # FIX: era 1, richiede almeno 2 indicatori allineati
-ENTRY_TF_VOLATILE = 60  # FIX2: allineato al loop principale (60m) per evitare segnali stantii
-ENTRY_TF_STABLE = 60   # FIX2: allineato al loop principale (60m)
-ENTRY_ADX_VOLATILE = 27        # fisso
-ENTRY_ADX_STABLE = 24          # fisso
-ADX_RELAX_EVENT = 3.0
-RSI_LONG_THRESHOLD = 54.0
-COOLDOWN_MINUTES = 60          # fisso (non usare os.getenv)
-MAX_OPEN_POSITIONS = 4         # massimo posizioni simultanee (era 6, riportato a 4: slot 5-6 catturavano segnali marginali)
-MAX_LARGE_CAP_POSITIONS = 1    # max 1 large cap LONG aperta (BTC/ETH/BNB/SOL fortemente correlate)
-MAX_VOLATILE_LONG = 2          # max 2 asset volatili (>5% 24h) LONG aperti contemporaneamente
-FUNDING_LONG_MAX = 0.0005      # blocca nuovi LONG se funding > +0.05% (longs sovraccarichi = pressione ribassista)
-MAX_CONSEC_LOSSES = 2          # fisso
- 
-LINEAR_MIN_TURNOVER = 50_000_000  # 50M: esclude micro-cap speculativi e meme coin (era 10M, alzato dopo FART/BOME/RAVE)
-# Large-cap con minQty elevata: abilita auto-bump del notional al minimo
-LARGE_CAPS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
-# --- Nuova gestione rischio e R-multipli ---
-RISK_PCT = float(os.getenv("RISK_PCT", "0.0075"))   # 0.75% equity per trade
-MAX_MIN_QTY_RISK_FACTOR = 1.5  # max 1.5× il rischio atteso dopo bump min_qty (evita token come RAVEUSDT con minQty enorme)
-SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "2.0"))   # FIX: era 1.4, SL più largo per ridurre noise-stop
-TP1_R = float(os.getenv("TP1_R", "1.5"))             # PARTIAL-TP: chiude 50% a +1.5R (era 2.5R), SL già a BE prima del fill → rischio 0 sul residuo
-TP1_PARTIAL = float(os.getenv("TP1_PARTIAL", "0.50"))  # PARTIAL-TP: era 0.65, 50% è la quota ottimale validata in backtest
-BE_AT_R = float(os.getenv("BE_AT_R", "1.0"))
-TRAIL_START_R = float(os.getenv("TRAIL_START_R", "1.0"))  # FIX: alzato da 0.5 a 1.0 — a 0.5R il BE floor (entry+1.2%) era sopra il prezzo → Bybit rifiutava SL
-TRAIL_ATR_MULT = float(os.getenv("TRAIL_ATR_MULT", "3.0"))  # Run H: 3.0 (era 1.3)
-
-# --- Stima fee per expectancy (percentuali lato notional) ---
-FEES_TAKER_PCT = float(os.getenv("FEES_TAKER_PCT", "0.0006"))  # ~0.06%
-FEES_MAKER_PCT = float(os.getenv("FEES_MAKER_PCT", "0.0001"))  # ~0.01%
-
-# --- Cassaforte in USDT (lock minimo di profitto) ---
-# Nota: per tua richiesta, trattiamo questi come default di codice
-PNL_TRIGGER_USDT = 3.2   # quando l'Unrealized >= 3.2 USDT
-PNL_LOCK_USDT    = 3.0   # fissa uno SL che garantisca ≳ 3.0 USDT
-PNL_LOCK_BUFFER_PCT = 0.001  # 0.1% buffer per evitare SL sopra/sotto il prezzo attuale
-# --- BLACKLIST STABLECOIN ---
-STABLECOIN_BLACKLIST = [
-    "USDCUSDT", "USDEUSDT", "TUSDUSDT", "USDPUSDT", "BUSDUSDT", "FDUSDUSDT", "DAIUSDT", "EURUSDT", "USDTUSDT"
-]
-EXCLUSION_LIST = [
-    "FUSDT", "YBUSDT", "ZBTUSDT", "RECALLUSDT", "XPLUSDT", "BRETTUSDT", "STABLEUSDT",
-    # Commodity / metalli: seguono oro/argento, non crypto → indicatori 60m inutili su questi asset
-    "PAXGUSDT", "XAUTUSDT", "XAUUSDT", "XAGUSDT",
-    "BTCUSDT",    # escluso: il sizing ATR su BTC produce notional sproporzionato rispetto al RISK_PCT
-    "LABUSDT",    # escluso: illiquido, spread elevato, min_qty crea rischio reale >1.5× budget spesso
-    # Non usare blacklist per performance passate: usare ATR_RATIO_MAX_ENTRY per filtrare ipervolatilità
-]
-
-# --- LISTA COIN FISSA (Run H — 61 coin validate, escludendo MKRUSDT/FTMUSDT/FETUSDT/1000SHIBUSDT) ---
+# ── LISTA COIN FISSA (Run H — 61 coin validate) ──────────────────────────────
 COINS_V2 = [
-    "BTCUSDT",       # incluso come benchmark universe; sizing ATR potrebbe skippar se notional troppo grande
-    "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT",
-    "DOTUSDT", "AVAXUSDT", "LINKUSDT", "UNIUSDT", "NEARUSDT",
-    "TONUSDT", "SUIUSDT", "TAOUSDT", "ONDOUSDT", "ENAUSDT",
+    "BTCUSDT",  "ETHUSDT",  "SOLUSDT",  "XRPUSDT",  "ADAUSDT",
+    "DOTUSDT",  "AVAXUSDT", "LINKUSDT", "UNIUSDT",  "NEARUSDT",
+    "TONUSDT",  "SUIUSDT",  "TAOUSDT",  "ONDOUSDT", "ENAUSDT",
     "1000PEPEUSDT", "AAVEUSDT", "LDOUSDT", "COMPUSDT",
-    "WLDUSDT", "INJUSDT", "TIAUSDT", "SEIUSDT",
-    "OPUSDT", "ARBUSDT", "STXUSDT", "APTUSDT",
-    "RENDERUSDT", "JUPUSDT", "PYTHUSDT", "WIFUSDT", "BOMEUSDT",
-    "NOTUSDT", "EIGENUSDT", "POLUSDT", "HYPEUSDT", "MOVEUSDT",
-    "LTCUSDT", "ATOMUSDT", "XLMUSDT", "VETUSDT", "FILUSDT",
-    "ICPUSDT", "RUNEUSDT", "ARUSDT", "CRVUSDT", "SANDUSDT",
-    "MANAUSDT", "AXSUSDT", "GALAUSDT", "SNXUSDT", "GRTUSDT",
-    "APEUSDT", "GMTUSDT", "ORDIUSDT", "1000BONKUSDT", "CFXUSDT",
-    "KASUSDT", "PENDLEUSDT", "BLURUSDT", "FLUXUSDT",
+    "WLDUSDT",  "INJUSDT",  "TIAUSDT",  "SEIUSDT",
+    "OPUSDT",   "ARBUSDT",  "STXUSDT",  "APTUSDT",
+    "RENDERUSDT", "JUPUSDT", "PYTHUSDT", "WIFUSDT",  "BOMEUSDT",
+    "NOTUSDT",  "EIGENUSDT","POLUSDT",  "HYPEUSDT", "MOVEUSDT",
+    "LTCUSDT",  "ATOMUSDT", "XLMUSDT",  "VETUSDT",  "FILUSDT",
+    "ICPUSDT",  "RUNEUSDT", "ARUSDT",   "CRVUSDT",  "SANDUSDT",
+    "MANAUSDT", "AXSUSDT",  "GALAUSDT", "SNXUSDT",  "GRTUSDT",
+    "APEUSDT",  "GMTUSDT",  "ORDIUSDT", "1000BONKUSDT", "CFXUSDT",
+    "KASUSDT",  "PENDLEUSDT","BLURUSDT", "FLUXUSDT",
 ]
 
-# Cache leggera prezzo (TTL in secondi)
-LAST_PRICE_TTL_SEC = 2
-_last_price_cache = {}
+# ── STATO GLOBALE ─────────────────────────────────────────────────────────────
+ASSETS: list           = []
+open_positions: set    = set()
+position_data: dict    = {}
+_state_lock            = threading.RLock()
+_instr_lock            = threading.RLock()
+_instrument_cache: dict = {}
+_price_cache: dict     = {}
+_price_lock            = threading.RLock()
+_last_log_times: dict  = {}
 
-# Cache Open Interest per simbolo (TTL 5 min: OI orario non cambia a ogni tick)
-OI_CACHE_TTL = 300
-_oi_cache: dict = {}  # symbol -> (timestamp, oi_change_pct)
+# BTC gate: True se BTC 4h sopra EMA50 (era nel backtest)
+_btc_favorable_long: bool = True   # default True per non bloccare avvio
+_btc_ctx_ts: float        = 0.0
 
-# Locks per strutture condivise
-_state_lock = threading.RLock()
-_instr_lock = threading.RLock()
-_price_lock = threading.RLock()
+# Daily DD
+_daily_start_equity: Optional[float] = None
+_main_loop_last_day: str = ""
 
-# Helpers atomici per lo stato
-def get_position(symbol: str):
+# ── HTTP SESSION ──────────────────────────────────────────────────────────────
+SESSION = requests.Session()
+_retry = Retry(
+    total=3, backoff_factor=0.5,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET", "POST"],
+)
+SESSION.mount("https://", HTTPAdapter(max_retries=_retry, pool_maxsize=30))
+
+# ── LOG ───────────────────────────────────────────────────────────────────────
+def log(msg: str) -> None:
+    print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg, flush=True)
+
+
+def tlog(key: str, msg: str, interval_sec: int = 60) -> None:
+    now = time.time()
+    if now - _last_log_times.get(key, 0) >= interval_sec:
+        _last_log_times[key] = now
+        log(msg)
+
+
+def notify_telegram(msg: str) -> None:
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": f"[LONG] {msg}"},
+            timeout=10,
+        )
+    except Exception as e:
+        log(f"[TELEGRAM] Errore: {e}")
+
+# ── FIRMA BYBIT ───────────────────────────────────────────────────────────────
+def _bybit_signed_get(path: str, params: dict):
+    from urllib.parse import urlencode
+    qs = urlencode(sorted(params.items()))
+    ts = str(int(time.time() * 1000))
+    rw = "10000"
+    sign = hmac.new(SECRET.encode(), f"{ts}{KEY}{rw}{qs}".encode(),
+                    hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY, "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": rw,
+    }
+    return SESSION.get(f"{BYBIT_BASE_URL}{path}",
+                       headers=headers, params=params, timeout=10)
+
+
+def _bybit_signed_post(path: str, body: dict):
+    ts = str(int(time.time() * 1000))
+    rw = "10000"
+    body_json = json.dumps(body, separators=(",", ":"))
+    sign = hmac.new(SECRET.encode(), f"{ts}{KEY}{rw}{body_json}".encode(),
+                    hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": KEY, "X-BAPI-SIGN": sign,
+        "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": rw,
+        "X-BAPI-SIGN-TYPE": "2", "Content-Type": "application/json",
+    }
+    return SESSION.post(f"{BYBIT_BASE_URL}{path}",
+                        headers=headers, data=body_json, timeout=10)
+
+# ── HELPERS ATOMICI STATO ─────────────────────────────────────────────────────
+def get_position(symbol: str) -> Optional[dict]:
     with _state_lock:
         return position_data.get(symbol)
+
 
 def set_position(symbol: str, entry: dict) -> None:
     with _state_lock:
         position_data[symbol] = entry
 
+
 def add_open(symbol: str) -> None:
     with _state_lock:
         open_positions.add(symbol)
+
 
 def discard_open(symbol: str) -> None:
     with _state_lock:
         open_positions.discard(symbol)
 
-def is_trending_up(symbol: str, tf: str = "240"):
-    """
-    True se l'asset è in uptrend su 4h: prezzo sopra EMA200 e EMA200 crescente.
-    """
-    endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
-    params = {"category": "linear", "symbol": symbol, "interval": tf, "limit": 220}
-    try:
-        resp = SESSION.get(endpoint, params=params, timeout=10)
-        data = resp.json()
-        if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
-            return False
-        raw = list(reversed(data["result"]["list"]))  # FIX: Bybit ritorna newest-first; invertiamo per avere oldest-first
-        df = pd.DataFrame(raw, columns=["timestamp","Open","High","Low","Close","Volume","turnover"])
-        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
-        df.dropna(subset=["Close"], inplace=True)
-        if len(df) < 200:
-            return False
-        ema200 = EMAIndicator(close=df["Close"], window=200).ema_indicator()
-        return df["Close"].iloc[-1] > ema200.iloc[-1] and ema200.iloc[-1] >= ema200.iloc[-2]
-    except Exception:
-        return False
-
-def is_trending_up_1h(symbol: str, tf: str = "60"):
-    """
-    True se l'asset è in uptrend su 1h: prezzo sopra EMA100 e EMA100 crescente.
-    """
-    endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
-    params = {"category": "linear", "symbol": symbol, "interval": tf, "limit": 120}
-    try:
-        resp = SESSION.get(endpoint, params=params, timeout=10)
-        data = resp.json()
-        if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
-            return False
-        raw = list(reversed(data["result"]["list"]))  # FIX: Bybit ritorna newest-first; invertiamo per avere oldest-first
-        df = pd.DataFrame(raw, columns=["timestamp","Open","High","Low","Close","Volume","turnover"])
-        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
-        df.dropna(subset=["Close"], inplace=True)
-        if len(df) < 100:
-            return False
-        ema100 = EMAIndicator(close=df["Close"], window=100).ema_indicator()
-        return df["Close"].iloc[-1] > ema100.iloc[-1] and ema100.iloc[-1] >= ema100.iloc[-2]
-    except Exception:
-        return False
-
-def _on_regime_bearish_long():
-    """
-    Gap1 — Chiamata quando btc_fav transita True→False.
-    Per ogni posizione aperta senza ratchet attivo, sposta lo SL al breakeven
-    in modo da non lasciare perdite aperte in un mercato che si è girato.
-    Le posizioni che hanno già ratchet/BE attivo vengono ignorate (già protette).
-    """
-    log("[REGIME-CHANGE][LONG] btc_fav True→False: stringo SL delle posizioni non protette → BE")
-    # Throttle: max 1 notifica ogni 30 minuti (BTC può oscillare intorno alla soglia più volte)
-    _rc_key = "regime_change_long_tg"
-    if time.time() - _last_log_times.get(_rc_key, 0) >= 1800:
-        _last_log_times[_rc_key] = time.time()
-        notify_telegram("⚠️ [REGIME-CHANGE] BTC ha perso il trend: sposto SL a breakeven sulle posizioni LONG senza protezione")
-    for symbol in list(open_positions):
-        try:
-            entry = position_data.get(symbol)
-            if not entry:
-                continue
-            # Già protette: be_locked o ratchet attivo (floor_roi impostato)
-            if entry.get("be_locked") or entry.get("floor_roi") is not None:
-                continue
-            entry_price = entry.get("entry_price")
-            if not entry_price:
-                continue
-            price_now = get_last_price(symbol)
-            if not price_now:
-                continue
-            # Solo posizioni in profitto: non peggiorare lo SL di posizioni già in perdita
-            if price_now <= float(entry_price):
-                log(f"[REGIME-CHANGE][LONG] {symbol} già in perdita, non modifico SL")
-                continue
-            be_price = float(entry_price) * (1.0 + BREAKEVEN_BUFFER)
-            # Guard: il conditional SL per LONG richiede trigger < prezzo corrente.
-            # Se be_price >= price_now il prezzo è già sceso sotto il BE → skip conditional SL,
-            # ma aggiorna comunque il position SL solo se be_price è raggiungibile.
-            if be_price >= price_now:
-                log(f"[REGIME-CHANGE][LONG] {symbol} BE {be_price:.6f} >= price {price_now:.6f}: prezzo già sotto BE, skip")
-                continue
-            qty_live = get_open_long_qty(symbol)
-            if qty_live and qty_live > 0:
-                ok_csl = place_conditional_sl_long(symbol, be_price, qty_live, trigger_by="MarkPrice")
-                ok_psl = set_position_stoploss_long(symbol, be_price)
-                if ok_csl or ok_psl:
-                    entry["be_locked"] = True
-                    entry["be_price"] = be_price
-                    set_position(symbol, entry)
-                    log(f"[REGIME-CHANGE][LONG] {symbol} SL→BE {be_price:.6f} (entry={entry_price:.6f})")
-        except Exception as _e:
-            log(f"[REGIME-CHANGE][LONG] {symbol} errore: {_e}")
-
-
-def _check_weekly_dd_long(portfolio_value: float) -> bool:
-    """
-    Gap3 — Verifica drawdown settimanale.
-    Aggiorna lo snapshot settimanale ogni 7 giorni (168h).
-    Ritorna True se il weekly DD supera WEEKLY_DD_CAP_PCT → blocca nuovi ingressi.
-    Con protezione attiva: si disattiva quando l'equity recupera il 50% della perdita.
-    """
-    global _weekly_start_equity, _weekly_anchor_ts, _weekly_protection_active
+# ── STRUMENTI BYBIT ───────────────────────────────────────────────────────────
+def get_instrument_info(symbol: str) -> dict:
     now = time.time()
-    # Guard: errore API porta equity=0 → falso positivo se abbiamo posizioni aperte
-    if portfolio_value < 1.0 and open_positions:
-        return _weekly_protection_active
-    # Inizializza snapshot se mai impostato
-    if _weekly_start_equity is None or _weekly_anchor_ts == 0.0:
-        _weekly_start_equity = portfolio_value
-        _weekly_anchor_ts = now
-        return False
-    # Aggiorna snapshot ogni 7 giorni
-    if now - _weekly_anchor_ts >= 7 * 24 * 3600:
-        _weekly_start_equity = portfolio_value
-        _weekly_anchor_ts = now
-        _weekly_protection_active = False
-        log(f"[WEEKLY-DD] Snapshot aggiornato: equity={portfolio_value:.2f} USDT")
-        return False
-    # Calcola drawdown settimanale
-    weekly_dd = (portfolio_value - _weekly_start_equity) / max(1e-9, _weekly_start_equity)
-    if weekly_dd < -WEEKLY_DD_CAP_PCT:
-        if not _weekly_protection_active:
-            _weekly_protection_active = True
-            log(f"[WEEKLY-DD] ⛔ DD settimanale {-weekly_dd*100:.1f}% > cap {WEEKLY_DD_CAP_PCT*100:.0f}% → protezione attiva")
-            notify_telegram(f"⛔ [WEEKLY-DD] Drawdown settimanale {-weekly_dd*100:.1f}% supera cap {WEEKLY_DD_CAP_PCT*100:.0f}%\nNessun nuovo LONG fino a recupero parziale")
-        return True
-    # Disattiva protezione se recupera ≥50% della perdita
-    if _weekly_protection_active:
-        loss = _weekly_start_equity * WEEKLY_DD_CAP_PCT
-        recovered = portfolio_value - (_weekly_start_equity * (1.0 - WEEKLY_DD_CAP_PCT))
-        if recovered >= loss * 0.5:
-            _weekly_protection_active = False
-            log(f"[WEEKLY-DD] ✅ Recupero sufficiente, protezione disattivata. Equity={portfolio_value:.2f}")
-            notify_telegram(f"✅ [WEEKLY-DD] Recupero raggiunto, nuovi LONG abilitati")
-    return _weekly_protection_active
-
-
-def _update_fear_greed():
-    """Aggiorna il Fear & Greed Index da Alternative.me ogni 6 ore."""
-    global _fear_greed_value, _fear_greed_label, _fear_greed_ts
-    if time.time() - _fear_greed_ts < FEAR_GREED_UPDATE_SECS:
-        return
-    try:
-        r = SESSION.get("https://api.alternative.me/fng/?limit=1", timeout=8)
-        d = r.json()
-        item = d.get("data", [{}])[0]
-        _fear_greed_value = int(item.get("value", 50))
-        _fear_greed_label = item.get("value_classification", "Neutral")
-        _fear_greed_ts = time.time()
-        tlog("fear_greed", f"[F&G] Fear & Greed Index = {_fear_greed_value} ({_fear_greed_label})", 3600)
-    except Exception as _fge:
-        tlog("fear_greed_err", f"[F&G] Errore aggiornamento: {_fge}", 3600)
-
-
-def _update_btc_context_long():
-    """Aggiorna il contesto BTC ogni 3 min.
-    Fix #3: se BTC 24h in negativo forza btc_fav=False anche se 4h uptrend.
-    Fix #1: calcola momentum 15m per rilevare dump improvvisi (dump guard).
-    Gap1: rileva transizione True→False e attiva regime change handler."""
-    global _btc_favorable_long, _btc_favorable_long_prev, _btc_dumping_long, _btc_soft_dump_long, _btc_ctx_ts, _btc_4h_chg_long
-    global _btc_daily_regime_ok, _btc_daily_regime_ts, _btc_regime_level
-    if time.time() - _btc_ctx_ts > 180:
-        _prev = _btc_favorable_long
-        try:
-            _btc_favorable_long = is_trending_up("BTCUSDT", "240")
-            # Fix #3: override se BTC 24h già in negativo (dump in corso)
-            try:
-                _r = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/tickers",
-                                 params={"category": "linear", "symbol": "BTCUSDT"}, timeout=5)
-                _d = _r.json()
-                if _d.get("retCode") == 0 and _d["result"]["list"]:
-                    _pct24h = float(_d["result"]["list"][0].get("price24hPcnt", 0)) * 100
-                    if _pct24h < -0.5:
-                        _btc_favorable_long = False
-                        tlog("btc_ctx_pct", f"[CTX] BTC 24h={_pct24h:+.2f}% → btc_fav override=False", 180)
-            except Exception:
-                pass
-        except Exception:
-            pass
-        # Fix #1: momentum BTC 15m — dump guard
-        try:
-            _r2 = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/kline",
-                              params={"category": "linear", "symbol": "BTCUSDT",
-                                      "interval": "15", "limit": 5}, timeout=5)
-            _d2 = _r2.json()
-            if _d2.get("retCode") == 0 and len(_d2["result"]["list"]) >= 3:
-                _cls = _d2["result"]["list"]  # ordine Bybit: [0]=più recente
-                _chg_30m = (float(_cls[0][4]) - float(_cls[2][4])) / float(_cls[2][4]) * 100
-                _btc_dumping_long = _chg_30m < -1.5
-                _btc_soft_dump_long = _chg_30m < -0.7  # soglia soft per portfolio heat guard
-                if _btc_dumping_long:
-                    tlog("btc_dump", f"[CTX] BTC 15m dump={_chg_30m:+.2f}% → DUMP-GATE attivo", 60)
-        except Exception:
-            pass
-        # Imp1/Imp2: BTC 4h change — baseline RS per update_assets() e analyze_asset()
-        try:
-            _r4h = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/kline",
-                               params={"category": "linear", "symbol": "BTCUSDT",
-                                       "interval": "240", "limit": 6}, timeout=5)
-            _d4h = _r4h.json()
-            if _d4h.get("retCode") == 0 and len(_d4h["result"]["list"]) >= 5:
-                _c4h = _d4h["result"]["list"]  # [0]=più recente
-                _btc_4h_chg_long = (float(_c4h[0][4]) - float(_c4h[4][4])) / max(1e-9, float(_c4h[4][4])) * 100
-        except Exception:
-            pass
-        _btc_ctx_ts = time.time()
-        # Regime daily: check ogni 4h — BTC vs EMA50 daily
-        # Se BTC < EMA50 daily = correzione/bear macro in corso → blocca nuovi LONG
-        if time.time() - _btc_daily_regime_ts > 14400:
-            try:
-                _rd = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/kline",
-                                  params={"category": "linear", "symbol": "BTCUSDT",
-                                          "interval": "D", "limit": 60}, timeout=10)
-                _dd = _rd.json()
-                if _dd.get("retCode") == 0 and _dd["result"]["list"]:
-                    _df_d = pd.DataFrame(_dd["result"]["list"],
-                                         columns=["ts","O","H","L","C","V","T"])
-                    _df_d["C"] = pd.to_numeric(_df_d["C"], errors="coerce")
-                    _df_d = _df_d.iloc[::-1].reset_index(drop=True)  # oldest-first
-                    _btc_price_d = float(_df_d["C"].iloc[-1])
-                    _ema21d_val = float(EMAIndicator(close=_df_d["C"], window=21).ema_indicator().iloc[-1])
-                    _ema50d_val = float(EMAIndicator(close=_df_d["C"], window=50).ema_indicator().iloc[-1])
-                    _btc_daily_regime_ok = _btc_price_d > _ema50d_val
-                    if _btc_price_d > _ema21d_val and _btc_price_d > _ema50d_val:
-                        _btc_regime_level = 0  # BULL
-                    elif _btc_price_d > _ema50d_val:
-                        _btc_regime_level = 1  # CAUTION: sotto EMA21, sopra EMA50
-                    else:
-                        _btc_regime_level = 2  # BEAR: sotto entrambe
-                    _regime_lbl = ["BULL", "CAUTION", "BEAR"][_btc_regime_level]
-                    tlog("btc_daily_regime",
-                         f"[CTX] BTC daily regime={_regime_lbl} "
-                         f"| close={_btc_price_d:.0f} EMA21d={_ema21d_val:.0f} EMA50d={_ema50d_val:.0f}", 14400)
-                _btc_daily_regime_ts = time.time()
-            except Exception:
-                pass
-        tlog("btc_ctx", f"[CTX] BTC 4h uptrend={_btc_favorable_long} | dumping={_btc_dumping_long} | daily_regime={['BULL','CAUTION','BEAR'][_btc_regime_level]} | btc_4h_chg={_btc_4h_chg_long:+.2f}%", 180)
-        # Gap1: transizione bull→bear → stringi SL posizioni non protette
-        if _prev and not _btc_favorable_long and open_positions:
-            try:
-                _on_regime_bearish_long()
-            except Exception as _re:
-                log(f"[REGIME-CHANGE][LONG] errore handler: {_re}")
-        # Gap1b: transizione bear→bull → notifica recupero trend (no azione sui SL, già gestiti dal ratchet)
-        if not _prev and _btc_favorable_long:
-            _rc_bull_key = "regime_change_long_bull_tg"
-            if time.time() - _last_log_times.get(_rc_bull_key, 0) >= 1800:
-                _last_log_times[_rc_bull_key] = time.time()
-                n_pos = len(open_positions)
-                notify_telegram(f"✅ [REGIME-CHANGE] BTC ha recuperato il trend 4h → contesto LONG favorevole\nPosizioni aperte: {n_pos}")
-
-def _get_oi_change(symbol: str) -> float | None:
-    """Restituisce la variazione % di Open Interest nell'ultima ora (intervalTime=1h).
-    Positivo = OI cresce (nuove posizioni aperte) = conferma genuinità del trend.
-    Cache TTL 5 min per minimizzare API calls extra durante l'analisi parallela.
-    """
-    now = time.time()
-    cached = _oi_cache.get(symbol)
-    if cached and now - cached[0] < OI_CACHE_TTL:
-        return cached[1]
+    with _instr_lock:
+        cached = _instrument_cache.get(symbol)
+        if cached and now - cached["ts"] < 300:
+            return cached["data"]
+    _fallback = {
+        "min_qty": 0.01, "qty_step": 0.01,
+        "precision": 4, "price_step": 0.01, "min_order_amt": 5.0,
+    }
     try:
         resp = SESSION.get(
-            f"{BYBIT_BASE_URL}/v5/market/open-interest",
-            params={"category": "linear", "symbol": symbol, "intervalTime": "1h", "limit": 3},
-            timeout=8
+            f"{BYBIT_BASE_URL}/v5/market/instruments-info",
+            params={"category": "linear", "symbol": symbol}, timeout=10,
         )
-        lst = resp.json().get("result", {}).get("list", [])
-        if len(lst) < 2:
-            return None
-        # list è in ordine decrescente (più recente prima)
-        oi_now  = float(lst[0]["openInterest"])
-        oi_prev = float(lst[1]["openInterest"])
-        if oi_prev == 0:
-            return None
-        change_pct = (oi_now - oi_prev) / oi_prev * 100
-        _oi_cache[symbol] = (now, change_pct)
-        return change_pct
-    except:
-        return None
-
-def _equity_now():
-    total, usdt_balance, coin_values = get_portfolio_value()
-    return total
-
-def _update_daily_anchor_and_btc_context():
-    """Aggiorna ancora giornaliera di equity e contesto BTC."""
-    _update_fear_greed()
-    global _daily_start_equity
-    if _daily_start_equity is None or time.strftime("%Y-%m-%d") != time.strftime("%Y-%m-%d", time.gmtime()):
-        _daily_start_equity = _equity_now()
-    _update_btc_context_long()
-
-def _send_daily_report():
-    """Invia una volta al giorno (intorno alle 21:00 UTC / 23:00 ora italiana) il riepilogo su Telegram."""
-    global _last_report_day, _daily_trades_opened, _daily_trades_closed, _daily_pnl_sum
-    now_utc = time.gmtime()
-    today = time.strftime("%Y-%m-%d", now_utc)
-    if today == _last_report_day:
-        return
-    # Invia solo dopo le 21:55 UTC (= 23:55 ora italiana, a fine giornata)
-    if now_utc.tm_hour < 21 or (now_utc.tm_hour == 21 and now_utc.tm_min < 55):
-        return
-    try:
-        equity = _equity_now()
-        pnl_day = equity - (_daily_start_equity or equity)
-        pnl_day_pct = (pnl_day / max(1e-9, _daily_start_equity or equity)) * 100.0
-        pnl_emoji = "📈" if pnl_day >= 0 else "📉"
-        pos_list = ", ".join(sorted(open_positions)) if open_positions else "nessuna"
-        avg_pnl = (_daily_pnl_sum / _daily_trades_closed) if _daily_trades_closed > 0 else 0.0
-        msg = (
-            f"📋 Report giornaliero LONG — {today}\n"
-            f"{pnl_emoji} PnL giorno: {pnl_day:+.2f} USDT ({pnl_day_pct:+.2f}%)\n"
-            f"💰 Equity: {equity:.2f} USDT\n"
-            f"📂 Trade aperti oggi: {_daily_trades_opened}\n"
-            f"✅ Trade chiusi oggi: {_daily_trades_closed}\n"
-            f"📊 PnL medio chiusi: {avg_pnl:+.2f}% (fee incl.)\n"
-            f"🔓 Posizioni attive: {pos_list}"
-        )
-        notify_telegram(msg)
-        _last_report_day = today
-        # Reset contatori per il giorno successivo
-        _daily_trades_opened = 0
-        _daily_trades_closed = 0
-        _daily_pnl_sum = 0.0
-    except Exception as e:
-        log(f"[DAILY-REPORT] Errore invio report: {e}")
-
-def update_assets(top_n=12):
-    """
-    V2: usa lista fissa COINS_V2 (validata Run H).
-    Non fa selezione dinamica — la lista è fissa al file.
-    Classifica ogni coin come VOLATILE (|24h_pct|>5%) o LESS_VOLATILE per i gate di concentrazione.
-    """
-    global ASSETS, LESS_VOLATILE_ASSETS, VOLATILE_ASSETS
-    try:
-        # Recupera variazioni 24h per classificazione volatile/stabile
-        resp = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/tickers", params={"category": "linear"}, timeout=10)
         data = resp.json()
-        if data.get("retCode") != 0:
-            ASSETS = list(COINS_V2)
-            VOLATILE_ASSETS = []
-            LESS_VOLATILE_ASSETS = list(COINS_V2)
-            return
-        tickers = {t["symbol"]: t for t in data["result"]["list"]}
-        ASSETS = list(COINS_V2)
-        VOLATILE_ASSETS = [
-            s for s in COINS_V2
-            if abs(float(tickers.get(s, {}).get("price24hPcnt", 0))) > 0.05
-        ]
-        LESS_VOLATILE_ASSETS = [s for s in COINS_V2 if s not in VOLATILE_ASSETS]
-        tlog("update_assets_v2", f"[ASSETS-V2] {len(ASSETS)} coin fissi | volatili(>5%)={len(VOLATILE_ASSETS)}", 600)
-    except Exception as e:
-        log(f"[ASSETS-V2] Errore classificazione volatilità: {e}")
-        ASSETS = list(COINS_V2)
-        VOLATILE_ASSETS = []
-        LESS_VOLATILE_ASSETS = list(COINS_V2)
-
-def log(msg):
-    print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg)
-
-# Livello log globale: DEBUG/INFO/WARN/ERROR (default INFO)
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-
-# --- HTTP sessione condivisa con retry/backoff ---
-RETRY_STRATEGY = Retry(
-    total=3,
-    backoff_factor=0.5,
-    status_forcelist=[429, 500, 502, 503, 504],
-    allowed_methods=["GET", "POST"],
-)
-SESSION = requests.Session()
-ADAPTER = HTTPAdapter(max_retries=RETRY_STRATEGY, pool_maxsize=50)
-SESSION.mount("https://", ADAPTER)
-SESSION.mount("http://", ADAPTER)
-
-# Throttling semplice per log ripetitivi
-_last_log_times = {}
-def tlog(key: str, msg: str, interval_sec: int = 60):
-    now = time.time()
-    last = _last_log_times.get(key, 0)
-    if now - last >= interval_sec:
-        _last_log_times[key] = now
-        log(msg)
-
-# --- Logging trade su CSV ---
-def _trade_log(event: str, symbol: str, side: str, entry_price: float = 0.0, qty: float = 0.0,
-               sl: float = 0.0, tp: float = 0.0, r_dist: float = 0.0, extra: dict | None = None):
-    try:
-        os.makedirs("logs", exist_ok=True)
-        path = os.path.join("logs", "trades.csv")
-        header_needed = not os.path.exists(path)
-        with open(path, "a", encoding="utf-8") as f:
-            if header_needed:
-                f.write("ts,event,symbol,side,entry,qty,sl,tp,r_dist,extra\n")
-            jextra = json.dumps(extra or {}, separators=(",", ":"))
-            f.write(f"{int(time.time())},{event},{symbol},{side},{entry_price},{qty},{sl},{tp},{r_dist},{jextra}\n")
-    except Exception:
-        pass
-
-def _expectancy_log(pnl_pct: float, entry_notional: float, exit_notional: float,
-                    maker_entry: bool = False, maker_exit: bool = False):
-    try:
-        os.makedirs("logs", exist_ok=True)
-        path = os.path.join("logs", "expectancy.csv")
-        header_needed = not os.path.exists(path)
-        fee_entry = entry_notional * (FEES_MAKER_PCT if maker_entry else FEES_TAKER_PCT)
-        fee_exit = exit_notional * (FEES_MAKER_PCT if maker_exit else FEES_TAKER_PCT)
-        with open(path, "a", encoding="utf-8") as f:
-            if header_needed:
-                f.write("ts,pnl_pct,entry_notional,exit_notional,fee_entry,fee_exit\n")
-            f.write(f"{int(time.time())},{pnl_pct:.6f},{entry_notional:.6f},{exit_notional:.6f},{fee_entry:.6f},{fee_exit:.6f}\n")
-    except Exception:
-        pass
-
-# --- Helper richieste firmate Bybit (centralizzati) ---
-def _bybit_signed_get(path: str, params: dict):
-    try:
-        from urllib.parse import urlencode
-        query_string = urlencode(sorted(params.items()))
-        ts = str(int(time.time() * 1000))
-        recv_window = "10000"
-        payload = f"{ts}{KEY}{recv_window}{query_string}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": recv_window
-        }
-        url = f"{BYBIT_BASE_URL}{path}"
-        return SESSION.get(url, headers=headers, params=params, timeout=10)
-    except Exception as e:
-        tlog("signed_get_exc", f"[SIGNED-GET][{path}] exc: {e}", 300)
-        raise
-
-def _bybit_signed_post(path: str, body: dict):
-    try:
-        ts = str(int(time.time() * 1000))
-        recv_window = "10000"
-        body_json = json.dumps(body, separators=(",", ":"))
-        payload = f"{ts}{KEY}{recv_window}{body_json}"
-        sign = hmac.new(SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY": KEY,
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": recv_window,
-            "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json"
-        }
-        url = f"{BYBIT_BASE_URL}{path}"
-        return SESSION.post(url, headers=headers, data=body_json, timeout=10)
-    except Exception as e:
-        tlog("signed_post_exc", f"[SIGNED-POST][{path}] exc: {e}", 300)
-        raise
-
-def format_quantity_bybit(qty: float, qty_step: float, precision: Optional[int] = None) -> str:
-    """
-    Restituisce la quantità formattata secondo i decimali accettati da Bybit per qty_step e basePrecision,
-    troncando senza arrotondare e garantendo che sia un multiplo esatto di qty_step.
-    """
-    from decimal import Decimal, ROUND_DOWN
-    def get_decimals(step):
-        s = str(step)
-        if '.' in s:
-            return len(s.split('.')[-1].rstrip('0'))
-        return 0
-    
-    # Usa sempre i decimali del qty_step, ignora precision se incompatibile
-    step_decimals = get_decimals(qty_step)
-    if precision is None or precision < step_decimals:
-        precision = step_decimals
-    
-    step_dec = Decimal(str(qty_step))
-    qty_dec = Decimal(str(qty))
-    # Tronca la quantità al multiplo più basso di qty_step
-    floored_qty = (qty_dec // step_dec) * step_dec
-    # Troncamento ai decimali accettati
-    quantize_str = '1.' + '0'*precision if precision > 0 else '1'
-    floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
-    # Garantisce che sia multiplo esatto di qty_step
-    if (floored_qty / step_dec) % 1 != 0:
-        floored_qty = (floored_qty // step_dec) * step_dec
-        floored_qty = floored_qty.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
-    fmt = f"{{0:.{precision}f}}"
-    # LOG DIAGNOSTICO
-    # LOG DIAGNOSTICO (solo se abilitato)
-    if LOG_DEBUG_DECIMALS:
-        log(f"[DECIMALI][FORMAT_QTY] qty={qty} | qty_step={qty_step} | precision={precision} | floored_qty={floored_qty} | quantize_str={quantize_str}")
-    return fmt.format(floored_qty)
-
-def format_price_bybit(price: float, tick_size: float) -> str:
-    step = Decimal(str(tick_size))
-    p = Decimal(str(price))
-    floored = (p // step) * step  # tronca al tick
-    dec = -step.as_tuple().exponent if step.as_tuple().exponent < 0 else 0
-    return f"{floored:.{dec}f}"
-
-def compute_trailing_distance(symbol: str, atr_val: float) -> float:
-    price = get_last_price(symbol) or 0.0
-    if price <= 0:
-        return max(atr_val * 1.5, 0.0)
-    min_abs = price * TRAILING_MIN
-    max_abs = price * TRAILING_MAX
-    dist = atr_val * 1.5
-    return float(max(min_abs, min(max_abs, dist)))
-
-def get_open_long_qty(symbol):
-    try:
-        params = {"category": "linear", "symbol": symbol}
-        resp = _bybit_signed_get("/v5/position/list", params)
-        data = resp.json()
-        if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
-            if LOG_DEBUG_SYNC:
-                tlog(f"qty_err_long:{symbol}", f"[BYBIT-RAW][ERRORE] get_open_long_qty {symbol}: {json.dumps(data)}", 300)
-            return 0.0
-        for pos in data["result"]["list"]:
-            if pos.get("side") == "Buy":
-                qty = float(pos.get("size", 0))
-                return qty if qty > 0 else 0.0
-        return 0.0
-    except Exception as e:
-        if LOG_DEBUG_SYNC:
-            tlog(f"qty_exc_long:{symbol}", f"❌ Errore get_open_long_qty per {symbol}: {e}", 300)
-        return 0.0
-
-def get_open_short_qty(symbol):
-    try:
-        params = {"category": "linear", "symbol": symbol}
-        resp = _bybit_signed_get("/v5/position/list", params)
-        data = resp.json()
-        if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
-            return 0.0
-        for pos in data["result"]["list"]:
-            if pos.get("side") == "Sell":
-                qty = float(pos.get("size", 0))
-                return qty if qty > 0 else 0.0
-        return 0.0
-    except Exception:
-        return 0.0
-
-# --- FUNZIONI DI SUPPORTO BYBIT E TELEGRAM ---
-def get_last_price(symbol):
-    try:
-        now = time.time()
-        with _price_lock:
-            cached = _last_price_cache.get(symbol)
-            if cached and (now - cached.get("ts", 0)) <= LAST_PRICE_TTL_SEC:
-                return cached.get("price")
-        endpoint = f"{BYBIT_BASE_URL}/v5/market/tickers"
-        params = {"category": "linear", "symbol": symbol}  # PATCH: era "spot"
-        resp = SESSION.get(endpoint, params=params, timeout=10)
-        data = resp.json()
-        if data.get("retCode") == 0:
-            item = data["result"]["list"][0]
-            price = float(item["lastPrice"])
-            bid1 = float(item.get("bid1Price") or price)
-            ask1 = float(item.get("ask1Price") or price)
-            with _price_lock:
-                _last_price_cache[symbol] = {"price": price, "bid1": bid1, "ask1": ask1, "ts": now}
-            return price
-        else:
-            tlog(f"lp_err:{symbol}", f"[BYBIT] Errore get_last_price {symbol}: {data}", 300)
-            return None
-    except Exception as e:
-        tlog(f"lp_exc:{symbol}", f"[BYBIT] Errore get_last_price {symbol}: {e}", 300)
-        return None
-
-def get_bid_price(symbol) -> Optional[float]:
-    """Ritorna bid1Price dal ticker (cacheato da get_last_price)."""
-    get_last_price(symbol)
-    with _price_lock:
-        c = _last_price_cache.get(symbol, {})
-        return c.get("bid1") or c.get("price")
-
-def get_instrument_info(symbol: str) -> dict:
-    """
-    Info strumento con cache 5m.
-    Fallback conservativo: qty_step=0.01, min_order_amt=10 per evitare 170137/170140 ripetitivi.
-    """
-    now = time.time()
-    # Cache semplice (aggiungi queste variabili globali in alto)
-    global _instrument_cache
-    with _instr_lock:
-        if '_instrument_cache' not in globals():
-            _instrument_cache = {}
-        cached = _instrument_cache.get(symbol)
-        if cached and (now - cached["ts"] < 300):
-            return cached["data"]
-
-    try:
-        endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
-        params = {"category": "linear", "symbol": symbol}
-        resp = SESSION.get(endpoint, params=params, timeout=10)
-        data = resp.json()
-        if data.get("retCode") != 0:
-            tlog(f"instr_err:{symbol}", f"❌ get_instrument_info retCode {data.get('retCode')} → fallback {symbol}", 600)
-            parsed = {
-                "min_qty": 0.01,
-                "qty_step": 0.01,
-                "precision": 4,
-                "price_step": 0.01,
-                "min_order_amt": 10.0
-            }
-            with _instr_lock:
-                _instrument_cache[symbol] = {"data": parsed, "ts": now}
-            return parsed
-        
-        lst = data.get("result", {}).get("list", [])
-        if not lst:
-            tlog(f"instr_empty:{symbol}", f"❌ get_instrument_info lista vuota → fallback {symbol}", 600)
-            parsed = {
-                "min_qty": 0.01,
-                "qty_step": 0.01,
-                "precision": 4,
-                "price_step": 0.01,
-                "min_order_amt": 10.0
-            }
-            with _instr_lock:
-                _instrument_cache[symbol] = {"data": parsed, "ts": now}
-            return parsed
-            
-        info = lst[0]
-        lot = info.get("lotSizeFilter", {})
-        price_filter = info.get("priceFilter", {})
-        
-        qty_step_raw = lot.get("qtyStep", "0.01") or "0.01"
-        try:
-            qty_step = float(qty_step_raw)
-        except:
-            qty_step = 0.01
-            
+        if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
+            return _fallback
+        info = data["result"]["list"][0]
+        lot  = info.get("lotSizeFilter", {})
+        pf   = info.get("priceFilter", {})
         parsed = {
-            "min_qty": float(lot.get("minOrderQty", 0) or 0),
-            "qty_step": qty_step,
-            "precision": int(info.get("priceScale", 4) or 4),
-            "price_step": float(price_filter.get("tickSize", "0.01") or "0.01"),
-            "min_order_amt": float(lot.get("minNotionalValue", "5") or "5")
+            "min_qty":       float(lot.get("minOrderQty",      0.01) or 0.01),
+            "qty_step":      float(lot.get("qtyStep",         "0.01") or "0.01"),
+            "precision":     int(info.get("priceScale",          4)  or 4),
+            "price_step":    float(pf.get("tickSize",         "0.01") or "0.01"),
+            "min_order_amt": float(lot.get("minNotionalValue", "5")   or "5"),
         }
         with _instr_lock:
             _instrument_cache[symbol] = {"data": parsed, "ts": now}
         return parsed
-        
-    except Exception as e:
-        tlog(f"instr_exc:{symbol}", f"❌ Errore get_instrument_info eccezione → fallback {symbol}: {e}", 600)
-        parsed = {
-            "min_qty": 0.01,
-            "qty_step": 0.01,
-            "precision": 4,
-            "price_step": 0.01,
-            "min_order_amt": 10.0
-        }
-        _instrument_cache[symbol] = {"data": parsed, "ts": now}
-        return parsed
+    except Exception:
+        return _fallback
+
+
+def format_price_bybit(price: float, tick_size: float) -> str:
+    step    = Decimal(str(tick_size))
+    p       = Decimal(str(price))
+    floored = (p // step) * step
+    dec = -step.as_tuple().exponent if step.as_tuple().exponent < 0 else 0
+    return f"{floored:.{dec}f}"
+
 
 def _format_qty_with_step(qty: float, step: float) -> str:
     step_dec = Decimal(str(step))
-    q = Decimal(str(qty))
-    floored = (q // step_dec) * step_dec
-    step_decimals = -step_dec.as_tuple().exponent if step_dec.as_tuple().exponent < 0 else 0
-    pattern = Decimal('1.' + '0'*step_decimals) if step_decimals > 0 else Decimal('1')
+    q        = Decimal(str(qty))
+    floored  = (q // step_dec) * step_dec
+    sd = -step_dec.as_tuple().exponent if step_dec.as_tuple().exponent < 0 else 0
+    pattern = Decimal("1." + "0" * sd) if sd > 0 else Decimal("1")
     floored = floored.quantize(pattern, rounding=ROUND_DOWN)
-    if step_decimals > 0:
-        return f"{floored:.{step_decimals}f}".rstrip('0').rstrip('.') or "0"
-    return f"{int(floored)}"
+    return f"{floored:.{sd}f}" if sd > 0 else str(int(floored))
 
-def get_free_qty(symbol):
-    # Normalizza coin
-    if symbol.endswith("USDT") and len(symbol) > 4:
-        coin = symbol.replace("USDT", "")
-    elif symbol == "USDT":
-        coin = "USDT"
-    else:
-        coin = symbol
-
-    params = {"accountType": BYBIT_ACCOUNT_TYPE}
-
+# ── PREZZO ────────────────────────────────────────────────────────────────────
+def get_last_price(symbol: str) -> Optional[float]:
+    now = time.time()
+    with _price_lock:
+        c = _price_cache.get(symbol)
+        if c and now - c["ts"] <= 2:
+            return c["price"]
     try:
-        resp = _bybit_signed_get("/v5/account/wallet-balance", params)
+        resp = SESSION.get(
+            f"{BYBIT_BASE_URL}/v5/market/tickers",
+            params={"category": "linear", "symbol": symbol}, timeout=10,
+        )
         data = resp.json()
-        if "result" not in data or "list" not in data["result"]:
-            if LOG_DEBUG_PORTFOLIO:
-                log(f"❗ Struttura inattesa da Bybit: {resp.text}")
-            return 0.0
-
-        acct = data["result"]["list"][0]
-        # Saldo disponibile complessivo (Unified)
-        total_avail = float(acct.get("totalAvailableBalance") or 0.0)
-
-        # Per USDT prova a prendere il disponibile della coin; fallback al totale disponibile
-        coin_list = acct.get("coin", [])
-        if coin == "USDT":
-            for c in coin_list:
-                if c.get("coin") == "USDT":
-                    avail = c.get("availableToWithdraw") or c.get("availableBalance") or c.get("walletBalance") or "0"
-                    qty = float(avail) if avail else 0.0
-                    # Log minimale e con throttling
-                    tlog("balance_usdt", f"📦 Saldo USDT disponibile: {qty}", 600)
-                    return qty if qty > 0 else float(total_avail)  # fallback
-            # Se non trovata la coin, usa il totale disponibile
-            tlog("balance_usdt", f"📦 Saldo USDT disponibile: {total_avail}", 600)
-            return float(total_avail)
-
-        # Per altre coin usa quanto disponibile nella coin, altrimenti 0
-        for c in coin_list:
-            if c.get("coin") == coin:
-                avail = c.get("availableToWithdraw") or c.get("availableBalance") or c.get("walletBalance") or "0"
-                return float(avail) if avail else 0.0
-        return 0.0
-
-    except Exception as e:
-        if LOG_DEBUG_PORTFOLIO:
-            log(f"❌ Errore nel recupero saldo: {e}")
-        return 0.0
-
-def notify_telegram(msg):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        log("[TELEGRAM] Token o chat_id non configurati")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"[LONG] {msg}"}
-    try:
-        requests.post(url, data=payload, timeout=10)
-    except Exception as e:
-        log(f"[TELEGRAM] Errore invio messaggio: {e}")
-
-def calculate_quantity(symbol: str, usdt_amount: float) -> Optional[str]:
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}")
-        return None
-    info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.0001)
-    min_order_amt = info.get("min_order_amt", 5)
-    min_qty = info.get("min_qty", 0.0)
-    precision = info.get("precision", 4)
-    
-    min_notional = max(float(min_order_amt), float(min_qty) * float(price))
-    if usdt_amount < min_notional:
-        log(f"❌ Budget {usdt_amount:.2f} USDT insufficiente per notional minimo {min_notional:.2f} su {symbol}")
-        return None
-    try:
-        raw_qty = Decimal(str(usdt_amount)) / Decimal(str(price))
-        if LOG_DEBUG_DECIMALS:
-            log(f"[DECIMALI][CALC_QTY] {symbol} | usdt_amount={usdt_amount} | price={price} | raw_qty={raw_qty} | qty_step={qty_step} | precision={precision}")
-        qty_str = format_quantity_bybit(float(raw_qty), float(qty_step), precision=precision)
-        qty_dec = Decimal(qty_str)
-        min_qty_dec = Decimal(str(min_qty))
-        if qty_dec < min_qty_dec:
-            if LOG_DEBUG_DECIMALS:
-                log(f"[DECIMALI][CALC_QTY] {symbol} | qty_dec < min_qty_dec: {qty_dec} < {min_qty_dec}")
-            qty_dec = min_qty_dec
-            qty_str = format_quantity_bybit(float(qty_dec), float(qty_step), precision=precision)
-        order_value = qty_dec * Decimal(str(price))
-        if LOG_DEBUG_DECIMALS:
-            log(f"[DECIMALI][CALC_QTY] {symbol} | qty_dec={qty_dec} | order_value={order_value}")
-        if order_value < Decimal(str(min_order_amt)):
-            log(f"❌ Valore ordine troppo basso per {symbol}: {order_value:.2f} USDT (minimo richiesto: {min_order_amt})")
-            return None
-        if qty_dec <= 0:
-            log(f"❌ Quantità calcolata troppo piccola per {symbol}")
-            return None
-        investito_effettivo = float(qty_dec) * float(price)
-        if investito_effettivo < 0.95 * usdt_amount:
-            log(f"⚠️ Attenzione: valore effettivo investito ({investito_effettivo:.2f} USDT) molto inferiore a quello richiesto ({usdt_amount:.2f} USDT)")
-        if LOG_DEBUG_DECIMALS:
-            log(f"[DECIMALI][CALC_QTY][RETURN] {symbol} | qty_str={qty_str}")
-        return qty_str
-    except Exception as e:
-        log(f"❌ Errore calcolo quantità per {symbol}: {e}")
-        return None
-
-def _try_limit_entry_long(symbol: str, qty_str: str, bid_price_str: str) -> Optional[float]:
-    """Tenta ingresso LONG come maker (PostOnly Limit a bid1Price).
-    Polling fill max 3 secondi. Cancella e ritorna None se non eseguito (fallback Market)."""
-    body = {
-        "category": "linear",
-        "symbol": symbol,
-        "side": "Buy",
-        "orderType": "Limit",
-        "timeInForce": "PostOnly",
-        "qty": qty_str,
-        "price": bid_price_str,
-        "positionIdx": LONG_IDX
-    }
-    resp = _bybit_signed_post("/v5/order/create", body)
-    try:
-        data = resp.json()
-    except Exception:
-        return None
-    if data.get("retCode") != 0:
-        if LOG_DEBUG_STRATEGY:
-            log(f"[LIMIT-ENTRY][LONG][{symbol}] PostOnly rifiutato ({data.get('retCode')}), fallback Market")
-        return None
-    order_id = data.get("result", {}).get("orderId", "")
-    # Polling fill: max 3 secondi (6 × 0.5s)
-    for _ in range(6):
-        time.sleep(0.5)
-        filled_qty = get_open_long_qty(symbol)
-        if filled_qty and filled_qty > 0:
-            log(f"[LIMIT-ENTRY][LONG][{symbol}] PostOnly @ {bid_price_str} eseguito ✓ (fee maker)")
-            return filled_qty
-    # Timeout: cancella ordine e segnala fallback
-    if order_id:
-        try:
-            _bybit_signed_post("/v5/order/cancel", {"category": "linear", "symbol": symbol, "orderId": order_id})
-        except Exception:
-            pass
-    if LOG_DEBUG_STRATEGY:
-        log(f"[LIMIT-ENTRY][LONG][{symbol}] PostOnly timeout, fallback Market")
-    return None
-
-
-def market_long(symbol: str, usdt_amount: float, qty_exact: Optional[str] = None):
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}")
-        return None
-
-    info = get_instrument_info(symbol)
-    qty_step = float(info.get("qty_step", 0.01))
-    min_qty = float(info.get("min_qty", qty_step))
-    min_order_amt = float(info.get("min_order_amt", 10.0))
-
-    # Se è stata fornita una quantità esatta (già conforme ai passi), usala
-    step_dec = Decimal(str(qty_step))
-    if qty_exact is not None:
-        try:
-            qty_aligned = Decimal(str(qty_exact))
-        except Exception:
-            qty_aligned = Decimal("0")
-    else:
-        safe_usdt_amount = usdt_amount * 0.98
-        raw_qty = Decimal(str(safe_usdt_amount)) / Decimal(str(price))
-        qty_aligned = (raw_qty // step_dec) * step_dec
-
-    # Guardie: evita qty 0 e rispetta minimi exchange
-    if float(qty_aligned) <= 0 or float(qty_aligned) < min_qty:
-        qty_aligned = Decimal(str(min_qty))
-        tlog(f"qty_guard:{symbol}", f"[QTY-GUARD][{symbol}] qty riallineata a min_qty={float(qty_aligned)}", 600)
-
-    # Rispetta min notional (min_order_amt)
-    needed = Decimal(str(min_order_amt)) / Decimal(str(price))
-    # ceil al passo
-    multiples = (needed / step_dec).quantize(Decimal('1'), rounding=ROUND_UP)
-    min_notional_qty = multiples * step_dec
-    if qty_aligned * Decimal(str(price)) < Decimal(str(min_order_amt)):
-        qty_aligned = max(qty_aligned, min_notional_qty)
-        tlog(f"notional_guard:{symbol}", f"[NOTIONAL-GUARD][{symbol}] qty alzata per min_order_amt → {float(qty_aligned)}", 600)
-
-    # NEW: limita il notional all'effettivo margine disponibile adesso
-    avail_now = get_usdt_balance() or 0.0
-    max_notional_now = avail_now * DEFAULT_LEVERAGE * MARGIN_USE_PCT
-    desired_notional = float(qty_aligned) * float(price)
-    if desired_notional > max_notional_now:
-        # scala qty al tetto consentito dal margine corrente
-        qty_aligned = (Decimal(str(max_notional_now)) / Decimal(str(price))) // step_dec * step_dec
-        if qty_aligned <= 0:
-            return None
-
-    # --- TENTATIVO INGRESSO MAKER (PostOnly Limit a bid1Price) ---
-    bid_price = get_bid_price(symbol) or 0.0
-    if bid_price > 0:
-        price_step = float(info.get("price_step", 0.01))
-        bid_str = format_price_bybit(bid_price, price_step)
-        qty_str_limit = _format_qty_with_step(float(qty_aligned), qty_step)
-        if float(qty_str_limit) > 0:
-            limit_qty = _try_limit_entry_long(symbol, qty_str_limit, bid_str)
-            if limit_qty:
-                return limit_qty
-
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
-        qty_str = _format_qty_with_step(float(qty_aligned), qty_step)
-        if float(qty_str) <= 0:
-            log(f"❌ qty_str=0 per {symbol}, skip ordine")
-            return None
-
-        body = {
-            "category": "linear",
-            "symbol": symbol,
-            "side": "Buy",
-            "orderType": "Market",
-            "qty": qty_str,
-            "positionIdx": LONG_IDX
-        }
-        response = _bybit_signed_post("/v5/order/create", body)
-        if LOG_DEBUG_STRATEGY:
-            log(f"[LONG][{symbol}] attempt {attempt}/{max_retries} BODY={json.dumps(body, separators=(',', ':'))}")
-
-        try:
-            resp_json = response.json()
-        except:
-            resp_json = {}
-        if LOG_DEBUG_STRATEGY:
-            log(f"[LONG][{symbol}] RESP {response.status_code} {resp_json}")
-
-        if resp_json.get("retCode") == 0:
-            return float(qty_str)
-
-        ret_code = resp_json.get("retCode")
-        if ret_code == 170137:
-            tlog(f"retry_137:{symbol}", f"[RETRY][{symbol}] 170137 → refresh instrument e rifloor", 120)
-            try:
-                with _instr_lock:
-                    _instrument_cache.pop(symbol, None)
-            except Exception: pass
-            info = get_instrument_info(symbol)
-            qty_step = float(info.get("qty_step", qty_step))
-            step_dec = Decimal(str(qty_step))
-            qty_aligned = (qty_aligned // step_dec) * step_dec
-            continue
-        if ret_code == 170140:
-            # Order value exceeded lower limit → riallinea alla qty minima per notional
-            info = get_instrument_info(symbol)
-            min_qty = float(info.get("min_qty", 0.0))
-            min_order_amt = float(info.get("min_order_amt", 10.0))
-            needed_qty = max(Decimal(str(min_qty)), Decimal(str(min_order_amt)) / Decimal(str(price)))
-            multiples = (needed_qty / step_dec).quantize(Decimal('1'), rounding=ROUND_UP)
-            qty_aligned = multiples * step_dec
-            tlog(f"retry_140:{symbol}", f"[RETRY][{symbol}] 170140 → qty bump a {float(qty_aligned)} (min_notional)", 120)
-            continue
-        if ret_code == 170131:
-            tlog(f"retry_131:{symbol}", f"[RETRY][{symbol}] 170131 → riduco qty del 10%", 120)
-            qty_aligned = (qty_aligned * Decimal("0.9")) // step_dec * step_dec
-            if qty_aligned <= 0:
-                return None
-            continue
-        if ret_code == 110007:
-            # Insufficient available balance → riduci qty del 20% e ritenta
-            scaled = (qty_aligned * Decimal("0.8")) // step_dec * step_dec
-            if scaled > 0:
-                qty_aligned = scaled
-                continue
-            # se troppo piccola, log essenziale (throttled) e termina
-            tlog(f"err_110007:{symbol}", f"[ERROR][{symbol}] 110007: saldo disponibile insufficiente per aprire LONG", 300)
-            break
-        # Altri errori non gestiti → throttling per evitare spam
-        tlog(f"long_err:{symbol}:{ret_code}", f"[ERROR][{symbol}] Errore non gestito: {ret_code}", 300)
-        break
-    return None
-
-def place_trailing_stop_long(symbol: str, trailing_dist: float):
-    body = {
-        "category": "linear",
-        "symbol": symbol,
-        "trailingStop": str(trailing_dist),
-        "positionIdx": LONG_IDX
-    }
-    resp = _bybit_signed_post("/v5/position/trading-stop", body)
-    try:
-        data = resp.json()
-    except:
-        data = {}
-    if data.get("retCode") == 0:
-        tlog(f"trailing_long:{symbol}", f"[TRAILING-PLACE-LONG] {symbol} trailing={trailing_dist}", 30)
-        return True
-    tlog(f"trailing_long_err:{symbol}", f"[TRAILING-PLACE-LONG][ERR] retCode={data.get('retCode')} msg={data.get('retMsg')}", 300)
-    return False
-
-def market_close_long(symbol: str, qty: float):
-    price = get_last_price(symbol)
-    if not price:
-        log(f"❌ Prezzo non disponibile per {symbol}, impossibile chiudere LONG")
-        return None
-
-    info = get_instrument_info(symbol)
-    qty_step = float(info.get("qty_step", 0.01))
-    step_dec = Decimal(str(qty_step))
-    qty_aligned = (Decimal(str(qty)) // step_dec) * step_dec
-
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
-        qty_str = _format_qty_with_step(float(qty_aligned), qty_step)
-        body = {
-            "category": "linear",
-            "symbol": symbol,
-            "side": "Sell",
-            "orderType": "Market",
-            "qty": qty_str,
-            "reduceOnly": True,          # <--- FIX
-            "positionIdx": LONG_IDX
-        }
-        response = _bybit_signed_post("/v5/order/create", body)
-        if LOG_DEBUG_STRATEGY:
-            log(f"[CLOSE-LONG][{symbol}] attempt {attempt}/{max_retries} BODY={json.dumps(body, separators=(',', ':'))}")
-
-        try:
-            resp_json = response.json()
-        except:
-            resp_json = {}
-        if LOG_DEBUG_STRATEGY:
-            log(f"[CLOSE-LONG][{symbol}] RESP {response.status_code} {resp_json}")
-
-        if resp_json.get("retCode") == 0:
-            return response
-
-        ret_code = resp_json.get("retCode")
-        if ret_code == 170137:
-            tlog(f"retry_close_137:{symbol}", f"[RETRY-CLOSE][{symbol}] 170137 → refresh instrument e rifloor", 120)
-            try:
-                with _instr_lock:
-                    _instrument_cache.pop(symbol, None)
-            except Exception: pass
-            info = get_instrument_info(symbol)
-            qty_step = float(info.get("qty_step", qty_step))
-            step_dec = Decimal(str(qty_step))
-            qty_aligned = (Decimal(str(qty)) // step_dec) * step_dec
-            continue
-
-        tlog(f"err_close:{symbol}:{ret_code}", f"[ERROR-CLOSE][{symbol}] Errore non gestito: {ret_code}", 300)
-        break
-    return None
-
-def cancel_all_orders(symbol: str, order_filter: Optional[str] = None) -> bool:
-    body = {"category": "linear", "symbol": symbol}
-    if order_filter:
-        body["orderFilter"] = order_filter  # es: "StopOrder"
-    try:
-        resp = _bybit_signed_post("/v5/order/cancel-all", body)
-        ok = resp.json().get("retCode") == 0
-        if not ok:
-            tlog(f"cancel_all_err:{symbol}", f"[CANCEL-ALL] {symbol} resp={resp.text}", 300)
-        return ok
-    except Exception as e:
-        tlog(f"cancel_all_exc:{symbol}", f"[CANCEL-ALL] {symbol} exc: {e}", 300)
-        return False
-
-# >>> PATCH: funzioni per impostare lo stopLoss sulla posizione (LONG) e worker BE
-def set_position_stoploss_long(symbol: str, sl_price: float) -> bool:
-    # Guard preventivo: per LONG il SL deve essere SOTTO il prezzo corrente.
-    # Se il valore è stale (es. prezzo sceso sotto il floor impostato dal ratchet), skip.
-    cur = get_last_price(symbol)
-    if cur and sl_price >= cur:
-        tlog(f"sl_invalid_long:{symbol}", f"[POS-SL][LONG] {symbol} SL={sl_price:.6f} >= prezzo={cur:.6f}: valore stale, skip", 300)
-        return False
-
-    info = get_instrument_info(symbol)
-    price_step = info.get("price_step", 0.01)
-    stop_str = format_price_bybit(sl_price, price_step)
-    body = {
-        "category": "linear",
-        "symbol": symbol,
-        "stopLoss": stop_str,
-        "slTriggerBy": "MarkPrice",
-        "positionIdx": LONG_IDX,
-        "tpslMode": "Full"
-    }
-    try:
-        resp = _bybit_signed_post("/v5/position/trading-stop", body)
-        data = resp.json()
-        ret = data.get("retCode")
-        ok = ret == 0
-        if not ok:
-            if ret == 34040:  # "not modified": SL già impostato a questo valore, non è un errore reale
-                log(f"[POS-SL][LONG] {symbol} già impostato ({stop_str}), skip")
-            elif ret == 10001 and "lower" in (data.get("retMsg") or "").lower():
-                # SL sopra prezzo corrente: guard sopra dovrebbe prevenirlo, ma per sicurezza
-                tlog(f"sl_invalid_long:{symbol}", f"[POS-SL][LONG] {symbol} retCode=10001 SL stale ({stop_str} > prezzo), skip", 300)
-            elif ret == 10001 and "zero" in (data.get("retMsg") or "").lower():
-                # Posizione già chiusa dall'exchange (SL/TP hit) — normale, solo log
-                log(f"[POS-SL][LONG] {symbol} posizione già chiusa (zero position), skip SL {stop_str}")
-            else:
-                log(f"[POS-SL][LONG] {symbol} FALLITO retCode={ret} msg={data.get('retMsg')} stopLoss={stop_str}")
-                notify_telegram(f"⚠️ [POS-SL][LONG] {symbol} position-SL FALLITO\nretCode={ret} {data.get('retMsg')}\nSL target={stop_str}")
-        return ok
-    except Exception as e:
-        log(f"[POS-SL][LONG] {symbol} eccezione: {e}")
-        return False
-
-def breakeven_lock_worker_long():
-    # Porta lo stop della POSIZIONE a breakeven e piazza anche uno Stop-Market a BE
-    while True:
-        # --- PORTFOLIO HEAT GUARD: calcolo pre-loop ---
-        # Se >= 2 posizioni sono simultaneamente sotto entry + BTC soft dump → protezione collettiva
-        _sym_snapshot = list(open_positions)
-        _below_entry_syms: list = []
-        if len(_sym_snapshot) >= 2 and _btc_soft_dump_long:
-            for _s in _sym_snapshot:
-                with _state_lock:
-                    _e = position_data.get(_s, {})
-                _ep = _e.get("entry_price")
-                _p = get_last_price(_s)
-                if _ep and _p and _p < _ep:
-                    _below_entry_syms.append(_s)
-        _portfolio_heat_active = len(_below_entry_syms) >= 2
-        if _portfolio_heat_active:
-            tlog("port_heat", f"[PORT-HEAT][LONG] {len(_below_entry_syms)}/{len(_sym_snapshot)} pos sotto entry | BTC soft dump → guard attivo", 60)
-            _now = time.time()
-            if _now - _last_log_times.get("port_heat_notify", 0) >= 3600:
-                _last_log_times["port_heat_notify"] = _now
-                try:
-                    notify_telegram(f"⚠️ PORT-HEAT GUARD LONG: {len(_below_entry_syms)}/{len(_sym_snapshot)} pos in perdita + BTC soft dump → protezione collettiva")
-                except Exception:
-                    pass
-        for symbol in _sym_snapshot:
-            with _state_lock:
-                entry = position_data.get(symbol)
-            if not entry:
-                continue
-
-            be_locked = entry.get("be_locked", False)
-            price_now = get_last_price(symbol)
-            if not price_now:
-                continue
-
-            entry_price = entry.get("entry_price", price_now)
-            # Attiva trailing-stop oltre soglia di R
-            try:
-                trailing_active = entry.get("trailing_active", False)
-                r_dist = entry.get("r_dist")
-                if (r_dist is not None) and (not trailing_active) and price_now >= entry_price + (TRAIL_START_R * r_dist):
-                    df_hist = fetch_history(symbol, interval=INTERVAL_MINUTES)
-                    atr_val = None
-                    if df_hist is not None and "Close" in df_hist.columns and len(df_hist) > ATR_WINDOW + 2:
-                        atr_series = AverageTrueRange(high=df_hist["High"], low=df_hist["Low"], close=df_hist["Close"], window=ATR_WINDOW).average_true_range()
-                        last_atr = float(atr_series.iloc[-1]) if not pd.isna(atr_series.iloc[-1]) else 0.0
-                        atr_val = last_atr
-                    if atr_val is None or atr_val <= 0:
-                        atr_val = float(r_dist) / max(1e-9, SL_ATR_MULT)
-                    trailing_base = atr_val * TRAIL_ATR_MULT
-                    trailing_dist = compute_trailing_distance(symbol, trailing_base)
-                    if place_trailing_stop_long(symbol, trailing_dist):
-                        entry["trailing_active"] = True
-                        # FIX: imposta immediatamente BE come floor minimo del position SL.
-                        # Il trailing inizia a (price_now - trailing_dist) che può essere
-                        # sotto entry se TRAIL_START_R < TRAIL_ATR_MULT/SL_ATR_MULT.
-                        # Il BE garantisce che il peggio sia l'entry, non una perdita.
-                        be_floor = float(entry_price) * (1.0 + BREAKEVEN_BUFFER)
-                        # Guard: be_floor non può mai essere sopra il prezzo corrente (causerebbe retCode=10001)
-                        be_floor = min(be_floor, price_now * 0.999)
-                        set_position_stoploss_long(symbol, be_floor)
-                        entry["be_locked"] = True
-                        entry["be_price"] = be_floor
-                        with _state_lock:
-                            position_data[symbol] = entry
-                        tlog(f"trail_on_long:{symbol}", f"[TRAIL-ON][LONG] {symbol} attivo dist={trailing_dist:.6f} BE-floor={be_floor:.6f}", 60)
-                        notify_telegram(f"🎯 Trailing attivato LONG {symbol}\nPrezzo: {price_now:.4f}\nDistanza trailing: {trailing_dist:.6f}\nBE floor: {be_floor:.4f}")
-            except Exception as _e:
-                if LOG_DEBUG_STRATEGY:
-                    tlog(f"trail_on_exc_long:{symbol}", f"[TRAIL-ON-EXC][LONG] {symbol} exc={_e}", 300)
-            if be_locked:
-                continue
-
-            # Fix #2: dump guard BE — se BTC sta dumpando, forza BE su LONG in profitto
-            if _btc_dumping_long and price_now is not None and price_now > entry_price:
-                be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
-                qty_live = get_open_long_qty(symbol)
-                ok_csl = False
-                ok_psl = False
-                if qty_live and qty_live > 0:
-                    ok_csl = place_conditional_sl_long(symbol, be_price, qty_live, trigger_by="MarkPrice")
-                    ok_psl = set_position_stoploss_long(symbol, be_price)
-                if ok_csl or ok_psl:
-                    entry["be_locked"] = True
-                    entry["be_price"] = be_price
-                    with _state_lock:
-                        position_data[symbol] = entry
-                    tlog(f"dump_be:{symbol}", f"[DUMP-BE][LONG] {symbol} SL→BE {be_price:.6f} (BTC dump)", 60)
-                try:
-                    notify_telegram(f"⚠️ DUMP-BE LONG {symbol}: SL→BE {be_price:.6f} (BTC -1.5%/30m)")
-                except Exception:
-                    pass
-                continue
-
-            # --- PORTFOLIO HEAT GUARD: perdita collettiva correlata ---
-            if _portfolio_heat_active:
-                if price_now > entry_price:
-                    # In profitto: porta a BE (come dump guard ma soglia più bassa -0.7%)
-                    be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
-                    be_price = min(be_price, price_now * 0.999)
-                    ok_psl = set_position_stoploss_long(symbol, be_price)
-                    if ok_psl:
-                        entry["be_locked"] = True
-                        entry["be_price"] = be_price
-                        with _state_lock:
-                            position_data[symbol] = entry
-                        tlog(f"heat_be:{symbol}", f"[PORT-HEAT][LONG] {symbol} SL→BE {be_price:.6f} (heat guard, profitto)", 60)
-                    continue
-                else:
-                    # In perdita: limita perdita ulteriore a ~0.3×ATR dal prezzo corrente (solo prima volta)
-                    if not entry.get("heat_sl_set", False):
-                        _r = entry.get("r_dist") or 0.0
-                        if _r > 0:
-                            _atr_est = _r / max(1e-9, SL_ATR_MULT)
-                            _heat_sl = price_now - (0.3 * _atr_est)
-                            if set_position_stoploss_long(symbol, _heat_sl):
-                                entry["heat_sl_set"] = True
-                                with _state_lock:
-                                    position_data[symbol] = entry
-                                tlog(f"heat_sl:{symbol}", f"[PORT-HEAT][LONG] {symbol} SL→{_heat_sl:.6f} (heat guard, perdita)", 60)
-
-            r_dist = entry.get("r_dist")
-            cond_be = (r_dist is not None and price_now >= entry_price + (BE_AT_R * r_dist))
-            if r_dist is None:
-                cond_be = price_now >= entry_price * (1.0 + BREAKEVEN_LOCK_PCT)
-            if cond_be:
-                be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
-                qty_live = get_open_long_qty(symbol)
-                ok_csl = False
-                ok_psl = False
-                if qty_live and qty_live > 0:
-                    # Piazza sia trading-stop di posizione sia uno stop-market di backup
-                    ok_csl = place_conditional_sl_long(symbol, be_price, qty_live, trigger_by="MarkPrice")
-                    ok_psl = set_position_stoploss_long(symbol, be_price)
-                if ok_csl or ok_psl:
-                    entry["be_locked"] = True
-                    entry["be_price"] = be_price
-                    with _state_lock:
-                        position_data[symbol] = entry
-                    tlog(f"be_lock:{symbol}", f"[BE-LOCK][LONG] {symbol} SL→BE {be_price:.6f}", 60)
-        time.sleep(2)
-
-def _pick_floor_roi_long(mfe_roi: float) -> Optional[float]:
-    """
-    Ritorna il floor ROI da garantire, oppure None se non si è ancora raggiunta
-    la prima soglia valida. Ignora floor=0 (non applica nulla).
-    """
-    if not RATCHET_TIERS_ROI:
-        return None
-    # Se non hai superato la prima soglia → nessun floor
-    first_threshold = RATCHET_TIERS_ROI[0][0]
-    if mfe_roi < first_threshold:
-        return None
-    target = None
-    for th, floor in RATCHET_TIERS_ROI:
-        if mfe_roi >= th and floor > 0:
-            target = floor
-    return target
-
-def profit_floor_worker_long():
-    """
-    Aggiorna lo stopLoss della posizione a scalini di ROI (ratchet).
-    IMPORTANTE: il ratchet gira SEMPRE, anche quando trailing_active=True.
-    Con trailing attivo: piazza SL manuale floor + stringe la distanza del trailing
-    in modo che non possa dare indietro più di (MFE - floor) in ROI.
-    """
-    log("[RATCHET-LONG] Worker avviato")
-    while True:
-        try:
-         for symbol in list(open_positions):
-            entry = position_data.get(symbol) or {}
-            entry_price = entry.get("entry_price")
-            qty_live = get_open_long_qty(symbol)
-            if not entry_price or not qty_live or qty_live <= 0:
-                continue
-
-            trailing_active = entry.get("trailing_active", False)
-            usdt_floor_locked = entry.get("usdt_floor_locked", False)
-            price_now = get_last_price(symbol)
-            if not price_now:
-                continue
-
-            # Cassaforte in USDT: se trailing non attivo e non già lockato
-            if (not trailing_active) and (not usdt_floor_locked):
-                unrealized = (price_now - float(entry_price)) * float(qty_live)
-                if unrealized >= PNL_TRIGGER_USDT:
-                    try:
-                        target_sl = float(entry_price) + (float(PNL_LOCK_USDT) / max(1e-9, float(qty_live)))
-                        target_sl = min(target_sl, price_now * (1.0 - PNL_LOCK_BUFFER_PCT))
-                        if target_sl > float(entry_price):
-                            set_ok = set_position_stoploss_long(symbol, target_sl)
-                            entry["usdt_floor_locked"] = True
-                            entry["usdt_floor_price"] = target_sl
-                            entry["usdt_floor_pnl"] = PNL_LOCK_USDT
-                            entry["floor_updated_ts"] = time.time()
-                            tlog(f"usdt_floor_long:{symbol}", f"[USDT-FLOOR][LONG] {symbol} SL→{target_sl:.6f} (lock≈{PNL_LOCK_USDT} USDT) set={set_ok}", 30)
-                            set_position(symbol, entry)
-                            continue
-                    except Exception as _e:
-                        if LOG_DEBUG_STRATEGY:
-                            tlog(f"usdt_floor_exc_long:{symbol}", f"[USDT-FLOOR-EXC][LONG] {symbol} exc={_e}", 180)
-
-            # --- RATCHET ROI (gira sempre, anche con trailing attivo) ---
-            # ROI corrente (LONG): movimento percentuale * leverage
-            price_move_pct = ((price_now - float(entry_price)) / float(entry_price)) * 100.0
-            roi_now = price_move_pct * DEFAULT_LEVERAGE
-
-            # Aggiorna MFE ROI
-            mfe_roi = max(entry.get("mfe_roi", 0.0), roi_now)
-            entry["mfe_roi"] = mfe_roi
-
-            # Determina floor ROI (None finché non superi la prima soglia)
-            target_floor_roi = _pick_floor_roi_long(mfe_roi)
-            prev_floor_roi = entry.get("floor_roi", None)
-
-            # Se ancora nessuna soglia valida → non fare nulla
-            if target_floor_roi is None:
-                set_position(symbol, entry)
-                continue
-
-            # Non aggiornare se il floor non cresce
-            if prev_floor_roi is not None and target_floor_roi <= prev_floor_roi:
-                set_position(symbol, entry)
-                continue
-
-            # NOTA: cooldown rimosso per i tier upgrade — il check target<=prev già
-            # impedisce duplicati. Il cooldown bloccava salti rapidi di tier (es. 7%→15%)
-            # causando mancati aggiornamenti quando il prezzo rimbalzava dopo il cooldown.
-
-            # Calcolo livello di prezzo corrispondente al floor ROI
-            delta_pct_price = (target_floor_roi / max(1, DEFAULT_LEVERAGE)) / 100.0
-            floor_price = float(entry_price) * (1.0 + delta_pct_price)
-            floor_price *= (1.0 - FLOOR_BUFFER_PCT)  # buffer LONG → leggermente sotto
-
-            # Non applicare stop che risulti sopra il prezzo attuale
-            if floor_price >= price_now:
-                entry["floor_roi"] = target_floor_roi
-                entry["floor_price"] = floor_price
-                entry["floor_updated_ts"] = time.time()
-                set_position(symbol, entry)
-                tlog(f"floor_up_long_skip:{symbol}",
-                     f"[FLOOR-UP-SKIP][LONG] {symbol} MFE={mfe_roi:.1f}% targetROI={target_floor_roi:.1f}% floorPrice={floor_price:.6f} ≥ current={price_now:.6f}", 120)
-                continue
-
-            # Piazza SL manuale al floor — funziona sia con che senza trailing attivo
-            set_ok = set_position_stoploss_long(symbol, floor_price)
-
-            # Se trailing attivo: stringe anche la distanza trailing in modo che
-            # non possa cedere più di (mfe_roi - target_floor_roi) in ROI
-            if trailing_active:
-                allowed_drawdown_roi = max(5.0, mfe_roi - target_floor_roi)  # min 5% ROI di spazio
-                max_trailing_pct = (allowed_drawdown_roi / max(1, DEFAULT_LEVERAGE)) / 100.0
-                new_trailing_dist = price_now * max_trailing_pct
-                new_trailing_dist = max(price_now * TRAILING_MIN, min(new_trailing_dist, price_now * TRAILING_MAX))
-                place_trailing_stop_long(symbol, new_trailing_dist)
-                tlog(f"trail_tighten_long:{symbol}",
-                     f"[TRAIL-TIGHTEN][LONG] {symbol} MFE={mfe_roi:.1f}% floor={target_floor_roi:.1f}% → trailing_dist={new_trailing_dist:.6f}", 60)
-
-            entry["floor_roi"] = target_floor_roi
-            entry["floor_price"] = floor_price
-            entry["floor_updated_ts"] = time.time()
-
-            tlog(f"floor_up_long:{symbol}",
-                 f"[FLOOR-UP][LONG] {symbol} MFE={mfe_roi:.1f}% → FloorROI={target_floor_roi:.1f}% → SL={floor_price:.6f} trailing={trailing_active} set={set_ok}", 30)
-            set_position(symbol, entry)
-            save_positions_state()  # persisti mfe_roi/floor_roi su disco
-
-        except Exception as _worker_exc:
-            log(f"[RATCHET-LONG][CRASH] Eccezione nel worker: {_worker_exc}")
-        time.sleep(3)
-
-def place_conditional_sl_long(symbol: str, stop_price: float, qty: float, trigger_by: str = TRIGGER_BY) -> bool:
-    """
-    Piazza/aggiorna uno stop-market reduceOnly per proteggere la posizione LONG.
-    Usa l'endpoint order/create (v5) per un ordine condizionale di chiusura.
-    """
-    try:
-        # Guard fondamentale: per LONG il trigger DEVE essere sotto il prezzo corrente.
-        # Bybit rifiuta con retCode 110093 se stop_price >= mark_price.
-        _cur = get_last_price(symbol)
-        if _cur and stop_price >= _cur:
-            tlog(f"csl_skip:{symbol}", f"[CSL-SKIP][LONG] {symbol} stop {stop_price:.6f} >= current {_cur:.6f}, skip", 60)
-            return False
-        info = get_instrument_info(symbol)
-        qty_step = info.get("qty_step", 0.01)
-        price_step = info.get("price_step", 0.01)
-        qty_str = _format_qty_with_step(float(qty), qty_step)
-        stop_str = format_price_bybit(stop_price, price_step)
-
-        # Cancella stop order esistenti prima di crearne uno nuovo.
-        # Bybit limita a 10 stop order condizionali per simbolo (retCode 110009).
-        cancel_all_orders(symbol, order_filter="StopOrder")
-
-        body = {
-            "category": "linear",
-            "symbol": symbol,
-            "side": "Sell",
-            "orderType": "Market",
-            "qty": qty_str,
-            "reduceOnly": True,
-            "positionIdx": LONG_IDX,
-            "triggerBy": trigger_by,
-            "triggerPrice": stop_str,
-            "triggerDirection": 2,
-            "closeOnTrigger": True,
-            "timeInForce": "GoodTillCancel"
-        }
-        if LOG_DEBUG_STRATEGY:
-            log(f"[SL-DEBUG-BODY][LONG] {json.dumps(body)}")
-        resp = _bybit_signed_post("/v5/order/create", body)
-        try:
-            data = resp.json()
-        except:
-            data = {}
         if data.get("retCode") == 0:
-            return True
-        log(f"[SL-PLACE][LONG] {symbol} FALLITO dopo cancel! retCode={data.get('retCode')} msg={data.get('retMsg')} triggerPrice={stop_str}")
-        notify_telegram(f"🚨 SL conditional FALLITO {symbol} LONG!\ntriggerPrice={stop_str}\nretCode={data.get('retCode')} {data.get('retMsg')}\n⚠️ VERIFICA MANUALE")
-        return False
-    except Exception as e:
-        log(f"[SL-PLACE][LONG] {symbol} eccezione: {e}")
-        notify_telegram(f"🚨 SL conditional ECCEZIONE {symbol} LONG!\n{e}\n⚠️ VERIFICA MANUALE")
-        return False
-
-def place_takeprofit_long(symbol: str, tp_price: float, qty: float) -> tuple[bool, str]:
-    info = get_instrument_info(symbol)
-    qty_step = info.get("qty_step", 0.01)
-    min_qty = float(info.get("min_qty", 0.0))
-    price_step = info.get("price_step", 0.01)
-    qty_f = float(qty)
-    # Guard: se la quantità parziale è sotto min_qty, salta TP1
-    if qty_f < max(min_qty, float(qty_step)):
-        tlog(f"tp_skip_min:{symbol}", f"[TP-SKIP][LONG] qty parziale {qty_f} < min_qty {min_qty} (step {qty_step})", 120)
-        return False, ""
-    qty_str = _format_qty_with_step(qty_f, qty_step)
-    try:
-        from decimal import Decimal
-        if Decimal(qty_str) <= 0:
-            tlog(f"tp_skip_zero:{symbol}", f"[TP-SKIP][LONG] qty_str={qty_str} non valido (≤0)", 120)
-            return False, ""
+            item  = data["result"]["list"][0]
+            price = float(item["lastPrice"])
+            bid1  = float(item.get("bid1Price") or price)
+            ask1  = float(item.get("ask1Price") or price)
+            with _price_lock:
+                _price_cache[symbol] = {
+                    "price": price, "bid1": bid1, "ask1": ask1, "ts": now
+                }
+            return price
     except Exception:
         pass
-    tp_str = format_price_bybit(tp_price, price_step)
-    body = {
-        "category": "linear",
-        "symbol": symbol,
-        "side": "Sell",
-        "orderType": "Limit",
-        "qty": qty_str,
-        "price": tp_str,
-        "timeInForce": "PostOnly",
-        "reduceOnly": True,
-        "positionIdx": LONG_IDX,
-    }
-    try:
-        resp = _bybit_signed_post("/v5/order/create", body)
-        data = resp.json()
-    except Exception:
-        data = {}
-    if data.get("retCode") == 0:
-        oid = data.get("result", {}).get("orderId", "") or ""
-        tlog(
-            f"tp_place:{symbol}",
-            f"[TP-PLACE] {symbol} tp={tp_price:.6f} qty={qty_str} orderId={oid}",
-            30,
-        )
-        return True, oid
-    tlog(
-        f"tp_create_err:{symbol}",
-        f"[TP-PLACE][LONG] retCode={data.get('retCode')} msg={data.get('retMsg')}",
-        300,
-    )
-    return False, ""
+    return None
 
-def fetch_history(symbol: str, interval=INTERVAL_MINUTES, limit=400):
-    """
-    Scarica la cronologia dei prezzi per il simbolo dato da Bybit (linear/futures).
-    """
+
+def get_bid_price(symbol: str) -> Optional[float]:
+    get_last_price(symbol)
+    with _price_lock:
+        c = _price_cache.get(symbol, {})
+        return c.get("bid1") or c.get("price")
+
+# ── BILANCIO ──────────────────────────────────────────────────────────────────
+def get_usdt_balance() -> float:
     try:
-        endpoint = f"{BYBIT_BASE_URL}/v5/market/kline"
-        params = {
-            "category": "linear",
-            "symbol": symbol,
-            "interval": str(interval),
-            "limit": limit
-        }
-        resp = SESSION.get(endpoint, params=params, timeout=10)
+        resp = _bybit_signed_get("/v5/account/wallet-balance",
+                                 {"accountType": BYBIT_ACCOUNT_TYPE})
+        data = resp.json()
+        acct = data.get("result", {}).get("list", [{}])[0]
+        for c in acct.get("coin", []):
+            if c.get("coin") == "USDT":
+                v = (c.get("availableToWithdraw")
+                     or c.get("availableBalance")
+                     or c.get("walletBalance") or "0")
+                return float(v)
+        return float(acct.get("totalAvailableBalance") or 0.0)
+    except Exception:
+        return 0.0
+
+
+def get_total_equity() -> float:
+    try:
+        resp = _bybit_signed_get("/v5/account/wallet-balance",
+                                 {"accountType": BYBIT_ACCOUNT_TYPE})
+        data = resp.json()
+        acct = data.get("result", {}).get("list", [{}])[0]
+        return float(acct.get("totalEquity")
+                     or acct.get("totalAvailableBalance") or 0.0)
+    except Exception:
+        return get_usdt_balance()
+
+# ── STORICO KLINES ────────────────────────────────────────────────────────────
+def fetch_history(symbol: str, interval: int = INTERVAL_MINUTES,
+                  limit: int = 400) -> Optional[pd.DataFrame]:
+    try:
+        resp = SESSION.get(
+            f"{BYBIT_BASE_URL}/v5/market/kline",
+            params={"category": "linear", "symbol": symbol,
+                    "interval": str(interval), "limit": limit}, timeout=10,
+        )
         data = resp.json()
         if data.get("retCode") == 10006:
-            tlog(f"fetch_rl:{symbol}", f"[BYBIT] Rate limit su {symbol}, piccolo backoff...", 10)
             time.sleep(1.2)
             return None
-        if data.get("retCode") != 0 or "result" not in data or "list" not in data["result"]:
-            log(f"[BYBIT] Errore fetch_history {symbol}: {data}")
+        if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
             return None
-        klines = list(reversed(data["result"]["list"]))  # FIX: Bybit ritorna newest-first; invertiamo per avere oldest-first
-        df = pd.DataFrame(klines, columns=[
-            "timestamp", "Open", "High", "Low", "Close", "Volume", "Turnover"
-        ])
-        # Conversioni di tipo
+        klines = list(reversed(data["result"]["list"]))   # oldest-first
+        df = pd.DataFrame(
+            klines,
+            columns=["timestamp", "Open", "High", "Low", "Close", "Volume", "Turnover"],
+        )
         for col in ["Open", "High", "Low", "Close", "Volume", "Turnover"]:
             df[col] = df[col].astype(float)
         return df
-    except Exception as e:
-        log(f"[BYBIT] Errore fetch_history {symbol}: {e}")
+    except Exception:
         return None
 
-def find_close_column(df):
-    """
-    Restituisce la colonna 'Close' se presente, altrimenti None.
-    """
-    for col in df.columns:
-        if col.lower() == "close":
-            return df[col]
-    return None
-def is_symbol_linear(symbol):
-    """
-    Verifica se il simbolo è disponibile su Bybit futures linear.
-    """
+# ── POSIZIONI BYBIT ───────────────────────────────────────────────────────────
+def get_open_long_qty(symbol: str) -> float:
     try:
-        endpoint = f"{BYBIT_BASE_URL}/v5/market/instruments-info"
-        params = {"category": "linear", "symbol": symbol}
-        resp = requests.get(endpoint, params=params, timeout=10)
+        resp = _bybit_signed_get("/v5/position/list",
+                                 {"category": "linear", "symbol": symbol})
         data = resp.json()
-        return data.get("retCode") == 0 and data["result"]["list"]
+        if data.get("retCode") != 0:
+            return 0.0
+        for pos in data.get("result", {}).get("list", []):
+            if pos.get("side") == "Buy":
+                return float(pos.get("size", 0) or 0)
+    except Exception:
+        pass
+    return 0.0
+
+
+def get_open_short_qty(symbol: str) -> float:
+    try:
+        resp = _bybit_signed_get("/v5/position/list",
+                                 {"category": "linear", "symbol": symbol})
+        data = resp.json()
+        if data.get("retCode") != 0:
+            return 0.0
+        for pos in data.get("result", {}).get("list", []):
+            if pos.get("side") == "Sell":
+                return float(pos.get("size", 0) or 0)
+    except Exception:
+        pass
+    return 0.0
+
+# ── ORDINI ────────────────────────────────────────────────────────────────────
+def set_position_stoploss_long(symbol: str, sl_price: float) -> bool:
+    cur = get_last_price(symbol)
+    if cur and sl_price >= cur:
+        tlog(f"sl_skip:{symbol}",
+             f"[POS-SL] {symbol} SL={sl_price:.6f} >= prezzo={cur:.6f}, skip", 300)
+        return False
+    info     = get_instrument_info(symbol)
+    stop_str = format_price_bybit(sl_price, info.get("price_step", 0.01))
+    body = {
+        "category": "linear", "symbol": symbol,
+        "stopLoss": stop_str, "slTriggerBy": "MarkPrice",
+        "positionIdx": LONG_IDX, "tpslMode": "Full",
+    }
+    try:
+        data = _bybit_signed_post("/v5/position/trading-stop", body).json()
+        ret  = data.get("retCode")
+        if ret == 0:
+            return True
+        if ret == 34040:
+            return True   # già impostato
+        if ret == 10001 and "zero" in (data.get("retMsg") or "").lower():
+            return True   # posizione già chiusa
+        log(f"[POS-SL] {symbol} FAIL retCode={ret} {data.get('retMsg')}")
+        return False
+    except Exception as e:
+        log(f"[POS-SL] {symbol} exc: {e}")
+        return False
+
+
+def place_trailing_stop_long(symbol: str, trailing_dist: float) -> bool:
+    body = {
+        "category": "linear", "symbol": symbol,
+        "trailingStop": str(trailing_dist), "positionIdx": LONG_IDX,
+    }
+    try:
+        data = _bybit_signed_post("/v5/position/trading-stop", body).json()
+        ok   = data.get("retCode") == 0
+        tlog(f"trail:{symbol}",
+             f"[TRAIL] {symbol} dist={trailing_dist:.6f} ok={ok}", 30)
+        return ok
     except Exception:
         return False
-    
-def record_exit(symbol: str, entry_price: float, exit_price: float, side: str):
-    # Aggiorna cooldown e contatore di loss
-    last_exit_time[symbol] = time.time()
-    if side == "LONG":
-        pnl_pct = ((exit_price - entry_price) / entry_price) * 100.0
-        pnl_usdt_est = (exit_price - entry_price)  # stima direzione, sizing non disponibile qui
-    else:  # SHORT
-        pnl_pct = ((entry_price - exit_price) / entry_price) * 100.0
-        pnl_usdt_est = (entry_price - exit_price)
-    if pnl_pct < 0:
-        recent_losses[symbol] = recent_losses.get(symbol, 0) + 1
-        last_exit_was_loss[symbol] = True
-        # Fix B: perdita grande → cooldown esteso 24h per evitare re-entry immediato sulla stessa coin
-        # Usiamo MAX_LOSS_CAP_PCT come proxy: se pnl_pct peggio di -X% → perdita "grande"
-        if abs(pnl_pct) >= (MAX_LOSS_CAP_PCT * 0.5 * 100):  # oltre metà del cap = perdita grande
-            _extended_cd_until = time.time() + (ALT_BIG_LOSS_CD_MIN * 60)
-            last_exit_time[symbol] = _extended_cd_until - (COOLDOWN_MINUTES * 60)
-            # Sovrascrive il last_exit_time in modo che il cooldown standard calcoli 24h di attesa
-            last_exit_time[symbol] = time.time() - (COOLDOWN_MINUTES * 60) + (ALT_BIG_LOSS_CD_MIN * 60)
-            tlog(f"big_loss_cd:{symbol}", f"[BIG-LOSS-CD][LONG] {symbol} perdita grande ({pnl_pct:.1f}%) → cooldown 24h", 3600)
-    else:
-        recent_losses[symbol] = 0
-        last_exit_was_loss[symbol] = False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Strategia swing-level: funzioni di supporto (O(n) via numpy precompute)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _precompute_swing_pivots(df: pd.DataFrame):
-    """Precomputa pivot lows/highs con numpy. Ritorna (is_pivot_low, is_pivot_high)."""
-    half = max(4, SWING_LOOKBACK // 8)
-    lows  = df["Low"].to_numpy(dtype=float)
-    highs = df["High"].to_numpy(dtype=float)
-    n = len(lows)
-    is_pivot_low  = np.zeros(n, dtype=bool)
-    is_pivot_high = np.zeros(n, dtype=bool)
-    for i in range(half, n - half):
-        window_lo = lows[i - half: i + half + 1]
-        window_hi = highs[i - half: i + half + 1]
-        if lows[i]  == window_lo.min():
-            is_pivot_low[i]  = True
-        if highs[i] == window_hi.max():
-            is_pivot_high[i] = True
-    return is_pivot_low, is_pivot_high
+def cancel_all_orders(symbol: str) -> bool:
+    try:
+        resp = _bybit_signed_post("/v5/order/cancel-all",
+                                  {"category": "linear", "symbol": symbol})
+        return resp.json().get("retCode") == 0
+    except Exception:
+        return False
 
 
-def _find_swing_levels(df: pd.DataFrame, pivot_lows, pivot_highs):
-    """Lookup O(SWING_LOOKBACK): supporto e resistenza più vicini al prezzo corrente."""
-    idx = len(df)
-    price_now = float(df.iloc[idx - 1]["Close"])
-    start = max(0, idx - SWING_LOOKBACK)
-    lows_w  = df["Low"].to_numpy(dtype=float)[start:idx]
-    highs_w = df["High"].to_numpy(dtype=float)[start:idx]
-    pl_mask = pivot_lows[start:idx]
-    ph_mask = pivot_highs[start:idx]
-    pivot_low_vals  = lows_w[pl_mask]
-    pivot_high_vals = highs_w[ph_mask]
-    below = pivot_low_vals[pivot_low_vals < price_now]
-    above = pivot_high_vals[pivot_high_vals > price_now]
-    support    = float(below.max()) if len(below) > 0 else None
-    resistance = float(above.min()) if len(above) > 0 else None
-    return support, resistance
+def _try_limit_entry(symbol: str, qty_str: str, bid_str: str) -> Optional[float]:
+    body = {
+        "category": "linear", "symbol": symbol,
+        "side": "Buy", "orderType": "Limit", "timeInForce": "PostOnly",
+        "qty": qty_str, "price": bid_str, "positionIdx": LONG_IDX,
+    }
+    try:
+        data = _bybit_signed_post("/v5/order/create", body).json()
+        if data.get("retCode") != 0:
+            return None
+        order_id = data.get("result", {}).get("orderId", "")
+        for _ in range(6):
+            time.sleep(0.5)
+            filled = get_open_long_qty(symbol)
+            if filled and filled > 0:
+                return filled
+        if order_id:
+            try:
+                _bybit_signed_post("/v5/order/cancel",
+                                   {"category": "linear", "symbol": symbol,
+                                    "orderId": order_id})
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None
 
 
+def market_long(symbol: str, usdt_amount: float) -> Optional[float]:
+    price = get_last_price(symbol)
+    if not price:
+        return None
+    info         = get_instrument_info(symbol)
+    qty_step     = float(info.get("qty_step", 0.01))
+    min_qty      = float(info.get("min_qty", qty_step))
+    min_notional = float(info.get("min_order_amt", 5.0))
+    step_dec     = Decimal(str(qty_step))
+
+    avail        = get_usdt_balance()
+    max_notional = avail * DEFAULT_LEVERAGE * MARGIN_USE_PCT
+    amount       = min(usdt_amount, max_notional, ORDER_USDT_MAX)
+
+    raw_qty     = Decimal(str(amount)) / Decimal(str(price))
+    qty_aligned = (raw_qty // step_dec) * step_dec
+    if float(qty_aligned) < min_qty:
+        qty_aligned = Decimal(str(min_qty))
+
+    # Tentativo Limit maker
+    bid = get_bid_price(symbol) or 0.0
+    if bid > 0:
+        bid_str = format_price_bybit(bid, info.get("price_step", 0.01))
+        qty_str = _format_qty_with_step(float(qty_aligned), qty_step)
+        if float(qty_str) > 0:
+            filled = _try_limit_entry(symbol, qty_str, bid_str)
+            if filled:
+                return filled
+
+    # Fallback Market
+    for _ in range(3):
+        qty_str = _format_qty_with_step(float(qty_aligned), qty_step)
+        if float(qty_str) <= 0:
+            return None
+        body = {
+            "category": "linear", "symbol": symbol,
+            "side": "Buy", "orderType": "Market",
+            "qty": qty_str, "positionIdx": LONG_IDX,
+        }
+        data = _bybit_signed_post("/v5/order/create", body).json()
+        if data.get("retCode") == 0:
+            return float(qty_str)
+        ret = data.get("retCode")
+        if ret == 170137:
+            with _instr_lock:
+                _instrument_cache.pop(symbol, None)
+            info      = get_instrument_info(symbol)
+            qty_step  = float(info.get("qty_step", qty_step))
+            step_dec  = Decimal(str(qty_step))
+            qty_aligned = (qty_aligned // step_dec) * step_dec
+            continue
+        if ret == 170140:
+            needed = max(Decimal(str(min_qty)),
+                         Decimal(str(min_notional)) / Decimal(str(price)))
+            qty_aligned = ((needed // step_dec) + 1) * step_dec
+            continue
+        if ret == 110007:
+            tlog(f"bal_err:{symbol}", f"[LONG] saldo insufficiente per {symbol}", 300)
+            break
+        tlog(f"long_err:{symbol}:{ret}",
+             f"[LONG] errore non gestito retCode={ret} {data.get('retMsg')}", 300)
+        break
+    return None
+
+
+def market_close_long(symbol: str, qty: float) -> bool:
+    info      = get_instrument_info(symbol)
+    qty_step  = float(info.get("qty_step", 0.01))
+    step_dec  = Decimal(str(qty_step))
+    qty_aligned = (Decimal(str(qty)) // step_dec) * step_dec
+    for _ in range(3):
+        qty_str = _format_qty_with_step(float(qty_aligned), qty_step)
+        body = {
+            "category": "linear", "symbol": symbol,
+            "side": "Sell", "orderType": "Market",
+            "qty": qty_str, "reduceOnly": True, "positionIdx": LONG_IDX,
+        }
+        data = _bybit_signed_post("/v5/order/create", body).json()
+        if data.get("retCode") == 0:
+            return True
+        tlog(f"close_err:{symbol}",
+             f"[CLOSE-LONG] {symbol} retCode={data.get('retCode')}", 300)
+        break
+    return False
+
+# ── BTC GATE — EMA50 4h (era nel backtest) ────────────────────────────────────
+def _update_btc_context() -> None:
+    global _btc_favorable_long, _btc_ctx_ts
+    if time.time() - _btc_ctx_ts < 180:
+        return
+    try:
+        resp = SESSION.get(
+            f"{BYBIT_BASE_URL}/v5/market/kline",
+            params={"category": "linear", "symbol": "BTCUSDT",
+                    "interval": "240", "limit": 60}, timeout=10,
+        )
+        data = resp.json()
+        if data.get("retCode") == 0 and data["result"]["list"]:
+            raw    = list(reversed(data["result"]["list"]))
+            closes = pd.Series([float(r[4]) for r in raw])
+            ema50  = closes.ewm(span=50, adjust=False).mean().iloc[-1]
+            _btc_favorable_long = float(closes.iloc[-1]) > ema50
+    except Exception:
+        pass
+    _btc_ctx_ts = time.time()
+    tlog("btc_ctx", f"[BTC-CTX] btc_favorable={_btc_favorable_long}", 180)
+
+# ── UPDATE ASSETS ─────────────────────────────────────────────────────────────
+def update_assets() -> None:
+    global ASSETS
+    ASSETS = list(COINS_V2)
+    tlog("assets_v2", f"[ASSETS-V2] {len(ASSETS)} coin fissi (Run H)", 600)
+
+# ── ANALYZE ASSET — logica backtest pura ─────────────────────────────────────
 def analyze_asset(symbol: str):
     """
-    Strategia EMA20-Pullback 4h — validata Walk-Forward Run H.
-    Entry: EMA20>EMA50 + slope diff(3)>0 + near EMA20 (C<=EMA20+2ATR) +
-           above floor (C>=EMA20-2ATR) + RSI<50 + Vol>1.2x + BullCandle
-    BTC filter: _btc_favorable_long (BTC sopra EMA200, gestito dal loop)
+    EMA20-Pullback 4h — 6 condizioni esatte del backtest Run H.
+    Ritorna ("entry", "EMA20-Pullback-4h", price) oppure (None, None, None).
     """
     try:
-        # Gate BTC: no entry se BTC non e in uptrend
         if not _btc_favorable_long:
             return None, None, None
 
-        # Fetch 4h klines (almeno 220 barre per indicatori)
         df = fetch_history(symbol, interval=240, limit=220)
         if df is None or len(df) < 55:
             return None, None, None
@@ -1877,411 +567,104 @@ def analyze_asset(symbol: str):
         l = df["Low"]
         v = df["Volume"]
 
-        # Indicatori — esatta replica del backtest Run H
         df["ema20"]       = c.ewm(span=20, adjust=False).mean()
         df["ema50"]       = c.ewm(span=50, adjust=False).mean()
-        df["ema20_slope"] = df["ema20"].diff(3)   # slope su 3 barre (come backtest)
-
-        # ATR(14) usando libreria ta
-        df["atr"] = AverageTrueRange(high=h, low=l, close=c, window=14).average_true_range()
-
-        # RSI(14)
-        df["rsi"] = RSIIndicator(close=c, window=14).rsi()
-
-        # Volume MA(20)
-        df["vol_ma"] = v.rolling(20).mean()
+        df["ema20_slope"] = df["ema20"].diff(3)
+        df["atr"]         = AverageTrueRange(
+            high=h, low=l, close=c, window=14).average_true_range()
+        df["rsi"]         = RSIIndicator(close=c, window=14).rsi()
+        df["vol_ma"]      = v.rolling(20).mean()
 
         df.dropna(inplace=True)
         if len(df) < 3:
             return None, None, None
 
-        # prev = candela [-2] (appena chiusa), row = candela [-1] (corrente/in corso)
-        prev = df.iloc[-2]
-        row  = df.iloc[-1]
+        prev = df.iloc[-2]   # candela appena chiusa
+        row  = df.iloc[-1]   # candela corrente
 
         atr   = float(prev["atr"])
         ema20 = float(prev["ema20"])
-
         if atr <= 0:
             return None, None, None
 
-        # Sei condizioni entry (esatte dal backtest Run H)
-        near_ema20  = float(row["Close"]) <= ema20 + 2.0 * atr        # prezzo non troppo lontano sopra EMA20
-        above_floor = float(row["Close"]) >= ema20 - 2.0 * atr        # prezzo non caduto troppo sotto EMA20
-        rsi_ok      = float(row["rsi"]) < 50.0                        # RSI < 50
-        vol_ok      = float(row["Volume"]) > 1.2 * float(prev["vol_ma"])  # volume > 1.2x media
-        micro_up    = (float(prev["ema20"]) > float(prev["ema50"])     # EMA20 sopra EMA50
-                       and float(prev["ema20_slope"]) > 0)             # slope EMA20 positivo
-        bull_candle = float(row["Close"]) > float(row["Open"])         # candela verde
+        # Sei condizioni — esatta replica del backtest
+        near_ema20  = float(row["Close"]) <= ema20 + 2.0 * atr
+        above_floor = float(row["Close"]) >= ema20 - 2.0 * atr
+        rsi_ok      = float(row["rsi"]) < 50.0
+        vol_ok      = float(row["Volume"]) > 1.2 * float(prev["vol_ma"])
+        micro_up    = (float(prev["ema20"]) > float(prev["ema50"])
+                       and float(prev["ema20_slope"]) > 0)
+        bull_candle = float(row["Close"]) > float(row["Open"])
 
         if near_ema20 and above_floor and rsi_ok and vol_ok and micro_up and bull_candle:
-            tlog(f"entry_v2:{symbol}",
-                 f"[ANALYZE-V2] {symbol} ENTRY | C={row['Close']:.4f} EMA20={ema20:.4f} "
-                 f"ATR={atr:.4f} RSI={row['rsi']:.1f} Vol/MA={row['Volume']/prev['vol_ma']:.2f}x",
-                 60)
+            tlog(f"entry:{symbol}",
+                 f"[ANALYZE-V2] {symbol} ENTRY C={row['Close']:.4f} "
+                 f"EMA20={ema20:.4f} ATR={atr:.4f} RSI={row['rsi']:.1f} "
+                 f"Vol={row['Volume']/prev['vol_ma']:.2f}x", 60)
             return "entry", "EMA20-Pullback-4h", float(row["Close"])
 
-        return None, None, None
     except Exception as e:
-        tlog(f"analyze_exc_v2:{symbol}", f"[ANALYZE-V2][{symbol}] errore: {e}", 300)
-        return None, None, None
+        tlog(f"analyze_exc:{symbol}", f"[ANALYZE-V2] {symbol} exc: {e}", 300)
+    return None, None, None
 
-# ...existing code...
-
-log("🔄 Avvio sistema di monitoraggio segnali reali")
-notify_telegram("🤖 BOT [LONG] AVVIATO - In ascolto per segnali di ingresso/uscita")
-
-TEST_MODE = False  # Acquisti e vendite normali abilitati
-
-def _sync_tp_order_long(symbol: str, tp_price: float, full_qty: float):
-    """Verifica se esiste un TP Limit attivo su Bybit per la posizione LONG; se mancante, lo ricrea."""
-    try:
-        resp = _bybit_signed_get("/v5/order/realtime", {"category": "linear", "symbol": symbol})
-        orders = resp.json().get("result", {}).get("list", [])
-        has_tp = any(
-            o.get("side") == "Sell"
-            and o.get("orderType") == "Limit"
-            and str(o.get("reduceOnly", "false")).lower() == "true"
-            and int(o.get("positionIdx", 0)) == LONG_IDX
-            for o in orders
-        )
-        if has_tp:
-            log(f"[SYNC-TP][LONG] {symbol}: TP Limit già attivo su Bybit, skip")
-            return
-        qty_tp1 = max(0.0, full_qty * TP1_PARTIAL)
-        ok, oid = place_takeprofit_long(symbol, tp_price, qty_tp1)
-        if ok:
-            log(f"[SYNC-TP][LONG] {symbol}: TP ripiazzato @ {tp_price:.6f} qty={qty_tp1:.4f} orderId={oid}")
-            entry_pd = get_position(symbol) or {}
-            entry_pd["tp_order_id"] = oid
-            set_position(symbol, entry_pd)
-        else:
-            log(f"[SYNC-TP][LONG] {symbol}: TP mancante, ripiazzo FALLITO @ {tp_price:.6f}")
-    except Exception as e:
-        log(f"[SYNC-TP][LONG] {symbol} errore: {e}")
-
-def sync_positions_from_wallet():
-    log("[SYNC] Avvio scansione posizioni LONG DAL CONTO (tutti i simboli linear)...")
-    trovate = 0
-    _saved_state = load_positions_state()  # carica stato ratchet pre-restart
-    endpoint = f"{BYBIT_BASE_URL}/v5/position/list"
-    params = {"category": "linear", "settleCoin": "USDT"}
-    from urllib.parse import urlencode
-    query_string = urlencode(sorted(params.items()))
-    ts = str(int(time.time() * 1000))
-    recv_window = "10000"
-    sign_payload = f"{ts}{KEY}{recv_window}{query_string}"
-    sign = hmac.new(SECRET.encode(), sign_payload.encode(), hashlib.sha256).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY": KEY,
-        "X-BAPI-SIGN": sign,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": recv_window
-    }
-    try:
-        resp = requests.get(endpoint, headers=headers, params=params, timeout=10)
-        data = resp.json()
-        if data.get("retCode") == 0:
-            pos_list = data.get("result", {}).get("list", [])
-        else:
-            log(f"[SYNC] ⚠️ Bybit pos/list retCode={data.get('retCode')} msg={data.get('retMsg')} — fallback su ASSETS")
-            pos_list = []
-    except Exception as _e:
-        log(f"[SYNC] ⚠️ Eccezione fetch pos/list: {_e} — fallback su ASSETS")
-        pos_list = []
-
-    # Filtra posizioni LONG (side=Buy)
-    # IMPORTANT: usa i simboli da Bybit (pos_list) se disponibili, altrimenti ASSETS.
-    bybit_open_symbols = {p["symbol"] for p in pos_list if p.get("side") == "Buy" and float(p.get("size", 0) or 0) > 0}
-    symbols = bybit_open_symbols if bybit_open_symbols else set(ASSETS)
-    for symbol in symbols:
-        if symbol == "USDT":
-            continue
-        qty = get_open_long_qty(symbol)
-        if LOG_DEBUG_SYNC:
-            log(f"[SYNC-DEBUG] {symbol}: qty long trovata = {qty}")
-        if qty and qty > 0:
-            price = get_last_price(symbol)
-            if not price:
-                continue
-            try:
-                pos = next(p for p in pos_list if p.get("symbol") == symbol and p.get("side") == "Buy")
-                entry_price = float(pos.get("avgPrice") or price)
-            except StopIteration:
-                entry_price = price
-            entry_cost = qty * entry_price
-            # Calcola ATR e parametri coerenti con la nuova gestione (r_dist, tp1)
-            df = fetch_history(symbol)
-            if df is not None and "Close" in df.columns:
-                try:
-                    atr_series = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
-                    atr_val = float(atr_series.iloc[-1])
-                except Exception:
-                    atr_val = price * 0.02
-            else:
-                atr_val = price * 0.02
-
-            # Nuovi parametri locali coerenti con R-based: r_dist e tp1
-            r_dist = atr_val * SL_ATR_MULT
-            tp = entry_price + (TP1_R * r_dist)
-            # SL basato su ATR; hard cap solo come fallback di emergenza
-            sl_atr = entry_price - r_dist
-            _hard_cap = MAX_LOSS_CAP_PCT if symbol in VOLATILE_ASSETS else MAX_LOSS_CAP_PCT_STABLE
-            sl_hard_floor = entry_price * (1.0 - _hard_cap)
-            final_sl = max(sl_atr, sl_hard_floor)
-
-            # Recupera MFE ROI dal movimento attuale (price vs entry)
-            # Non conosciamo il massimo storico ma almeno partiamo dal ROI attuale
-            price_move_pct = ((price - entry_price) / max(1e-9, entry_price)) * 100.0
-            roi_now = price_move_pct * DEFAULT_LEVERAGE
-            recovered_mfe_roi = max(0.0, roi_now)  # stima conservativa: MFE = ROI attuale
-
-            # Stima floor ROI dalla posizione attuale (per non riscrivere SL troppo basso)
-            recovered_floor_roi = _pick_floor_roi_long(recovered_mfe_roi)
-            if recovered_floor_roi is not None:
-                delta_pct_floor = (recovered_floor_roi / max(1, DEFAULT_LEVERAGE)) / 100.0
-                floor_price_recovered = entry_price * (1.0 + delta_pct_floor) * (1.0 - FLOOR_BUFFER_PCT)
-                # Usa il floor recuperato se è più alto dello SL ATR-based
-                if floor_price_recovered > final_sl:
-                    final_sl = floor_price_recovered
-
-            # Recupera trailing_active dall'exchange: se Bybit ha un trailing già impostato
-            # lo indichiamo come attivo per non sovrascriverlo con uno SL fisso
-            trailing_already_active = False
-            try:
-                pos_detail = next((p for p in pos_list if p.get("symbol") == symbol and p.get("side") == "Buy"), None)
-                if pos_detail and float(pos_detail.get("trailingStop", 0) or 0) > 0:
-                    trailing_already_active = True
-            except Exception:
-                pass
-
-            set_position(symbol, {
-                "entry_price": entry_price,
-                "tp": tp,
-                "sl": final_sl,
-                "entry_cost": entry_cost,
-                "qty": qty,
-                "entry_time": time.time(),
-                "trailing_active": trailing_already_active,
-                "p_max": price,
-                "r_dist": r_dist,
-                "mfe_roi": recovered_mfe_roi,
-                "floor_roi": recovered_floor_roi,
-                "usdt_floor_locked": recovered_floor_roi is not None,  # non riscrivere cassaforte se ratchet già attivo
-            })
-            # Ripristina mfe_roi/floor_roi storici dal file se migliori del valore attuale
-            saved = _saved_state.get(symbol, {})
-            saved_entry = saved.get("entry_price")
-            if saved_entry and abs(float(saved_entry) - float(entry_price)) / float(entry_price) < 0.001:
-                # stessa posizione (entry price entro 0.1%)
-                cur = position_data.get(symbol, {})
-                if saved.get("mfe_roi", 0) > recovered_mfe_roi:
-                    cur["mfe_roi"] = saved["mfe_roi"]
-                    set_position(symbol, cur)
-                    log(f"[SYNC-STATE][LONG] {symbol} MFE ripristinato: {saved['mfe_roi']:.1f}% (era {recovered_mfe_roi:.1f}%)")
-                if saved.get("floor_roi") and (recovered_floor_roi is None or saved["floor_roi"] > recovered_floor_roi):
-                    cur["floor_roi"] = saved["floor_roi"]
-                    cur["floor_updated_ts"] = saved.get("floor_updated_ts", 0)
-                    set_position(symbol, cur)
-                    log(f"[SYNC-STATE][LONG] {symbol} FloorROI ripristinato: {saved['floor_roi']:.1f}%")
-            trovate += 1
-            log(f"[SYNC] Posizione LONG trovata: {symbol} qty={qty} entry={entry_price:.4f} SL={final_sl:.4f} TP={tp:.4f}")
-            # Piazza subito stop di posizione + conditional (backup) col CAP
-            set_position_stoploss_long(symbol, final_sl)
-            place_conditional_sl_long(symbol, final_sl, qty, trigger_by="MarkPrice")
-            # Marca come già in posizione per evitare nuovi entry
-            add_open(symbol)
-
-            # >>> PATCH: BE-LOCK immediato se già oltre soglia al riavvio
-            try:
-                if price >= entry_price * (1.0 + BREAKEVEN_LOCK_PCT) and not position_data[symbol].get("be_locked"):
-                    be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)
-                    qty_live = get_open_long_qty(symbol)
-                    if qty_live and qty_live > 0:
-                        place_conditional_sl_long(symbol, be_price, qty_live, trigger_by="MarkPrice")
-                        set_position_stoploss_long(symbol, be_price)
-                        entry_pd = get_position(symbol) or {}
-                        entry_pd["be_locked"] = True
-                        entry_pd["be_price"] = be_price
-                        set_position(symbol, entry_pd)
-                        tlog(f"be_lock_sync:{symbol}", f"[BE-LOCK-SYNC][LONG] SL→BE {be_price:.6f}", 300)
-            except Exception as e:
-                tlog(f"be_lock_sync_exc:{symbol}", f"[BE-LOCK-SYNC][LONG] exc: {e}", 300)
-                
-    log(f"[SYNC] Totale posizioni LONG recuperate dal wallet: {trovate}")
-
-# --- Esegui sync all'avvio ---
-
-# Aggiorna la lista asset all'avvio
-update_assets()
-sync_positions_from_wallet()
-
-# Ripristina cooldown state post-loss dal file (sopravvive ai restart)
-try:
-    _cd_state = load_positions_state().get("__cooldown__", {})
-    for _sym, _v in _cd_state.items():
-        if "last_exit_time" in _v:
-            last_exit_time[_sym] = float(_v["last_exit_time"])
-        if "recent_losses" in _v:
-            recent_losses[_sym] = int(_v["recent_losses"])
-    if _cd_state:
-        log(f"[COOLDOWN-RESTORE] Ripristinati cooldown per {list(_cd_state.keys())}")
-except Exception as _e:
-    log(f"[COOLDOWN-RESTORE] Errore: {_e}")
-try:
-    _bl_state = load_positions_state().get("__blacklist__", {})
-    _now_ts = __import__('time').time()
-    for _sym, _until in _bl_state.items():
-        if float(_until) > _now_ts:  # scartate le blacklist scadute
-            symbol_blacklist_until[_sym] = float(_until)
-    if symbol_blacklist_until:
-        log(f"[BLACKLIST-RESTORE] Attive: {list(symbol_blacklist_until.keys())}")
-except Exception as _e:
-    log(f"[BLACKLIST-RESTORE] Errore: {_e}")
-try:
-    _pb_state = load_positions_state().get("__pending_pullbacks__", {})
-    _now_ts = __import__('time').time()
-    for _sym, _pb in _pb_state.items():
-        if float(_pb.get("expiry_ts", 0)) > _now_ts:  # scarta scaduti
-            pending_pullbacks[_sym] = _pb
-    if pending_pullbacks:
-        log(f"[PULLBACK-RESTORE] Pending ripristinati: {list(pending_pullbacks.keys())}")
-except Exception as _e:
-    log(f"[PULLBACK-RESTORE] Errore: {_e}")
-
-def get_usdt_balance() -> float:
-    return get_free_qty("USDT")
-
-import threading
-
- 
-
-# --- LOGICA 70/30 SU VALORE TOTALE PORTAFOGLIO (USDT + coin) ---
-def get_portfolio_value():
+# ── TRAILING WORKER ───────────────────────────────────────────────────────────
+def trailing_worker() -> None:
     """
-    Restituisce (equity totale reale, saldo USDT disponibile, esposizione per simbolo).
-    Equity viene presa da /v5/account/wallet-balance per evitare gonfiaggi dovuti al notional.
+    Attiva il trailing stop quando price >= entry + TRAIL_START_R * r_dist.
+    Distanza trailing = TRAIL_ATR_MULT * ATR(14) — esatto dal backtest.
     """
-    # Equity e bilancio
-    try:
-        resp = _bybit_signed_get("/v5/account/wallet-balance", {"accountType": BYBIT_ACCOUNT_TYPE})
-        data = resp.json()
-        acct = data.get("result", {}).get("list", [{}])[0]
-        total_equity = float(acct.get("totalEquity") or acct.get("totalAvailableBalance") or 0.0)
-        usdt_balance = 0.0
-        for c in acct.get("coin", []):
-            if c.get("coin") == "USDT":
-                usdt_balance = float(c.get("availableToWithdraw") or c.get("availableBalance") or c.get("walletBalance") or 0.0)
-                break
-    except Exception:
-        total_equity = get_usdt_balance() or 0.0
-        usdt_balance = total_equity
-
-    # Mappa esposizioni (notional), utile solo per bilanciamento 40/60
-    coin_values = {}
-    symbols = set(ASSETS) | set(open_positions)
-    for symbol in symbols:
-        if symbol == "USDT":
-            continue
-        qty = get_open_long_qty(symbol)
-        price = get_last_price(symbol)
-        if qty and qty > 0 and price:
-            coin_values[symbol] = qty * price
-
-    return total_equity, usdt_balance, coin_values
-
- 
-def active_loss_trailing_worker_long():
-    """
-    Active Loss Trailing (ALT) — il ratchet "al contrario".
-    Se il trade non mostra momentum positivo (mfe_roi < ALT_CONFIRM_ROI) entro
-    le prime ore, stringe progressivamente lo SL riducendo la perdita massima:
-      Step 0 (0-4h):   SL invariato = entry - 1.0×r_dist
-      Step 1 (4-8h):   SL = entry - 0.65×r_dist  (-35% perdita potenziale)
-      Step 2 (>8h):    SL = entry - 0.40×r_dist  (-60% perdita potenziale)
-    Non tocca posizioni già protette da ratchet (floor_roi) o breakeven (be_locked).
-    """
-    log("[ALT-LONG] Worker avviato")
+    log("[TRAIL-WORKER] avviato")
     while True:
         try:
             for symbol in list(open_positions):
-                with _state_lock:
-                    entry = position_data.get(symbol)
-                if not entry:
+                entry = get_position(symbol)
+                if not entry or entry.get("trailing_active"):
                     continue
-                # Non toccare posizioni già protette
-                if entry.get("be_locked") or entry.get("floor_roi") is not None:
+                price_now   = get_last_price(symbol)
+                if not price_now:
                     continue
-                # Se il trade ha già confermato momentum positivo → non interferire
-                if entry.get("mfe_roi", 0.0) >= ALT_CONFIRM_ROI:
+                entry_price = float(entry.get("entry_price", 0))
+                r_dist      = float(entry.get("r_dist", 0))
+                if r_dist <= 0:
                     continue
-                r_dist = entry.get("r_dist")
-                if not r_dist or float(r_dist) <= 0:
-                    continue
-                entry_price = entry.get("entry_price")
-                entry_time = entry.get("entry_time", time.time())
-                if not entry_price:
-                    continue
-                age_h = (time.time() - entry_time) / 3600
-                current_alt_step = entry.get("alt_step", 0)
-                # Determina step applicabile basato sull'età
-                target_step = 0
-                if age_h >= ALT_STEP2_H:
-                    target_step = 2
-                elif age_h >= ALT_STEP1_H:
-                    target_step = 1
-                if target_step == 0 or target_step <= current_alt_step:
-                    continue  # troppo presto o già applicato
-                mult = ALT_STEP1_MULT if target_step == 1 else ALT_STEP2_MULT
-                new_sl = float(entry_price) - (mult * float(r_dist))
-                current_sl = float(entry.get("sl", 0.0))
-                # Il nuovo SL deve essere strettamente più alto di quello corrente
-                if new_sl <= current_sl:
-                    entry["alt_step"] = target_step
-                    set_position(symbol, entry)
-                    continue
-                # Il nuovo SL non può mai essere sopra il prezzo corrente
-                price_now = get_last_price(symbol)
-                if not price_now or new_sl >= price_now:
-                    continue
-                ok = set_position_stoploss_long(symbol, new_sl)
-                entry["alt_step"] = target_step
-                entry["sl"] = new_sl
-                with _state_lock:
-                    position_data[symbol] = entry
-                tlog(f"alt_long:{symbol}",
-                     f"[ALT][LONG] {symbol} Step{target_step} età={age_h:.1f}h mfe={entry.get('mfe_roi',0.0):.1f}% "
-                     f"SL {current_sl:.6f}→{new_sl:.6f} (×{mult:.2f}R) set={ok}", 60)
-        except Exception as _e:
-            log(f"[ALT-LONG][CRASH] {_e}")
-        time.sleep(30)
+                if price_now >= entry_price + TRAIL_START_R * r_dist:
+                    df = fetch_history(symbol, interval=INTERVAL_MINUTES, limit=50)
+                    atr_val = r_dist / max(1e-9, SL_ATR_MULT)   # fallback
+                    if df is not None and len(df) > ATR_WINDOW + 2:
+                        try:
+                            atr_val = float(
+                                AverageTrueRange(
+                                    high=df["High"], low=df["Low"],
+                                    close=df["Close"], window=ATR_WINDOW,
+                                ).average_true_range().iloc[-1]
+                            )
+                        except Exception:
+                            pass
+                    trail_dist = atr_val * TRAIL_ATR_MULT
+                    if place_trailing_stop_long(symbol, trail_dist):
+                        entry["trailing_active"] = True
+                        set_position(symbol, entry)
+                        notify_telegram(
+                            f"🎯 Trailing attivato LONG {symbol}\n"
+                            f"Prezzo: {price_now:.4f} | Trail dist: {trail_dist:.6f}"
+                        )
+        except Exception as e:
+            log(f"[TRAIL-WORKER] exc: {e}")
+        time.sleep(2)
 
-
-# >>> PATCH: avvio worker di breakeven lock (LONG)
-be_lock_thread_long = threading.Thread(target=breakeven_lock_worker_long, daemon=True)
-be_lock_thread_long.start()
-profit_floor_thread_long = threading.Thread(target=profit_floor_worker_long, daemon=True)
-profit_floor_thread_long.start()
-alt_thread_long = threading.Thread(target=active_loss_trailing_worker_long, daemon=True)
-alt_thread_long.start()
-
-def sl_watchdog_worker_long():
-    """
-    Worker di sicurezza: ogni 5 minuti controlla che ogni posizione LONG aperta
-    abbia il position-level SL impostato su Bybit. Se manca, usa solo
-    set_position_stoploss_long (nessun conditional order per evitare cancel_all loop).
-    """
-    log("[SL-WATCHDOG][LONG] Worker avviato")
+# ── SL WATCHDOG ───────────────────────────────────────────────────────────────
+def sl_watchdog() -> None:
+    """Ogni 5 min controlla che ogni posizione LONG aperta abbia il position-SL."""
+    log("[SL-WATCHDOG] avviato")
     while True:
+        time.sleep(300)
         try:
-            time.sleep(300)  # ogni 5 minuti
-            params = {"category": "linear", "settleCoin": "USDT"}
-            resp = _bybit_signed_get("/v5/position/list", params)
-            data = resp.json() if hasattr(resp, 'json') else {}
+            resp = _bybit_signed_get("/v5/position/list",
+                                     {"category": "linear", "settleCoin": "USDT"})
+            data = resp.json()
             if data.get("retCode") != 0:
                 continue
-            pos_list = data.get("result", {}).get("list", [])
-            for pos in pos_list:
+            for pos in data.get("result", {}).get("list", []):
                 if pos.get("side") != "Buy":
                     continue
                 qty = float(pos.get("size", 0) or 0)
@@ -2290,501 +673,281 @@ def sl_watchdog_worker_long():
                 symbol = pos.get("symbol", "")
                 sl_val = float(pos.get("stopLoss", 0) or 0)
                 if sl_val > 0:
-                    continue  # SL position-level già impostato, ok
-                # SL mancante: calcola e reimpianta SOLO position-level (no conditional per evitare loop)
+                    continue   # SL già impostato
                 entry = get_position(symbol)
                 if not entry:
                     continue
-                sl_price = entry.get("sl")
-                if not sl_price:
-                    entry_price = float(entry.get("entry_price", 0))
-                    r_dist = float(entry.get("r_dist", entry_price * 0.04))
-                    _hard_cap = MAX_LOSS_CAP_PCT if symbol in VOLATILE_ASSETS else MAX_LOSS_CAP_PCT_STABLE
-                    sl_price = max(entry_price - r_dist, entry_price * (1.0 - _hard_cap))
+                sl_price = float(entry.get("sl", 0))
+                if sl_price <= 0:
+                    ep       = float(entry.get("entry_price", 0))
+                    rd       = float(entry.get("r_dist", ep * 0.04))
+                    sl_price = ep - rd
                 cur = get_last_price(symbol)
                 if cur and sl_price >= cur:
-                    sl_price = cur * (1.0 - 0.02)
-                ok_pos = set_position_stoploss_long(symbol, sl_price)
-                if ok_pos:
-                    log(f"[SL-WATCHDOG][LONG] ✅ SL reimpostato su {symbol} @ {sl_price:.6f}")
+                    sl_price = cur * 0.98
+                ok = set_position_stoploss_long(symbol, sl_price)
+                if ok:
+                    log(f"[SL-WATCHDOG] ✅ SL reimpostato {symbol} @ {sl_price:.6f}")
                 else:
-                    log(f"[SL-WATCHDOG][LONG] 🚨 SL REIMPOSTAZIONE FALLITA su {symbol} @ {sl_price:.6f}")
-                    notify_telegram(f"🚨 [SL-WATCHDOG] SL MANCANTE e FALLITO su {symbol}!\nEntry={entry.get('entry_price'):.4f} SL target={sl_price:.4f}\n⚠️ INTERVIENI MANUALMENTE")
-        except Exception as _e:
-            log(f"[SL-WATCHDOG][LONG] Eccezione: {_e}")
+                    notify_telegram(
+                        f"🚨 SL MANCANTE {symbol} — reimpostazione FALLITA!\n"
+                        f"SL target: {sl_price:.4f} — VERIFICA MANUALE"
+                    )
+        except Exception as e:
+            log(f"[SL-WATCHDOG] exc: {e}")
 
-sl_watchdog_thread_long = threading.Thread(target=sl_watchdog_worker_long, daemon=True)
-sl_watchdog_thread_long.start()
+# ── SYNC POSIZIONI ALL'AVVIO ──────────────────────────────────────────────────
+def sync_positions_from_wallet() -> None:
+    log("[SYNC] Scansione posizioni LONG dal conto...")
+    try:
+        from urllib.parse import urlencode
+        params = {"category": "linear", "settleCoin": "USDT"}
+        qs   = urlencode(sorted(params.items()))
+        ts   = str(int(time.time() * 1000))
+        rw   = "10000"
+        sign = hmac.new(
+            SECRET.encode(),
+            f"{ts}{KEY}{rw}{qs}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY": KEY, "X-BAPI-SIGN": sign,
+            "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": rw,
+        }
+        resp     = requests.get(f"{BYBIT_BASE_URL}/v5/position/list",
+                                headers=headers, params=params, timeout=10)
+        data     = resp.json()
+        pos_list = (data.get("result", {}).get("list", [])
+                    if data.get("retCode") == 0 else [])
+    except Exception as e:
+        log(f"[SYNC] errore fetch pos/list: {e}")
+        pos_list = []
 
-while True:
-    update_assets()
-
-    _update_daily_anchor_and_btc_context()
-    portfolio_value, usdt_balance, coin_values = get_portfolio_value()
-
-    # >>> PATCH: throttle DD (più selettivo invece di bloccare, a meno che ENABLE_DD_PAUSE=1)
-    if _daily_start_equity:
-        dd_pct = (portfolio_value - _daily_start_equity) / max(1e-9, _daily_start_equity)  # negativo se in DD
-        if ENABLE_DD_PAUSE and dd_pct < -DAILY_DD_CAP_PCT:
-            tlog("dd_cap", f"🛑 DD giornaliero {-dd_pct*100:.2f}% > cap {DAILY_DD_CAP_PCT*100:.1f}%, stop nuovi LONG per {DD_PAUSE_MINUTES}m", 600)
-            _trading_paused_until = time.time() + DD_PAUSE_MINUTES * 60
-        else:
-            draw = -dd_pct  # positivo se in perdita
-            RISK_THROTTLE_LEVEL = 2 if draw > DAILY_DD_CAP_PCT * 2 else (1 if draw > DAILY_DD_CAP_PCT else 0)
-            if RISK_THROTTLE_LEVEL > 0:
-                tlog("dd_throttle", f"[THROTTLE] DD={draw*100:.2f}% → livello={RISK_THROTTLE_LEVEL}", 600)
-    # Gap3: weekly drawdown check
-    _weekly_block = _check_weekly_dd_long(portfolio_value)
-    if _weekly_block:
-        tlog("weekly_dd", f"[WEEKLY-DD] ⛔ Protezione settimanale attiva, skip nuovi LONG", 600)
-
-    volatile_budget = portfolio_value * 0.4
-    stable_budget = portfolio_value * 0.6
-    volatile_invested = sum(coin_values.get(s, 0) for s in open_positions if s in VOLATILE_ASSETS)
-    stable_invested = sum(coin_values.get(s, 0) for s in open_positions if s in LESS_VOLATILE_ASSETS)
-    tlog("portfolio_long", f"[PORTAFOGLIO] equity={portfolio_value:.2f} USDT | pos={len(open_positions)} | liberi={usdt_balance:.2f} | btc_fav={_btc_favorable_long}", 900)
-
-    # Analisi in parallelo con prefiltraggio
-    eligible_symbols = [s for s in ASSETS if s not in STABLECOIN_BLACKLIST and is_symbol_linear(s)]
-    log(f"[CICLO][LONG] simboli={len(eligible_symbols)} | pos_aperte={len(open_positions)} | btc_fav={_btc_favorable_long} | equity={portfolio_value:.2f}")
-    results = {}
-    if eligible_symbols:
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            future_map = {ex.submit(analyze_asset, s): s for s in eligible_symbols}
-            for fut in as_completed(future_map):
-                s = future_map[fut]
-                try:
-                    results[s] = fut.result()
-                except Exception as e:
-                    tlog(f"analyze_exc:{s}", f"[ANALYZE-EXC] {s} {e}", 300)
-    for symbol in eligible_symbols:
-        signal, strategy, price = results.get(symbol, (None, None, None))
-        if signal is None or strategy is None or price is None:
+    trovate = 0
+    for pos in pos_list:
+        if pos.get("side") != "Buy":
             continue
-        log(f"📊 ANALISI: {symbol} → Segnale: {signal}, Strategia: {strategy}, Prezzo: {price}")
+        qty = float(pos.get("size", 0) or 0)
+        if qty <= 0:
+            continue
+        symbol      = pos["symbol"]
+        entry_price = float(pos.get("avgPrice") or pos.get("entryPrice") or 0)
+        if entry_price <= 0:
+            continue
 
-        # ✅ ENTRATA LONG
-        if signal == "entry":
-            # >>> BACKTEST MODE: blocca tutti i nuovi ingressi se ENTRY_PAUSED=1
-            if ENTRY_PAUSED:
-                tlog(f"entry_paused:{symbol}", f"[ENTRY-PAUSED][LONG] ingressi sospesi (backtest mode), skip {symbol}", 600)
-                continue
-            # >>> REGIME DAILY: BTC sotto EMA50 daily = correzione macro → skip LONG
-            if not _btc_daily_regime_ok:
-                tlog(f"daily_regime:{symbol}", f"[DAILY-REGIME][LONG] BTC in downtrend daily (sotto EMA50d), skip {symbol}", 600)
-                continue
-            # >>> GATE: blocca solo le NUOVE APERTURE (non gli exit)
-            if ENABLE_DD_PAUSE and time.time() < _trading_paused_until:
-                tlog(f"paused:{symbol}", f"[PAUSE] trading sospeso (DD cap), skip LONG {symbol}", 600)
-                continue
-            # Gap3: weekly DD cap gate
-            if _weekly_block:
-                tlog(f"weekly_block:{symbol}", f"[WEEKLY-DD] protezione settimanale attiva, skip LONG {symbol}", 600)
-                continue
-            # Fix #1: dump guard — BTC sta scendendo velocemente, skip nuove aperture LONG
-            if _btc_dumping_long:
-                tlog(f"dump_gate:{symbol}", f"[DUMP-GATE][LONG] BTC dump attivo, skip entry {symbol}", 300)
-                continue
-            # Fear & Greed gate: panico estremo = mercato in capitolazione, evita LONG
-            if _fear_greed_value < FEAR_GREED_SKIP_LONG:
-                tlog(f"fg_gate:{symbol}", f"[F&G-GATE][LONG] F&G={_fear_greed_value} ({_fear_greed_label}) < {FEAR_GREED_SKIP_LONG}, skip entry {symbol}", 600)
-                continue
-            # Regime gate rimosso: analyze_asset gestisce già i requisiti più stringenti quando BTC è sfavorevole
-
-            if symbol in last_exit_time:
-                elapsed = time.time() - last_exit_time[symbol]
-                cd_min = COOLDOWN_MINUTES * 4 if last_exit_was_loss.get(symbol) else COOLDOWN_MINUTES
-                if elapsed < cd_min * 60:
-                    if LOG_DEBUG_STRATEGY:
-                        tlog(f"cooldown:{symbol}", f"⏳ Cooldown {'post-loss' if last_exit_was_loss.get(symbol) else 'post-win'} attivo per {symbol}, salto ingresso", 300)
-                    continue
-            if len(open_positions) >= MAX_OPEN_POSITIONS:
-                tlog(f"maxpos", f"[MAX-POS] {len(open_positions)}/{MAX_OPEN_POSITIONS} posizioni aperte, skip {symbol}", 300)
-                continue
-            # Max 1 large cap: BTC/ETH/BNB/SOL sono altamente correlate, evita esposizione multipla
-            if symbol in LARGE_CAPS:
-                large_cap_open = sum(1 for s in open_positions if s in LARGE_CAPS)
-                if large_cap_open >= MAX_LARGE_CAP_POSITIONS:
-                    tlog(f"largecap:{symbol}", f"[LARGE-CAP-GATE][LONG] già {large_cap_open} large cap aperta, skip {symbol}", 300)
-                    continue
-            # Max 2 volatile: evita concentrazione su asset ad alta volatilità correlata
-            if symbol in VOLATILE_ASSETS:
-                volatile_open = sum(1 for s in open_positions if s in VOLATILE_ASSETS)
-                if volatile_open >= MAX_VOLATILE_LONG:
-                    tlog(f"volatile_gate:{symbol}", f"[VOLATILE-GATE][LONG] già {volatile_open}/{MAX_VOLATILE_LONG} volatili aperti, skip {symbol}", 300)
-                    continue
-            if symbol in open_positions:
-                if LOG_DEBUG_STRATEGY:
-                    tlog(f"inpos:{symbol}", f"⏩ Ignoro apertura LONG: già in posizione su {symbol}", 1800)
-                continue
-
-            # Se c’è già una posizione SHORT aperta (altro bot), non aprire il LONG sullo stesso simbolo
-            if get_open_short_qty(symbol) > 0:
-                if LOG_DEBUG_STRATEGY:
-                    tlog(f"opp_side:{symbol}", f"[SKIP] {symbol} ha SHORT aperto, salto LONG", 300)
-                continue
-
-            is_volatile = symbol in VOLATILE_ASSETS
-            group_budget = volatile_budget if is_volatile else stable_budget
-            group_invested = volatile_invested if is_volatile else stable_invested
-            group_available = max(0.0, group_budget - group_invested)
-
-            weights_no_tf = {
-                # Swing-level strategy (nuovo)
-                "Swing-Level Support": 0.90,
-                # Nuovi nomi (confluenza)
-                "EMA Bullish": 0.75,
-                "MACD Bullish": 0.70,
-                "RSI Bullish": 0.60,
-                "ADX Trend": 0.85,
-                # Vecchi nomi (compatibilità log storici)
-                "Breakout BB": 1.00,
-                "MACD bullish + ADX": 0.90,
-                "Incrocio EMA 20/50": 0.75,
-                "EMA20>EMA50": 0.75,
-                "MACD cross up": 0.65,
-                "MACD bullish": 0.65,
-                "Trend EMA+RSI": 0.60
-            }
-            parts = [p.strip().split(" (")[0] for p in (strategy or "").split(",") if p.strip()]
-            if parts:
-                base = max(weights_no_tf.get(p, 0.5) for p in parts)
-                bonus = min(0.1 * (len(parts) - 1), 0.3)  # +0.1 per conferma, max +0.3
-                strength = min(1.0, base + bonus)
-            else:
-                strength = 0.5
-             # >>> PATCH: throttle DD – riduci aggressività
-            if RISK_THROTTLE_LEVEL == 1:
-                strength *= 0.7
-            elif RISK_THROTTLE_LEVEL >= 2:
-                strength *= 0.5
-            # Fear & Greed: zona Fear (20-35) → riduci sizing del 25%
-            # (< 20 è già bloccato dal gate sopra, quindi qui siamo nel range 20-35)
-            if _fear_greed_value < FEAR_GREED_REDUCE_LONG:
-                strength *= 0.75
-                tlog(f"fg_reduce:{symbol}", f"[F&G] F&G={_fear_greed_value} ({_fear_greed_label}) in Fear → sizing -25%", 1800)
-
-            df_hist = fetch_history(symbol)
-            if df_hist is not None and "Close" in df_hist.columns:
-                try:
-                    atr = AverageTrueRange(high=df_hist["High"], low=df_hist["Low"], close=df_hist["Close"], window=ATR_WINDOW).average_true_range()
-                    atr_val = atr.iloc[-1]
-                    last_price = df_hist["Close"].iloc[-1]
-                    atr_ratio = atr_val / last_price if last_price > 0 else 0
-                    # Hard skip: ATR > 8% del prezzo → SL ATR-based sarebbe >16% (160% ROI loss a 10x)
-                    # Questo filtra strutturalmente meme coin e asset in crash, senza blacklist hardcoded
-                    if atr_ratio > 0.08:
-                        tlog(f"atr_volatile:{symbol}", f"[SKIP-ATR][LONG] {symbol} ATR/prezzo={atr_ratio:.1%} > 8%, troppo volatile per SL ATR-based", 600)
-                        continue
-                    elif atr_ratio > 0.04:
-                        strength *= 0.75
-                except Exception:
-                    pass
-
-            # --- Sizing basato sul rischio (ATR 4h e R) ---
-            price_now_calc = get_last_price(symbol) or price
-            df = fetch_history(symbol, interval=240)  # ATR su 4h per SL più stabile (meno noise)
-            if df is None or len(df) < max(ATR_WINDOW+2, 20):
-                tlog(f"no_hist:{symbol}", f"[SKIP] Storico 4h insufficiente per sizing ATR su {symbol}", 600)
-                continue
-            atr_series = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
-            atr_val = float(atr_series.iloc[-1]) if not pd.isna(atr_series.iloc[-1]) else 0.0
-            if atr_val <= 0:
-                tlog(f"atr_zero:{symbol}", f"[SKIP] ATR nullo per {symbol}", 600)
-                continue
-            r_dist = atr_val * SL_ATR_MULT
-
-            # Regime CAUTION (BTC sotto EMA21 daily): dimezza il rischio per trade
-            _regime_mult = 0.5 if _btc_regime_level == 1 else 1.0
-            if _regime_mult < 1.0:
-                tlog(f"regime_caution:{symbol}", f"[REGIME-CAUTION][LONG] BTC sotto EMA21d → RISK dimezzato", 600)
-            risk_usdt = max(0.0, float(portfolio_value) * RISK_PCT * _regime_mult)
-            qty_target = risk_usdt / max(1e-9, r_dist)
-            notional_target = qty_target * price_now_calc
-            max_notional_by_margin = usdt_balance * DEFAULT_LEVERAGE * MARGIN_USE_PCT
-            order_amount = min(notional_target * max(0.5, min(1.0, strength)), group_available, max_notional_by_margin, ORDER_USDT_MAX)
-            info_i = get_instrument_info(symbol)
-            min_order_amt = float(info_i.get("min_order_amt", 5))
-            min_qty = float(info_i.get("min_qty", 0.0))
-            price_now_chk = price_now_calc
-            min_notional = max(min_order_amt, (min_qty or 0.0) * price_now_chk)
-            if order_amount < min_notional:
-                bump = min_notional * 1.01
-                max_by_margin = max_notional_by_margin
-                if max_by_margin >= bump:
-                    old = order_amount
-                    order_amount = min(bump, max_by_margin, ORDER_USDT_MAX)
-                    tlog(f"bump_notional:{symbol}", f"[BUMP-NOTIONAL][{symbol}] alzato notional da {old:.2f} a {order_amount:.2f} per rispettare min_qty/min_notional", 600)
-                else:
-                    tlog(f"min_notional:{symbol}", f"❌ Notional richiesto {order_amount:.2f} < minimo {min_notional:.2f} per {symbol} (min_qty={min_qty}, price={price_now_chk})", 300)
-                    continue
-
-            # Guard: se min_qty impone rischio reale > 1.5× atteso, il token è troppo caro per il sizing → skip
-            if min_qty > 0 and (min_qty * r_dist) > risk_usdt * MAX_MIN_QTY_RISK_FACTOR:
-                _real_risk = min_qty * r_dist
-                tlog(f"minqty_risk:{symbol}", f"[SKIP-MINQTY][LONG] {symbol} min_qty={min_qty} × r_dist={r_dist:.4f} = rischio reale {_real_risk:.4f} USDT > {risk_usdt * MAX_MIN_QTY_RISK_FACTOR:.4f} (1.5× budget), skip", 600)
-                continue
-
-            if TEST_MODE:
-                log(f"[TEST_MODE] LONG inibiti per {symbol}")
-                continue
-
-            # Calcola una volta la quantità coerente con i vincoli di strumento
-            qty_str = calculate_quantity(symbol, order_amount)
-            if not qty_str:
-                log(f"❌ Quantità non valida per LONG di {symbol}")
-                continue
-            qty = market_long(symbol, order_amount, qty_exact=qty_str)
-            price_now = get_last_price(symbol)
-            if not price_now:
-                log(f"❌ Prezzo non disponibile post-ordine per {symbol}")
-                continue
-
-            df = fetch_history(symbol)
-            if df is not None and "Close" in df.columns:
-                atr = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=ATR_WINDOW).average_true_range()
-                atr_val = float(atr.iloc[-1])
-            else:
-                atr_val = price_now * 0.02
-
-            if not qty or qty == 0:
-                if LOG_DEBUG_STRATEGY:
-                    log(f"❌ LONG non aperto per {symbol}")
-                continue
-
-            # TP1: per segnali Swing-Level usa la resistenza naturale (TP fisso strutturale);
-            # per gli altri usa il classico +1.5R (partial TP validato in backtest)
-            _swing_meta = _swing_entry_meta.pop(symbol, {})
-            _is_swing_entry = "Swing-Level" in (strategy or "")
-            if _is_swing_entry and _swing_meta.get("tp") and _swing_meta.get("sl"):
-                tp1_price = float(_swing_meta["tp"])   # resistenza strutturale
-                r_dist    = float(_swing_meta["r_dist"])  # distanza SL swing (più stretta)
-                final_sl  = float(_swing_meta["sl"])   # SL naturale sotto supporto
-                # Ri-applica hard cap di sicurezza (non andare mai oltre MAX_LOSS_CAP_PCT)
-                _hard_cap = MAX_LOSS_CAP_PCT if symbol in VOLATILE_ASSETS else MAX_LOSS_CAP_PCT_STABLE
-                final_sl = max(final_sl, price_now * (1.0 - _hard_cap))
-                log(f"[SWING-TP][LONG] {symbol} TP naturale={tp1_price:.6f} SL={final_sl:.6f} R:R={(tp1_price-price_now)/(price_now-final_sl):.2f}")
-            else:
-                tp1_price = price_now + (TP1_R * r_dist)
-            qty_tp1 = max(0.0, qty * TP1_PARTIAL)
-            tp_oid = None
-            if qty_tp1 > 0:
-                ok_tp, tp_oid = place_takeprofit_long(symbol, tp1_price, qty_tp1)
-                if ok_tp:
-                    tlog(f"tp1_long:{symbol}", f"[TP1] {symbol} tp1={tp1_price:.6f} qty={qty_tp1}", 60)
-
-            actual_cost = qty * price_now
-            
-            # SL basato su ATR (adattivo alla volatilità reale dell'asset)
-            # Hard cap solo come fallback di emergenza se ATR è fuori range
-            # Per segnali swing, final_sl è già calcolato sopra (SL naturale sotto supporto)
-            if not _is_swing_entry:
-                _hard_cap = MAX_LOSS_CAP_PCT if symbol in VOLATILE_ASSETS else MAX_LOSS_CAP_PCT_STABLE
-                sl_hard_floor = price_now * (1.0 - _hard_cap)
-                final_sl = max(price_now - r_dist, sl_hard_floor)
-            ok_pos_sl = set_position_stoploss_long(symbol, final_sl)
-            # Backup: piazza anche uno Stop-Market reduceOnly
-            ok_cond_sl = False
+        df      = fetch_history(symbol, interval=INTERVAL_MINUTES)
+        atr_val = entry_price * 0.02
+        if df is not None and len(df) > ATR_WINDOW + 2:
             try:
-                ok_cond_sl = place_conditional_sl_long(symbol, final_sl, qty, trigger_by="MarkPrice")
-            except Exception as e:
-                log(f"[SL-FAIL][LONG] {symbol} eccezione conditional SL: {e}")
-            if not ok_pos_sl and not ok_cond_sl:
-                log(f"🚨 [SL-FAIL][LONG] {symbol} NESSUN SL impostato! Entry={price_now:.6f} SL={final_sl:.6f}")
-                notify_telegram(f"🚨 SL NON IMPOSTATO {symbol} LONG!\nEntry={price_now:.4f} SL target={final_sl:.4f}\n⚠️ IMPOSTA MANUALMENTE!")
-            elif not ok_pos_sl:
-                log(f"[SL-WARN][LONG] {symbol} position-SL fallito, ma conditional SL OK")
-            elif not ok_cond_sl:
-                log(f"[SL-WARN][LONG] {symbol} conditional SL fallito, ma position-SL OK")
-
-            # Niente trailing immediato; sarà attivato sopra 2R
-            trail_threshold = price_now + (TRAIL_START_R * r_dist)
-            log(f"[ENTRY-DETAIL] {symbol} | Entry: {price_now:.4f} | SL: {final_sl:.4f} | TP1: {tp1_price:.4f} | ATR: {atr_val:.4f} | Trail@≥{trail_threshold:.4f}")
-            _trade_log("entry", symbol, "LONG", entry_price=price_now, qty=qty, sl=final_sl, tp=tp1_price, r_dist=r_dist,
-                       extra={"tp1_qty": qty_tp1})
-
-            set_position(symbol, {
-                "entry_price": price_now,
-                "tp": tp1_price,
-                "tp_order_id": tp_oid if 'tp_oid' in locals() else None,
-                "sl_order_id": None,
-                "sl": final_sl,
-                "entry_cost": actual_cost,
-                "qty": qty,
-                "entry_time": time.time(),
-                "trailing_active": False,
-                "p_max": price_now,
-                "r_dist": r_dist,
-                "breakout_exempt": "BREAKOUT-EXEMPT" in (strategy or "")
-            })
-            add_open(symbol)
-            _daily_trades_opened += 1
-            notify_telegram(f"🟢📈 LONG aperto {symbol}\nPrezzo: {price_now:.4f}\nStrategia: {strategy}\nInvestito: {actual_cost:.2f}\nSL: {final_sl:.4f}\nTP1: {tp1_price:.4f}\nScore: {len([s for s in strategy.split(',') if 'ADX' not in s and s.strip()]) + (1 if _btc_favorable_long else 0)}/5")
-            time.sleep(3)
-
-        # EXIT LONG (segnale di uscita strategico)
-        elif signal == "exit" and symbol in open_positions:
-            entry = position_data.get(symbol, {})
-            entry_price = entry.get("entry_price", price)
-            entry_cost = entry.get("entry_cost", ORDER_USDT)
-
-            # Se ratchet floor o BE lock sono già attivi, il SL sul broker è già impostato
-            # in territorio profittevole. Non chiudere con market order (slippage inutile) —
-            # lascia che il SL del broker gestisca l'uscita e permetti al trend di continuare.
-            if entry.get("floor_roi") is not None or entry.get("be_locked"):
-                tlog(f"exit_skip:{symbol}", f"[EXIT-SKIP][LONG] {symbol} ratchet floor={entry.get('floor_roi')}% / be_locked={entry.get('be_locked')} attivo → ignoro exit signal, SL broker gestisce", 300)
-                continue
-            
-            qty = get_open_long_qty(symbol)
-            if not qty or qty <= 0:
-                discard_open(symbol)
-                last_exit_time[symbol] = time.time()  # cooldown anche se già chiusa dall'exchange
-                with _state_lock:
-                    position_data.pop(symbol, None)
-                continue
-
-            resp = market_close_long(symbol, qty)
-            if resp and resp.status_code == 200 and resp.json().get("retCode") == 0:
-                current_price = get_last_price(symbol)
-                exit_value = current_price * qty
-                pnl_gross = ((current_price - entry_price) / entry_price) * 100.0
-                pnl = pnl_gross - (FEES_TAKER_PCT * 2 * 100.0)  # fee round-trip
-                pnl_emoji = "📈" if pnl >= 0 else "📉"
-                log(f"[EXIT-LONG][{symbol}] prezzo={current_price:.4f} entry={entry_price:.4f} pnl={pnl:.2f}% (lordo={pnl_gross:.2f}%) qty={qty:.4f}")
-                notify_telegram(f"{pnl_emoji} Exit LONG {symbol} a {current_price:.4f}\nStrategia: {strategy}\nPnL: {pnl:.2f}% (fee incluse)")
-                _daily_trades_closed += 1
-                _daily_pnl_sum += pnl
-                record_exit(symbol, entry_price, current_price, "LONG")
-                _trade_log("exit", symbol, "LONG", entry_price=entry_price, qty=qty, sl=entry.get("sl", 0.0), tp=entry.get("tp", 0.0), r_dist=entry.get("r_dist", 0.0), extra={"pnl_pct": pnl})
-                try:
-                    _expectancy_log(pnl, qty * entry_price, exit_value, maker_entry=False, maker_exit=False)
-                except Exception:
-                    pass
-                # (Report Google Sheets rimosso)
-                discard_open(symbol)
-                last_exit_time[symbol] = time.time()
-                with _state_lock:
-                    position_data.pop(symbol, None)
-                if get_open_short_qty(symbol) == 0:
-                    cancel_all_orders(symbol)
-
-    # Cleanup posizioni con qty troppo bassa
-    for symbol in list(open_positions):
-        saldo = get_open_long_qty(symbol)
-        info = get_instrument_info(symbol)
-        min_qty = info.get("min_qty", 0.0)
-        # cleanup SOLO se lettura qty è valida e < min_qty
-        if (saldo is not None) and (saldo < min_qty):
-            tlog(f"ext_close:{symbol}", f"[CLEANUP][LONG] {symbol} chiusa lato exchange (qty={saldo}). Cancello TP/SL.", 60)
-            discard_open(symbol)
-            entry = position_data.get(symbol, {})
-            entry_price = entry.get("entry_price", get_last_price(symbol) or 0.0)
-            exit_price = get_last_price(symbol) or 0.0
-            record_exit(symbol, entry_price, exit_price, "LONG")
-            # Aggiorna contatori report giornaliero (SL/TP Bybit)
-            try:
-                if entry_price and exit_price:
-                    pnl_raw_pct = ((float(exit_price) - float(entry_price)) / float(entry_price)) * 100.0
-                    pnl_net_pct = pnl_raw_pct - (FEES_TAKER_PCT * 2 * 100.0)
-                    _daily_trades_closed += 1
-                    _daily_pnl_sum += pnl_net_pct
+                atr_val = float(
+                    AverageTrueRange(
+                        high=df["High"], low=df["Low"],
+                        close=df["Close"], window=ATR_WINDOW,
+                    ).average_true_range().iloc[-1]
+                )
             except Exception:
                 pass
-            # Notifica Telegram chiusura da SL/TP Bybit
-            try:
-                if entry_price and exit_price:
-                    pnl_pct = ((float(exit_price) - float(entry_price)) / float(entry_price)) * 100.0 * DEFAULT_LEVERAGE
-                    floor_roi = entry.get("floor_roi")
-                    floor_info = f"\nFloor ratchet: {floor_roi:.1f}%" if floor_roi else ""
-                    notify_telegram(
-                        f"🔴📈 Posizione LONG chiusa da exchange (SL/TP)\n"
-                        f"Simbolo: {symbol}\n"
-                        f"Entry: {float(entry_price):.6f}\n"
-                        f"Uscita: {float(exit_price):.6f}\n"
-                        f"ROI stimato: {pnl_pct:.2f}%{floor_info}"
-                    )
-            except Exception as _tg_exc:
-                log(f"[TELEGRAM-CLEANUP][LONG] errore notifica {symbol}: {_tg_exc}")
-            with _state_lock:
-                position_data.pop(symbol, None)
-            if get_open_short_qty(symbol) == 0:
-                cancel_all_orders(symbol)
-    
-    # --- SAFETY: impone il BE se il worker non è riuscito a piazzarlo ---
-    for symbol in list(open_positions):
-        entry = position_data.get(symbol)
-        if not entry or entry.get("be_locked"):
-            continue
-        price_now = get_last_price(symbol)
-        if not price_now:
-            continue
-        entry_price = entry.get("entry_price", price_now)
-        # LONG: trigger BE se prezzo ≥ entry*(1 + 1%)
-        if price_now >= entry_price * (1.0 + BREAKEVEN_LOCK_PCT):
-            be_price = entry_price * (1.0 + BREAKEVEN_BUFFER)  # sopra entry
-            qty_live = get_open_long_qty(symbol)
-            if qty_live and qty_live > 0:
-                place_conditional_sl_long(symbol, be_price, qty_live, trigger_by="MarkPrice")
-                set_position_stoploss_long(symbol, be_price)
-                entry["be_locked"] = True
-                entry["be_price"] = be_price
-                tlog(f"be_lock_safety:{symbol}", f"[BE-LOCK-SAFETY][LONG] SL→BE {be_price:.6f}", 60)
 
-    # --- SIGNAL EXPIRY: chiudi posizioni zombie (>24h in perdita, EMA20 rotta al ribasso) ---
-    # V2: non chiama analyze_asset (non genera exit), valuta direttamente se EMA20 rotta.
-    for symbol in list(open_positions):
-        entry = position_data.get(symbol)
-        if not entry:
-            continue
-        # Non toccare posizioni già protette da ratchet o breakeven lock
-        if entry.get("floor_roi") is not None or entry.get("be_locked"):
-            continue
-        age_h = (time.time() - entry.get("entry_time", time.time())) / 3600
-        if age_h < SIGNAL_EXPIRY_MIN_AGE_H:
-            continue
-        price_now = get_last_price(symbol)
-        if not price_now:
-            continue
-        entry_price = entry.get("entry_price", price_now)
-        # LONG: in perdita solo se prezzo sotto entry
-        if price_now >= entry_price:
-            continue
-        # V2: chiudi zombie solo se EMA20<EMA50 (trend invertito)
-        try:
-            df_z = fetch_history(symbol, interval=240, limit=60)
-            if df_z is None or len(df_z) < 52:
-                continue
-            _ema20_z = df_z["Close"].ewm(span=20, adjust=False).mean().iloc[-1]
-            _ema50_z = df_z["Close"].ewm(span=50, adjust=False).mean().iloc[-1]
-            if _ema20_z >= _ema50_z:
-                continue  # trend ancora up, non chiudere
-            reason = f"EMA20({_ema20_z:.4f}) < EMA50({_ema50_z:.4f}) — trend invertito"
-        except Exception:
-            continue
-        # Trend invertito confermato → chiudi la posizione zombie
-        qty_live = get_open_long_qty(symbol)
-        if not qty_live or qty_live <= 0:
-            continue
-        tlog(f"signal_expiry:{symbol}", f"[SIGNAL-EXPIRY][LONG] {symbol} zombie {age_h:.1f}h, {reason} → chiudo", 300)
-        res = market_close_long(symbol, qty_live)
-        if res:
-            pnl_pct = (price_now - entry_price) / entry_price * 100.0 * DEFAULT_LEVERAGE
-            notify_telegram(
-                f"🧹 [SIGNAL-EXPIRY][LONG] Posizione zombie chiusa\n"
-                f"Simbolo: {symbol}\n"
-                f"Età: {age_h:.1f}h | Entry: {entry_price:.6f} | Uscita: {price_now:.6f}\n"
-                f"ROI stimato: {pnl_pct:.2f}%\n"
-                f"Motivo: {reason}"
-            )
-            discard_open(symbol)
-            record_exit(symbol, entry_price, price_now, "LONG")
-            with _state_lock:
-                position_data.pop(symbol, None)
-            cancel_all_orders(symbol)
+        r_dist          = atr_val * SL_ATR_MULT
+        final_sl        = entry_price - r_dist
+        trailing_active = float(pos.get("trailingStop", 0) or 0) > 0
 
+        set_position(symbol, {
+            "entry_price":     entry_price,
+            "sl":              final_sl,
+            "r_dist":          r_dist,
+            "qty":             qty,
+            "entry_time":      time.time(),
+            "trailing_active": trailing_active,
+        })
+        add_open(symbol)
+        set_position_stoploss_long(symbol, final_sl)
+        trovate += 1
+        log(f"[SYNC] LONG trovato: {symbol} qty={qty} "
+            f"entry={entry_price:.4f} SL={final_sl:.4f} "
+            f"trailing={'SI' if trailing_active else 'NO'}")
+
+    log(f"[SYNC] Totale posizioni LONG recuperate: {trovate}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AVVIO
+# ─────────────────────────────────────────────────────────────────────────────
+update_assets()
+sync_positions_from_wallet()
+_update_btc_context()
+
+_daily_start_equity = get_total_equity()
+log(f"[AVVIO] Equity iniziale: {_daily_start_equity:.2f} USDT")
+
+log("🤖 BOT LONG v2 AVVIATO — EMA20-Pullback 4h | Run H | Backtest puro")
+notify_telegram(
+    "🤖 BOT LONG v2 AVVIATO — riscrittura completa\n"
+    "Strategia: EMA20-Pullback 4h\n"
+    "Run H: 77 trade | WR 57.1% | Ratio 1.68x\n"
+    "Solo logica backtest — nessun filtro extra"
+)
+
+threading.Thread(target=trailing_worker, daemon=True).start()
+threading.Thread(target=sl_watchdog,     daemon=True).start()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LOOP PRINCIPALE
+# ─────────────────────────────────────────────────────────────────────────────
+while True:
     try:
-        _send_daily_report()
-    except Exception as _rep_exc:
-        log(f"[DAILY-REPORT][ERRORE LOOP] {_rep_exc}")
+        _update_btc_context()
+        equity = get_total_equity()
+        usdt   = get_usdt_balance()
+
+        # Reset equity giornaliera a mezzanotte UTC
+        today_str = time.strftime("%Y-%m-%d", time.gmtime())
+        if _main_loop_last_day != today_str:
+            _daily_start_equity = equity
+            _main_loop_last_day = today_str
+            log(f"[DAY-RESET] Nuovo giorno {today_str} | equity={equity:.2f} USDT")
+
+        # Daily DD circuit breaker (sicurezza emergenza)
+        if _daily_start_equity and equity < _daily_start_equity * (1.0 - DAILY_DD_CAP_PCT):
+            tlog("dd_cap",
+                 f"[DD-CAP] equity={equity:.2f} < "
+                 f"{_daily_start_equity*(1-DAILY_DD_CAP_PCT):.2f} "
+                 f"(−{DAILY_DD_CAP_PCT*100:.0f}%), skip nuovi LONG",
+                 600)
+            time.sleep(180)
+            continue
+
+        tlog("loop_status",
+             f"[LOOP] equity={equity:.2f} USDT | "
+             f"pos={len(open_positions)}/{MAX_OPEN_POSITIONS} | "
+             f"btc_fav={_btc_favorable_long}",
+             300)
+
+        # Analizza asset in parallelo solo se c'è spazio
+        eligible = [s for s in ASSETS if s not in open_positions]
+        results: dict = {}
+        if eligible and len(open_positions) < MAX_OPEN_POSITIONS:
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                fut_map = {ex.submit(analyze_asset, s): s for s in eligible}
+                for fut in as_completed(fut_map):
+                    s = fut_map[fut]
+                    try:
+                        results[s] = fut.result()
+                    except Exception as e:
+                        tlog(f"fut_exc:{s}", f"[FUT-EXC] {s} {e}", 300)
+
+        # Elabora segnali di entry
+        for symbol in eligible:
+            if len(open_positions) >= MAX_OPEN_POSITIONS:
+                break
+
+            signal, strategy, price = results.get(symbol, (None, None, None))
+            if signal != "entry" or price is None:
+                continue
+            if symbol in open_positions:
+                continue
+            if get_open_short_qty(symbol) > 0:
+                continue
+
+            # ── Sizing ATR-based (identico al backtest) ────────────────────
+            df = fetch_history(symbol, interval=INTERVAL_MINUTES, limit=50)
+            if df is None or len(df) < ATR_WINDOW + 2:
+                continue
+            try:
+                atr_val = float(
+                    AverageTrueRange(
+                        high=df["High"], low=df["Low"],
+                        close=df["Close"], window=ATR_WINDOW,
+                    ).average_true_range().iloc[-1]
+                )
+            except Exception:
+                continue
+            if atr_val <= 0:
+                continue
+
+            r_dist     = atr_val * SL_ATR_MULT
+            risk_usdt  = equity * RISK_PCT
+            price_now  = get_last_price(symbol) or price
+            qty_target = risk_usdt / max(1e-9, r_dist)
+            notional   = qty_target * price_now
+
+            info_i       = get_instrument_info(symbol)
+            min_notional = float(info_i.get("min_order_amt", 5.0))
+            if notional < min_notional:
+                notional = min_notional * 1.01
+
+            max_by_margin = usdt * DEFAULT_LEVERAGE * MARGIN_USE_PCT
+            order_amount  = min(notional, max_by_margin, ORDER_USDT_MAX)
+            if order_amount < min_notional:
+                tlog(f"skip_notional:{symbol}",
+                     f"[SKIP] {symbol} notional {order_amount:.2f} < min {min_notional:.2f}",
+                     300)
+                continue
+
+            # ── Apri LONG ──────────────────────────────────────────────────
+            qty = market_long(symbol, order_amount)
+            if not qty or qty <= 0:
+                continue
+
+            price_now = get_last_price(symbol) or price_now
+            final_sl  = price_now - r_dist
+
+            ok_sl = set_position_stoploss_long(symbol, final_sl)
+            if not ok_sl:
+                log(f"🚨 [SL-FAIL] {symbol} SL non impostato! "
+                    f"Entry={price_now:.4f} SL={final_sl:.4f}")
+                notify_telegram(
+                    f"🚨 SL NON IMPOSTATO {symbol} LONG!\n"
+                    f"Entry={price_now:.4f} SL={final_sl:.4f}\n"
+                    "⚠️ IMPOSTA MANUALMENTE!"
+                )
+
+            set_position(symbol, {
+                "entry_price":     price_now,
+                "sl":              final_sl,
+                "r_dist":          r_dist,
+                "qty":             qty,
+                "entry_time":      time.time(),
+                "trailing_active": False,
+            })
+            add_open(symbol)
+
+            log(f"[ENTRY] {symbol} | Entry={price_now:.4f} | SL={final_sl:.4f} | "
+                f"r_dist={r_dist:.4f} | qty={qty} | notional≈{qty*price_now:.2f} USDT")
+            notify_telegram(
+                f"🟢📈 LONG aperto {symbol}\n"
+                f"Prezzo: {price_now:.4f}\n"
+                f"SL: {final_sl:.4f} ({SL_ATR_MULT}×ATR)\n"
+                f"Trailing: attivo a +{TRAIL_START_R}R ({TRAIL_ATR_MULT}×ATR)\n"
+                f"Rischio: {risk_usdt:.2f} USDT ({RISK_PCT*100:.2f}% equity)"
+            )
+            time.sleep(2)
+
+        # ── Cleanup: posizioni chiuse dall'exchange (SL/TP hit) ───────────
+        for symbol in list(open_positions):
+            qty_live = get_open_long_qty(symbol)
+            info_i   = get_instrument_info(symbol)
+            min_qty  = float(info_i.get("min_qty", 0.0))
+            if qty_live is not None and qty_live < max(min_qty, 1e-9):
+                entry       = get_position(symbol)
+                entry_price = float((entry or {}).get("entry_price", 0))
+                exit_price  = get_last_price(symbol) or 0.0
+                pnl_roi = (
+                    (exit_price - entry_price) / max(1e-9, entry_price)
+                    * 100 * DEFAULT_LEVERAGE
+                ) if entry_price else 0.0
+                log(f"[CLEANUP] {symbol} chiusa dall'exchange | ROI≈{pnl_roi:.1f}%")
+                notify_telegram(
+                    f"🔴📈 Posizione LONG chiusa dall'exchange (SL/TP)\n"
+                    f"Simbolo: {symbol}\n"
+                    f"Entry: {entry_price:.4f} | Uscita: {exit_price:.4f}\n"
+                    f"ROI stimato: {pnl_roi:.1f}%"
+                )
+                discard_open(symbol)
+                with _state_lock:
+                    position_data.pop(symbol, None)
+                cancel_all_orders(symbol)
+
+    except Exception as e:
+        log(f"[LOOP-CRASH] {e}")
+
     time.sleep(180)
-    
