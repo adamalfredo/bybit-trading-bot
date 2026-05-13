@@ -95,5 +95,11 @@ ROI raggiunto	Floor garantito
 ≥125%	        +100%
 ≥150%	        +120%
 
-09/04/2026 portato il MAX_OPEN_POSITIONS da 3 a 4 valutare gli altri limiti
-17/04/2026 portato il MAX_OPEN_POSITIONS da 4 a 6 valutare gli altri limiti
+### tabella EMA
+
+Aggiungi "Moving Average Exponential" tre volte con questi periodi:
+
+EMA	Timeframe	Ruolo nel bot
+20	1h	Target pullback entry (prezzo deve tornare qui per entrare)
+100	1h	Filtro trend 1h — prezzo deve essere sopra, pendenza crescente
+200	1h	Filtro macro — equivale all'EMA200 4h (200 candele × 1h = ~8 giorni di 4h trend)
