@@ -855,6 +855,10 @@ while True:
                         results[s] = fut.result()
                     except Exception as e:
                         tlog(f"fut_exc:{s}", f"[FUT-EXC] {s} {e}", 300)
+            signals_found = sum(1 for v in results.values() if v[0] == "entry")
+            tlog("scan_summary",
+                 f"[SCAN] {len(eligible)} coin scansionate | segnali trovati: {signals_found}",
+                 300)
 
         # Elabora segnali di entry
         for symbol in eligible:
