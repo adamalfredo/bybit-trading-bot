@@ -794,12 +794,7 @@ _daily_start_equity = get_total_equity()
 log(f"[AVVIO] Equity iniziale: {_daily_start_equity:.2f} USDT")
 
 log("🤖 BOT LONG v2 AVVIATO — EMA20-Pullback 4h | Run H | Backtest puro")
-notify_telegram(
-    "🤖 BOT LONG v2 AVVIATO — riscrittura completa\n"
-    "Strategia: EMA20-Pullback 4h\n"
-    "Run H: 77 trade | WR 57.1% | Ratio 1.68x\n"
-    "Solo logica backtest — nessun filtro extra"
-)
+notify_telegram("🤖 BOT [LONG] AVVIATO - In ascolto per segnali di ingresso/uscita")
 
 threading.Thread(target=trailing_worker, daemon=True).start()
 threading.Thread(target=sl_watchdog,     daemon=True).start()
