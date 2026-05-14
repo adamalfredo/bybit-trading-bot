@@ -92,7 +92,8 @@ _last_log_times: dict  = {}
 
 # BTC gate: True se BTC 4h sopra EMA50 (era nel backtest)
 _btc_favorable_long: bool = True   # default True per non bloccare avvio
-_btc_ctx_ts: float        = 0.0
+_btc_prev_favorable: bool  = True   # per rilevare cambio regime
+_btc_ctx_ts: float         = 0.0
 
 # Daily DD
 _daily_start_equity: Optional[float] = None
@@ -522,7 +523,7 @@ def market_close_long(symbol: str, qty: float) -> bool:
 
 # ── BTC GATE — EMA50 4h (era nel backtest) ────────────────────────────────────
 def _update_btc_context() -> None:
-    global _btc_favorable_long, _btc_ctx_ts
+    global _btc_favorable_long, _btc_prev_favorable, _btc_ctx_ts
     if time.time() - _btc_ctx_ts < 180:
         return
     try:
@@ -536,7 +537,20 @@ def _update_btc_context() -> None:
             raw    = list(reversed(data["result"]["list"]))
             closes = pd.Series([float(r[4]) for r in raw])
             ema50  = closes.ewm(span=50, adjust=False).mean().iloc[-1]
-            _btc_favorable_long = float(closes.iloc[-1]) > ema50
+            new_val = float(closes.iloc[-1]) > ema50
+            if new_val != _btc_prev_favorable:
+                if new_val:
+                    notify_telegram(
+                        f"🟢 REGIME LONG — BTC 4h sopra EMA50\n"
+                        f"Gate APERTO: il bot può aprire LONG"
+                    )
+                else:
+                    notify_telegram(
+                        f"🔴 REGIME BEAR — BTC 4h sotto EMA50\n"
+                        f"Gate CHIUSO: nessun nuovo LONG fino al recovery"
+                    )
+                _btc_prev_favorable = new_val
+            _btc_favorable_long = new_val
     except Exception:
         pass
     _btc_ctx_ts = time.time()
@@ -802,6 +816,18 @@ while True:
         # Reset equity giornaliera a mezzanotte UTC
         today_str = time.strftime("%Y-%m-%d", time.gmtime())
         if _main_loop_last_day != today_str:
+            # Report giornaliero al cambio di giorno
+            if _main_loop_last_day != "":
+                pnl_day = equity - (_daily_start_equity or equity)
+                pnl_pct = (pnl_day / max(1e-9, _daily_start_equity or equity)) * 100
+                regime_str = "✅ LONG gate aperto" if _btc_favorable_long else "🔴 LONG gate chiuso (BTC < EMA50 4h)"
+                notify_telegram(
+                    f"📋 Report giornaliero LONG — {_main_loop_last_day}\n"
+                    f"📈 PnL giorno: {pnl_day:+.2f} USDT ({pnl_pct:+.2f}%)\n"
+                    f"💰 Equity: {equity:.2f} USDT\n"
+                    f"📂 Posizioni aperte: {len(open_positions)}\n"
+                    f"🔍 Regime BTC: {regime_str}"
+                )
             _daily_start_equity = equity
             _main_loop_last_day = today_str
             log(f"[DAY-RESET] Nuovo giorno {today_str} | equity={equity:.2f} USDT")
