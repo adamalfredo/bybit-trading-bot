@@ -1,15 +1,16 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# STRATEGIA: Dynamic Momentum Breakout — LONG
+# STRATEGIA: Dynamic Momentum Breakout — LONG — ENTRATA INTRACANDLE
 #
 # Logica:
-#   - Ogni 15 min chiama GET /v5/market/tickers (TUTTI i futures lineari, ~400 coin)
+#   - Ogni 2 min chiama GET /v5/market/tickers (TUTTI i futures lineari, ~400 coin)
 #   - Filtra: volume 24h > 5M USDT, gain 24h tra +3% e +50%
-#   - Per i top 30 candidati: verifica segnale breakout su 1h
-#     • Ultima candela 1h chiusa: gain +2.5% → +8% (nel mezzo del movimento)
-#     • Volume ultima candela > 3× media 20 candele precedenti
-#     • Close > massimo delle ultime 20 barre (breakout di struttura)
-#     • RSI(14) < 75 (non esaurito)
-#     • EMA20 slope positiva
+#   - Per i top 30 candidati: verifica segnale breakout su 15min IN CORSO
+#     • Candela 15min CORRENTE (non chiusa): gain +1.5% → +5.0% dall'open
+#     • Volume accumulato > 3× media 20 candele chiuse precedenti
+#     • Live price > massimo delle 20 candele chiuse precedenti
+#     • RSI(14) ultima chiusa < 75 (non esaurito)
+#     • EMA20 slope positiva (ultima chiusa)
+#   - Entrata DURANTE la candela — non aspetta la chiusura
 #   - SL = 2×ATR(14) sotto entry | Trail = 2.5×ATR dal max, attiva a 1R
 #   - MAX 5 posizioni | RISK 1% per trade | Leva 10×
 #   - BTC filter leggero: blocca solo se BTC 1h cala > 4% (crollo grave)
@@ -41,7 +42,7 @@ BYBIT_BASE_URL     = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "http
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
 # ── PARAMETRI STRATEGIA ───────────────────────────────────────────────────────
-INTERVAL_MINUTES   = 60       # timeframe analisi: 1h
+INTERVAL_MINUTES   = 15       # timeframe analisi: 15min
 RISK_PCT           = 0.0100   # 1% rischio per trade
 DEFAULT_LEVERAGE   = 10
 MAX_OPEN_POSITIONS = 5
@@ -54,9 +55,9 @@ TRAIL_START_R  = 1.0    # attiva trailing quando gain >= 1R
 
 # Filtri scansione
 MIN_VOL_24H_USDT = 5_000_000   # volume minimo 24h per evitare illiquide
-VOL_SPIKE_MIN    = 3.0          # spike volume ultima candela vs media 20
-CHANGE_1H_MIN    = 2.5          # % gain ultima candela 1h — minimo
-CHANGE_1H_MAX    = 8.0          # % gain ultima candela 1h — massimo (evita exhaustion)
+VOL_SPIKE_MIN    = 3.0          # spike volume candela corrente vs media 20 chiuse
+CHANGE_15M_MIN   = 1.5          # % gain candela 15min in corso — minimo
+CHANGE_15M_MAX   = 5.0          # % gain candela 15min in corso — massimo
 CHANGE_24H_MIN   = 3.0          # % gain 24h minimo (filtra da tickers API)
 CHANGE_24H_MAX   = 50.0         # % gain 24h massimo (evita già esplosi)
 RSI_MAX_ENTRY    = 75.0         # RSI max per evitare entrate su overbought
@@ -67,7 +68,7 @@ MAX_CANDIDATES   = 30           # quanti candidati verificare per scan
 BTC_CRASH_PCT    = -4.0         # blocca nuovi long se BTC 1h cala > 4%
 
 # Timing
-SCAN_INTERVAL_SEC  = 900   # 15 min tra scan
+SCAN_INTERVAL_SEC  = 120   # 2 min tra scan (intracandle detection)
 TRAIL_SLEEP_SEC    = 30
 SL_WATCH_SLEEP_SEC = 300   # 5 min
 ATR_WINDOW         = 14
@@ -843,7 +844,7 @@ def main_loop() -> None:
             usdt_val  = (risk_usdt / r_dist) * entry_px
 
             log(f"[ENTRY] {sym} | 24h:{c['change24h']:+.1f}% | "
-                f"1h:{signal['change_1h']:+.1f}% | vol:{signal['vol_spike']:.1f}× | "
+                f"15m:{signal['change_15m']:+.1f}% | vol:{signal['vol_spike']:.1f}× | "
                 f"RSI:{signal['rsi']:.0f} | size:{usdt_val:.1f} USDT")
 
             # 4) Imposta leva e apri
@@ -871,7 +872,7 @@ def main_loop() -> None:
             notify_telegram(
                 f"🚀 ENTRY {sym}\n"
                 f"Prezzo: {entry_px:.6f} | SL: {sl_price:.6f}\n"
-                f"24h: {c['change24h']:+.1f}% | 1h: {signal['change_1h']:+.1f}% "
+                f"24h: {c['change24h']:+.1f}% | 15m: {signal['change_15m']:+.1f}% "
                 f"| Vol: {signal['vol_spike']:.1f}× | RSI: {signal['rsi']:.0f}\n"
                 f"Risk: {risk_usdt:.2f} USDT"
             )
@@ -886,9 +887,9 @@ if __name__ == "__main__":
     log("=" * 60)
     log("  MOMENTUM BREAKOUT BOT — Dynamic Universe")
     log("=" * 60)
-    log(f"  Timeframe : {INTERVAL_MINUTES}min | Scan ogni {SCAN_INTERVAL_SEC//60}min")
+    log(f"  Timeframe : {INTERVAL_MINUTES}min | Scan ogni {SCAN_INTERVAL_SEC}s (intracandle)")
     log(f"  Filtri    : vol24h>{MIN_VOL_24H_USDT/1e6:.0f}M | "
-        f"1h_gain={CHANGE_1H_MIN}-{CHANGE_1H_MAX}% | "
+        f"15m_gain={CHANGE_15M_MIN}-{CHANGE_15M_MAX}% | "
         f"vol_spike>{VOL_SPIKE_MIN}× | RSI<{RSI_MAX_ENTRY}")
     log(f"  Risk      : {RISK_PCT*100:.1f}%/trade | MAX={MAX_OPEN_POSITIONS} pos | "
         f"SL={SL_ATR_MULT}×ATR | Trail={TRAIL_ATR_MULT}×ATR@{TRAIL_START_R}R")
