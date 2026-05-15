@@ -393,15 +393,16 @@ def scan_top_movers() -> list:
 # ── SIGNAL CHECK ──────────────────────────────────────────────────────────────
 def check_entry_signal(symbol: str) -> Optional[dict]:
     """
-    Verifica breakout sulla candela 1h appena chiusa.
-    Usa iloc[-2] (ultima chiusa) per evitare lookahead sulla candela corrente parziale.
+    Entrata INTRACANDLE su 15min.
+    Legge la candela CORRENTE in formazione (iloc[-1]) per entrare durante il movimento.
+    Indicatori (ATR, RSI, EMA) calcolati sull'ultima candela CHIUSA (iloc[-2]).
 
     Condizioni:
-    1. Candela 1h chiusa: gain +2.5% → +8%
-    2. Volume candela chiusa > 3× media 20 candele precedenti
-    3. Close > massimo delle 20 barre precedenti (breakout di struttura)
-    4. RSI(14) < 75 (non esaurito)
-    5. EMA20 slope positiva
+    1. Candela 15min in corso: gain +1.5% → +5.0% dall'open
+    2. Volume accumulato > 3× media 20 candele chiuse precedenti
+    3. Live price > max delle 20 candele chiuse precedenti (breakout struttura)
+    4. RSI(14) ultima chiusa < 75 (non esaurito)
+    5. EMA20 slope positiva (ultima chiusa)
     """
     df = fetch_klines(symbol, interval=INTERVAL_MINUTES, limit=28)
     if df is None or len(df) < 24:
@@ -418,11 +419,12 @@ def check_entry_signal(symbol: str) -> Optional[dict]:
                                   window=ATR_WINDOW).average_true_range()
     rsi_series = RSIIndicator(close=c, window=14).rsi()
 
-    # Ultima candela CHIUSA
-    last_close = float(c.iloc[-2])
-    last_open  = float(o.iloc[-2])
-    last_high  = float(h.iloc[-2])
-    last_vol   = float(v.iloc[-2])
+    # Candela CORRENTE in formazione — live price
+    last_close = float(c.iloc[-1])
+    last_open  = float(o.iloc[-1])
+    last_vol   = float(v.iloc[-1])
+
+    # Indicatori stabili: ultima candela CHIUSA
     last_rsi   = float(rsi_series.iloc[-2])
     last_atr   = float(atr_series.iloc[-2])
     last_ema20 = float(ema20.iloc[-2])
@@ -430,44 +432,42 @@ def check_entry_signal(symbol: str) -> Optional[dict]:
 
     if pd.isna(last_rsi) or pd.isna(last_atr) or last_atr <= 0:
         return None
-
-    # 1) Gain dell'ultima candela 1h
-    change_1h = (last_close - last_open) / last_open * 100
-    if not (CHANGE_1H_MIN <= change_1h <= CHANGE_1H_MAX):
+    if last_close <= 0 or last_open <= 0:
         return None
 
-    # 2) Volume spike
-    vol_ref = v.iloc[-23:-2].mean()   # media 20 barre prima dell'ultima chiusa
+    # 1) Gain della candela 15min in corso
+    change_15m = (last_close - last_open) / last_open * 100
+    if not (CHANGE_15M_MIN <= change_15m <= CHANGE_15M_MAX):
+        return None
+
+    # 2) Volume spike (parziale ma già significativo)
+    vol_ref = v.iloc[-22:-1].mean()   # 20 candele chiuse prima della corrente
     if pd.isna(vol_ref) or vol_ref <= 0:
         return None
     vol_spike = last_vol / vol_ref
     if vol_spike < VOL_SPIKE_MIN:
         return None
 
-    # 3) Breakout sopra massimo delle 20 barre precedenti
-    high_20 = h.iloc[-23:-2].max()
+    # 3) Breakout: live price > max delle 20 candele chiuse precedenti
+    high_20 = h.iloc[-22:-1].max()
     if last_close <= high_20:
         return None
 
-    # 4) RSI non esaurito
+    # 4) RSI (ultima chiusa) non esaurito
     if last_rsi >= RSI_MAX_ENTRY:
         return None
 
-    # 5) EMA20 in salita
+    # 5) EMA20 slope (ultima chiusa) in salita
     if last_ema20 <= prev_ema20:
         return None
 
-    # Prezzo corrente (candela parziale) come approssimazione entry
-    entry_price = float(c.iloc[-1])
-    if entry_price <= 0:
-        return None
-
+    entry_price = last_close
     return {
         "entry_price": entry_price,
         "sl_price":    entry_price - SL_ATR_MULT * last_atr,
         "r_dist":      SL_ATR_MULT * last_atr,
         "atr":         last_atr,
-        "change_1h":   change_1h,
+        "change_15m":  change_15m,
         "vol_spike":   vol_spike,
         "rsi":         last_rsi,
     }
@@ -899,9 +899,8 @@ if __name__ == "__main__":
     log(f"[AVVIO] Equity: {equity0:.2f} USDT")
 
     notify_telegram(
-        f"🚀 MOMENTUM BOT AVVIATO\n"
-        f"Scansiona TUTTI i futures Bybit ogni 15min\n"
-        f"Filtri: vol>5M, 1h gain 2.5-8%, vol spike 3×, breakout 20 barre\n"
+        f"🚀 MOMENTUM BOT AVVIATO — INTRACANDLE 15min\n"
+        f"Scan ogni {SCAN_INTERVAL_SEC}s | 15m gain {CHANGE_15M_MIN}-{CHANGE_15M_MAX}% | vol spike {VOL_SPIKE_MIN}×\n"
         f"Risk: {RISK_PCT*100:.1f}% | Max {MAX_OPEN_POSITIONS} posizioni\n"
         f"Equity: {equity0:.2f} USDT"
     )
