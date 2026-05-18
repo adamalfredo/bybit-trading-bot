@@ -68,8 +68,8 @@ RSI_MAX_4H     = 65.0   # RSI massimo: non overbought
 EMA_TOUCH_TOL  = 0.012  # il low deve essere entro 1.2% sopra EMA20 (o sotto)
 MAX_DIST_EMA   = 3.0    # % massima close sopra EMA20 all'entry
 MAX_SL_PCT     = 8.0    # SL massimo accettabile: 8% sotto entry
-MIN_BODY_PCT   = 35.0   # corpo candela 4h >= 35% del range: elimina shooting star/doji (<20% body)
-MIN_VOL_RATIO  = 1.1    # volume candela segnale >= 1.1x media20: conferma domanda
+MIN_BODY_PCT   = 40.0   # corpo candela 4h >= 40% del range: calibrato su backtest 730gg (PF 1.116 vs 0.898 con 35%)
+MIN_VOL_RATIO  = 1.5    # volume candela segnale >= 1.5x media20: parametro piu impattante (PF 1.116 vs 0.898)
 MAX_DIST_EMA50_D = 20.0 # daily close max 20% sopra EMA50: evita trend overestesi
 
 # BTC filter
