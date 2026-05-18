@@ -68,7 +68,7 @@ RSI_MAX_4H     = 65.0   # RSI massimo: non overbought
 EMA_TOUCH_TOL  = 0.012  # il low deve essere entro 1.2% sopra EMA20 (o sotto)
 MAX_DIST_EMA   = 3.0    # % massima close sopra EMA20 all'entry
 MAX_SL_PCT     = 8.0    # SL massimo accettabile: 8% sotto entry
-MIN_BODY_PCT   = 40.0   # corpo candela 4h >= 40% del range: elimina shooting star/doji
+MIN_BODY_PCT   = 35.0   # corpo candela 4h >= 35% del range: elimina shooting star/doji (<20% body)
 MIN_VOL_RATIO  = 1.1    # volume candela segnale >= 1.1x media20: conferma domanda
 MAX_DIST_EMA50_D = 20.0 # daily close max 20% sopra EMA50: evita trend overestesi
 
@@ -756,20 +756,32 @@ def sync_positions_from_wallet() -> None:
         entry_price = float(pos.get("avgPrice") or pos.get("entryPrice") or 0)
         if entry_price <= 0:
             continue
-        df      = fetch_klines(symbol, interval="240", limit=20)
-        atr_val = entry_price * 0.03
-        if df is not None and len(df) > ATR_WINDOW + 2:
-            try:
-                atr_val = float(
-                    AverageTrueRange(
-                        high=df["High"], low=df["Low"],
-                        close=df["Close"], window=ATR_WINDOW,
-                    ).average_true_range().iloc[-1]
-                )
-            except Exception:
-                pass
-        r_dist          = atr_val * 2.0
-        sl_price        = entry_price - r_dist
+
+        # Leggi lo SL già impostato su Bybit — non ricalcolarlo mai
+        # Ricalcolarlo causerebbe SL più larghi ad ogni restart
+        sl_from_bybit = float(pos.get("stopLoss") or 0)
+        if sl_from_bybit > 0 and sl_from_bybit < entry_price:
+            sl_price = sl_from_bybit
+            r_dist   = entry_price - sl_price
+            set_sl_on_bybit = False   # SL già presente, non toccare
+        else:
+            # Fallback: posizione senza SL impostato (non dovrebbe accadere)
+            df      = fetch_klines(symbol, interval="240", limit=20)
+            atr_val = entry_price * 0.03
+            if df is not None and len(df) > ATR_WINDOW + 2:
+                try:
+                    atr_val = float(
+                        AverageTrueRange(
+                            high=df["High"], low=df["Low"],
+                            close=df["Close"], window=ATR_WINDOW,
+                        ).average_true_range().iloc[-1]
+                    )
+                except Exception:
+                    pass
+            r_dist   = atr_val * 2.0
+            sl_price = entry_price - r_dist
+            set_sl_on_bybit = True    # SL assente: lo impostiamo
+
         trailing_active = float(pos.get("trailingStop", 0) or 0) > 0
         set_position(symbol, {
             "entry_price":     entry_price,
@@ -780,10 +792,14 @@ def sync_positions_from_wallet() -> None:
             "trailing_active": trailing_active,
         })
         add_open(symbol)
-        set_position_stoploss_long(symbol, sl_price)
+        if set_sl_on_bybit:
+            set_position_stoploss_long(symbol, sl_price)
+            log(f"[SYNC] LONG: {symbol} qty={qty} entry={entry_price:.4f} "
+                f"SL={sl_price:.4f} (impostato) trail={'SI' if trailing_active else 'NO'}")
+        else:
+            log(f"[SYNC] LONG: {symbol} qty={qty} entry={entry_price:.4f} "
+                f"SL={sl_price:.4f} (da Bybit) trail={'SI' if trailing_active else 'NO'}")
         trovate += 1
-        log(f"[SYNC] LONG: {symbol} qty={qty} entry={entry_price:.4f} "
-            f"SL={sl_price:.4f} trail={'SI' if trailing_active else 'NO'}")
 
     log(f"[SYNC] {trovate} posizioni recuperate")
 
