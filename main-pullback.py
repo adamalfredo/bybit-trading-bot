@@ -68,6 +68,9 @@ RSI_MAX_4H     = 65.0   # RSI massimo: non overbought
 EMA_TOUCH_TOL  = 0.012  # il low deve essere entro 1.2% sopra EMA20 (o sotto)
 MAX_DIST_EMA   = 3.0    # % massima close sopra EMA20 all'entry
 MAX_SL_PCT     = 8.0    # SL massimo accettabile: 8% sotto entry
+MIN_BODY_PCT   = 40.0   # corpo candela 4h >= 40% del range: elimina shooting star/doji
+MIN_VOL_RATIO  = 1.1    # volume candela segnale >= 1.1x media20: conferma domanda
+MAX_DIST_EMA50_D = 20.0 # daily close max 20% sopra EMA50: evita trend overestesi
 
 # BTC filter
 BTC_BULL_CHECK = True   # blocca se BTC sotto EMA50 daily
@@ -398,16 +401,24 @@ def is_daily_uptrend(symbol: str) -> bool:
     True se la coin è in uptrend strutturale:
     - Last daily close > EMA50 daily
     - EMA50 daily con slope positiva (oggi > 5 barre fa)
+    - Trend non overesteso: close <= EMA50 * (1 + MAX_DIST_EMA50_D/100)
     """
     df = fetch_klines(symbol, interval="D", limit=60)
     if df is None or len(df) < 52:
         return False
-    close    = df["Close"]
-    ema50    = close.ewm(span=50, adjust=False).mean()
-    last_c   = float(close.iloc[-2])
+    close     = df["Close"]
+    ema50     = close.ewm(span=50, adjust=False).mean()
+    last_c    = float(close.iloc[-2])
     ema50_now = float(ema50.iloc[-2])
     ema50_5d  = float(ema50.iloc[-7])
-    return last_c > ema50_now and ema50_now > ema50_5d
+    if last_c <= ema50_now or ema50_now <= ema50_5d:
+        return False
+    # Trend non overesteso: se il prezzo è già >20% sopra EMA50, il pullback
+    # a EMA20(4h) non è un vero ritorno al supporto
+    dist_ema50 = (last_c - ema50_now) / ema50_now * 100
+    if dist_ema50 > MAX_DIST_EMA50_D:
+        return False
+    return True
 
 
 # ── SIGNAL CHECK 4h ───────────────────────────────────────────────────────────
@@ -471,7 +482,24 @@ def check_entry_signal(symbol: str) -> Optional[dict]:
     if dist_pct > MAX_DIST_EMA:
         return None
 
-    # 6) SL = sotto swing low delle ultime 3 barre chiuse
+    # 6) Qualità candela: corpo >= MIN_BODY_PCT% del range totale
+    #    Filtra shooting star, doji, hammer invertiti
+    candle_range = float(h.iloc[-2]) - float(l.iloc[-2])
+    if candle_range > 0:
+        body_pct = abs(last_close - last_open) / candle_range * 100
+        if body_pct < MIN_BODY_PCT:
+            return None
+
+    # 7) Conferma volume: la candela segnale deve avere volume >= MIN_VOL_RATIO
+    #    rispetto alla media delle ultime 20 candele chiuse
+    #    Un rimbalzo su volume debole non ha domanda reale
+    vol_series = df["Volume"]
+    vol_avg = float(vol_series.iloc[-22:-2].mean())
+    vol_sig = float(vol_series.iloc[-2])
+    if vol_avg > 0 and vol_sig / vol_avg < MIN_VOL_RATIO:
+        return None
+
+    # 8) SL = sotto swing low delle ultime 3 barre chiuse
     swing_low = min(float(l.iloc[-2]), float(l.iloc[-3]), float(l.iloc[-4]))
     sl_price  = swing_low - SL_ATR_BUFFER * last_atr
     r_dist    = last_close - sl_price
