@@ -53,10 +53,13 @@ MAX_OPEN_POSITIONS = 5
 MARGIN_USE_PCT     = 0.30
 ORDER_USDT_MAX     = float(os.getenv("ORDER_USDT_MAX", "1000"))
 
-SL_ATR_BUFFER  = 0.3    # buffer aggiuntivo sotto swing low (× ATR)
-TRAIL_ATR_MULT = 2.0    # trailing = 2×ATR(4h) dal massimo
-TRAIL_START_R  = 1.5    # attiva trailing a 1.5R di guadagno
-ATR_WINDOW     = 14
+SL_ATR_BUFFER    = 0.3   # buffer aggiuntivo sotto swing low (× ATR)
+TRAIL_ATR_MULT   = 2.0   # trailing = 2×ATR(4h) dal massimo
+TRAIL_START_R    = 1.5   # attiva trailing a 1.5R di guadagno
+BREAKEVEN_R      = 1.0   # sposta SL a entry (breakeven) quando prezzo ≥ 1R
+TRAIL_MAX_RETRIES = 3   # tentativi max per attivare trailing prima di loggare errore
+TRAIL_RETRY_SLEEP = 5   # secondi tra un retry e l'altro del trailing
+ATR_WINDOW       = 14
 
 # Universo
 MIN_VOL_24H_USDT = 10_000_000  # solo coin liquide: >10M USDT/giorno
@@ -550,8 +553,13 @@ def place_trailing_stop_long(symbol: str, trailing_dist: float) -> bool:
             "trailingStop": str(trailing_dist), "positionIdx": LONG_IDX}
     try:
         data = _bybit_signed_post("/v5/position/trading-stop", body).json()
-        return data.get("retCode") == 0
-    except Exception:
+        ret  = data.get("retCode")
+        if ret == 0:
+            return True
+        log(f"[TRAIL] {symbol} API FAIL retCode={ret} msg={data.get('retMsg')}")
+        return False
+    except Exception as e:
+        log(f"[TRAIL] {symbol} exc: {e}")
         return False
 
 
@@ -648,43 +656,101 @@ def market_long(symbol: str, usdt_amount: float) -> Optional[float]:
 
 # ── TRAILING WORKER ───────────────────────────────────────────────────────────
 def trailing_worker() -> None:
-    log("[TRAIL] avviato")
+    """
+    Ratchet a due livelli:
+      1) BREAKEVEN (1R)  — sposta SL a entry: profitto a rischio zero
+      2) TRAILING (1.5R) — attiva Bybit trailing stop 2×ATR dal massimo
+    Retry con backoff su fallimento API. Log esplicito su ogni errore.
+    """
+    log("[TRAIL] avviato — ratchet BREAKEVEN@1R + TRAIL@1.5R")
     while True:
         try:
             for symbol in list(open_positions):
                 entry = get_position(symbol)
-                if not entry or entry.get("trailing_active"):
+                if not entry:
                     continue
+
                 price_now   = get_last_price(symbol)
                 if not price_now:
                     continue
+
                 entry_price = float(entry.get("entry_price", 0))
-                r_dist      = float(entry.get("r_dist", 0))
-                if r_dist <= 0:
+                # Usa orig_r_dist (mai modificato) per calcolare le soglie ratchet
+                orig_r_dist = float(entry.get("orig_r_dist") or entry.get("r_dist", 0))
+                if orig_r_dist <= 0:
                     continue
-                if price_now >= entry_price + TRAIL_START_R * r_dist:
-                    # Ricalcola ATR su 4h fresco
-                    df = fetch_klines(symbol, interval="240", limit=20)
-                    atr_val = r_dist / max(1e-9, 1.0)
-                    if df is not None and len(df) > ATR_WINDOW + 2:
-                        try:
-                            atr_val = float(
-                                AverageTrueRange(
-                                    high=df["High"], low=df["Low"],
-                                    close=df["Close"], window=ATR_WINDOW,
-                                ).average_true_range().iloc[-1]
+
+                # ── LIVELLO 1: BREAKEVEN a 1R ─────────────────────────────────
+                if (not entry.get("breakeven_active")
+                        and not entry.get("trailing_active")):
+                    be_trigger = entry_price + BREAKEVEN_R * orig_r_dist
+                    if price_now >= be_trigger:
+                        ok = set_position_stoploss_long(symbol, entry_price)
+                        if ok:
+                            entry["breakeven_active"] = True
+                            entry["sl_price"]         = entry_price
+                            set_position(symbol, entry)
+                            log(f"[TRAIL] {symbol} ✅ BREAKEVEN: SL → {entry_price:.4f} "
+                                f"(prezzo={price_now:.4f}, trigger={be_trigger:.4f})")
+                            notify_telegram(
+                                f"🔒 Breakeven {symbol}\n"
+                                f"Prezzo: {price_now:.4f} | SL → entry {entry_price:.4f}\n"
+                                f"Profitto ora protetto da perdite"
                             )
-                        except Exception:
-                            pass
-                    trail_dist = atr_val * TRAIL_ATR_MULT
-                    if place_trailing_stop_long(symbol, trail_dist):
-                        entry["trailing_active"] = True
-                        set_position(symbol, entry)
-                        notify_telegram(
-                            f"🎯 Trail attivato {symbol}\n"
-                            f"Prezzo: {price_now:.4f} | "
-                            f"Trail dist: {trail_dist:.6f} ({TRAIL_ATR_MULT}×ATR)"
-                        )
+                        else:
+                            log(f"[TRAIL] {symbol} ⚠️ BREAKEVEN FAIL "
+                                f"prezzo={price_now:.4f} trigger={be_trigger:.4f}")
+
+                # ── LIVELLO 2: TRAILING a 1.5R ────────────────────────────────
+                if not entry.get("trailing_active"):
+                    trail_trigger = entry_price + TRAIL_START_R * orig_r_dist
+                    if price_now >= trail_trigger:
+                        # Ricalcola ATR su 4h fresco
+                        df      = fetch_klines(symbol, interval="240", limit=20)
+                        atr_val = orig_r_dist  # fallback = orig_r_dist (non zero)
+                        if df is not None and len(df) > ATR_WINDOW + 2:
+                            try:
+                                atr_val = float(
+                                    AverageTrueRange(
+                                        high=df["High"], low=df["Low"],
+                                        close=df["Close"], window=ATR_WINDOW,
+                                    ).average_true_range().iloc[-1]
+                                )
+                            except Exception:
+                                pass
+                        trail_dist = atr_val * TRAIL_ATR_MULT
+
+                        # Retry con backoff
+                        activated = False
+                        for attempt in range(1, TRAIL_MAX_RETRIES + 1):
+                            if place_trailing_stop_long(symbol, trail_dist):
+                                activated = True
+                                break
+                            log(f"[TRAIL] {symbol} tentativo {attempt}/{TRAIL_MAX_RETRIES} "
+                                f"fallito (dist={trail_dist:.6f})")
+                            if attempt < TRAIL_MAX_RETRIES:
+                                time.sleep(TRAIL_RETRY_SLEEP)
+
+                        if activated:
+                            entry["trailing_active"] = True
+                            entry["breakeven_active"] = True  # trailing implica breakeven
+                            set_position(symbol, entry)
+                            log(f"[TRAIL] {symbol} ✅ TRAILING attivato "
+                                f"dist={trail_dist:.6f} prezzo={price_now:.4f}")
+                            notify_telegram(
+                                f"🎯 Trail attivato {symbol}\n"
+                                f"Prezzo: {price_now:.4f} | "
+                                f"Trail dist: {trail_dist:.6f} ({TRAIL_ATR_MULT}×ATR)"
+                            )
+                        else:
+                            log(f"[TRAIL] {symbol} 🔴 TRAILING NON ATTIVATO dopo "
+                                f"{TRAIL_MAX_RETRIES} tentativi! "
+                                f"prezzo={price_now:.4f} trigger={trail_trigger:.4f}")
+                            notify_telegram(
+                                f"⚠️ TRAIL FALLITO {symbol}\n"
+                                f"Prezzo {price_now:.4f} > trigger {trail_trigger:.4f}\n"
+                                f"Riprovo al prossimo ciclo ({TRAIL_SLEEP_SEC}s)"
+                            )
         except Exception as e:
             log(f"[TRAIL] exc: {e}")
         time.sleep(TRAIL_SLEEP_SEC)
@@ -759,46 +825,81 @@ def sync_positions_from_wallet() -> None:
 
         # Leggi lo SL già impostato su Bybit — non ricalcolarlo mai
         # Ricalcolarlo causerebbe SL più larghi ad ogni restart
-        sl_from_bybit = float(pos.get("stopLoss") or 0)
-        if sl_from_bybit > 0 and sl_from_bybit < entry_price:
-            sl_price = sl_from_bybit
-            r_dist   = entry_price - sl_price
-            set_sl_on_bybit = False   # SL già presente, non toccare
-        else:
-            # Fallback: posizione senza SL impostato (non dovrebbe accadere)
-            df      = fetch_klines(symbol, interval="240", limit=20)
-            atr_val = entry_price * 0.03
-            if df is not None and len(df) > ATR_WINDOW + 2:
+        sl_from_bybit   = float(pos.get("stopLoss") or 0)
+        trailing_active = float(pos.get("trailingStop", 0) or 0) > 0
+
+        if sl_from_bybit > 0 and sl_from_bybit < entry_price * 0.999:
+            # Caso normale: SL sotto entry (non ancora breakeven)
+            sl_price        = sl_from_bybit
+            r_dist          = entry_price - sl_price
+            orig_r_dist     = r_dist
+            breakeven_active = False
+            set_sl_on_bybit = False
+        elif sl_from_bybit >= entry_price * 0.999:
+            # SL a/sopra entry: il breakeven è già stato applicato.
+            # NON sovrascrivere il SL — stima orig_r_dist via ATR.
+            sl_price        = sl_from_bybit
+            df_s            = fetch_klines(symbol, interval="240", limit=20)
+            atr_s           = entry_price * 0.03
+            if df_s is not None and len(df_s) > ATR_WINDOW + 2:
                 try:
-                    atr_val = float(
+                    atr_s = float(
                         AverageTrueRange(
-                            high=df["High"], low=df["Low"],
-                            close=df["Close"], window=ATR_WINDOW,
+                            high=df_s["High"], low=df_s["Low"],
+                            close=df_s["Close"], window=ATR_WINDOW,
                         ).average_true_range().iloc[-1]
                     )
                 except Exception:
                     pass
-            r_dist   = atr_val * 2.0
-            sl_price = entry_price - r_dist
-            set_sl_on_bybit = True    # SL assente: lo impostiamo
+            orig_r_dist     = atr_s * 2.0
+            r_dist          = orig_r_dist
+            breakeven_active = True
+            set_sl_on_bybit = False
+            log(f"[SYNC] {symbol}: SL={sl_price:.4f} ≥ entry — breakeven già attivo")
+        else:
+            # Fallback: posizione senza SL impostato (non dovrebbe accadere)
+            df_s    = fetch_klines(symbol, interval="240", limit=20)
+            atr_s   = entry_price * 0.03
+            if df_s is not None and len(df_s) > ATR_WINDOW + 2:
+                try:
+                    atr_s = float(
+                        AverageTrueRange(
+                            high=df_s["High"], low=df_s["Low"],
+                            close=df_s["Close"], window=ATR_WINDOW,
+                        ).average_true_range().iloc[-1]
+                    )
+                except Exception:
+                    pass
+            orig_r_dist     = atr_s * 2.0
+            r_dist          = orig_r_dist
+            sl_price        = entry_price - r_dist
+            breakeven_active = False
+            set_sl_on_bybit = True
 
-        trailing_active = float(pos.get("trailingStop", 0) or 0) > 0
+        # Se trailing già attivo su Bybit, anche breakeven è certamente passato
+        if trailing_active:
+            breakeven_active = True
+
         set_position(symbol, {
-            "entry_price":     entry_price,
-            "sl_price":        sl_price,
-            "r_dist":          r_dist,
-            "qty":             qty,
-            "entry_time":      time.time(),
-            "trailing_active": trailing_active,
+            "entry_price":      entry_price,
+            "sl_price":         sl_price,
+            "r_dist":           r_dist,
+            "orig_r_dist":      orig_r_dist,
+            "qty":              qty,
+            "entry_time":       time.time(),
+            "trailing_active":  trailing_active,
+            "breakeven_active": breakeven_active,
         })
         add_open(symbol)
         if set_sl_on_bybit:
             set_position_stoploss_long(symbol, sl_price)
             log(f"[SYNC] LONG: {symbol} qty={qty} entry={entry_price:.4f} "
-                f"SL={sl_price:.4f} (impostato) trail={'SI' if trailing_active else 'NO'}")
+                f"SL={sl_price:.4f} (impostato) trail={'SI' if trailing_active else 'NO'} "
+                f"be={'SI' if breakeven_active else 'NO'}")
         else:
             log(f"[SYNC] LONG: {symbol} qty={qty} entry={entry_price:.4f} "
-                f"SL={sl_price:.4f} (da Bybit) trail={'SI' if trailing_active else 'NO'}")
+                f"SL={sl_price:.4f} (da Bybit) trail={'SI' if trailing_active else 'NO'} "
+                f"be={'SI' if breakeven_active else 'NO'}")
         trovate += 1
 
     log(f"[SYNC] {trovate} posizioni recuperate")
@@ -914,12 +1015,14 @@ def main_loop() -> None:
             # Salva stato e imposta SL
             sl_price = signal["sl_price"]
             set_position(sym, {
-                "entry_price":     entry_px,
-                "sl_price":        sl_price,
-                "r_dist":          r_dist,
-                "qty":             qty,
-                "entry_time":      time.time(),
-                "trailing_active": False,
+                "entry_price":      entry_px,
+                "sl_price":         sl_price,
+                "r_dist":           r_dist,
+                "orig_r_dist":      r_dist,   # mai modificato: base per calcolo ratchet
+                "qty":              qty,
+                "entry_time":       time.time(),
+                "trailing_active":  False,
+                "breakeven_active": False,
             })
             add_open(sym)
             time.sleep(0.3)
