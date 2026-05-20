@@ -59,6 +59,8 @@ TRAIL_START_R    = 1.5   # attiva trailing a 1.5R di guadagno
 BREAKEVEN_R      = 1.0   # sposta SL a entry (breakeven) quando prezzo ≥ 1R
 TRAIL_MAX_RETRIES = 3   # tentativi max per attivare trailing prima di loggare errore
 TRAIL_RETRY_SLEEP = 5   # secondi tra un retry e l'altro del trailing
+PARTIAL_TP_R     = 2.0  # partial TP: chiude 50% posizione a +2R di guadagno
+PARTIAL_TP_PCT   = 0.50 # quota da chiudere al partial TP
 ATR_WINDOW       = 14
 
 # Universo
@@ -76,7 +78,8 @@ MIN_VOL_RATIO  = 1.5    # volume candela segnale >= 1.5x media20: parametro piu 
 MAX_DIST_EMA50_D = 20.0 # daily close max 20% sopra EMA50: evita trend overestesi
 
 # BTC filter
-BTC_BULL_CHECK = True   # blocca se BTC sotto EMA50 daily
+BTC_BULL_CHECK          = True  # blocca se BTC sotto EMA50 daily (slope positiva)
+BTC_WEEKLY_EMA200_CHECK = True  # regime strutturale: blocca se BTC weekly < EMA200 weekly
 
 # Timing
 SCAN_INTERVAL_SEC  = 1800   # 30 min tra scan
@@ -335,25 +338,48 @@ def get_open_long_qty(symbol: str) -> float:
 
 # ── BTC FILTER ────────────────────────────────────────────────────────────────
 def _update_btc_filter() -> None:
-    """Blocca nuovi long se BTC è sotto EMA50 sul daily (bear market strutturale)."""
+    """
+    Doppio filtro regime:
+      1) BTC daily close > EMA50 daily con slope positiva (trend medio periodo)
+      2) BTC weekly close > EMA200 weekly (regime strutturale, anti-bear)
+    Entrambi devono essere OK per aprire nuovi trade.
+    """
     global _btc_ok, _btc_ts
-    if time.time() - _btc_ts < 3600:   # aggiorna ogni ora max
+    if time.time() - _btc_ts < 3600:
         return
     if not BTC_BULL_CHECK:
         _btc_ok = True
         _btc_ts = time.time()
         return
     try:
-        df = fetch_klines("BTCUSDT", interval="D", limit=60)
-        if df is not None and len(df) >= 52:
-            close    = df["Close"]
-            ema50    = close.ewm(span=50, adjust=False).mean()
-            btc_px   = float(close.iloc[-2])
-            ema50_px = float(ema50.iloc[-2])
-            _btc_ok  = btc_px >= ema50_px
-            tlog("btc_filter",
-                 f"[BTC] Daily EMA50={ema50_px:.0f} | BTC={btc_px:.0f} | "
-                 f"gate={'OK ✅' if _btc_ok else 'CHIUSO 🚫 (bear)'}", 3600)
+        daily_ok  = False
+        weekly_ok = True  # default True se dati insufficienti
+
+        # ── Check 1: BTC daily EMA50 (trend medio + slope) ──────────────────
+        df_d = fetch_klines("BTCUSDT", interval="D", limit=60)
+        if df_d is not None and len(df_d) >= 52:
+            close_d   = df_d["Close"]
+            ema50_d   = close_d.ewm(span=50, adjust=False).mean()
+            btc_d     = float(close_d.iloc[-2])
+            ema50_now = float(ema50_d.iloc[-2])
+            ema50_5d  = float(ema50_d.iloc[-7])
+            daily_ok  = btc_d >= ema50_now and ema50_now >= ema50_5d
+
+        # ── Check 2: BTC weekly EMA200 (regime strutturale) ──────────────────
+        if BTC_WEEKLY_EMA200_CHECK:
+            df_w = fetch_klines("BTCUSDT", interval="W", limit=220)
+            if df_w is not None and len(df_w) >= 50:
+                close_w    = df_w["Close"]
+                ema200_w   = close_w.ewm(span=200, adjust=False).mean()
+                btc_w      = float(close_w.iloc[-2])
+                ema200_now = float(ema200_w.iloc[-2])
+                weekly_ok  = btc_w >= ema200_now
+
+        _btc_ok = daily_ok and weekly_ok
+        tlog("btc_filter",
+             f"[BTC] Daily EMA50={'OK' if daily_ok else 'FAIL'} | "
+             f"Weekly EMA200={'OK' if weekly_ok else 'FAIL'} | "
+             f"gate={'OK ✅' if _btc_ok else 'CHIUSO 🚫 (bear)'}", 3600)
     except Exception:
         pass
     _btc_ts = time.time()
@@ -563,6 +589,29 @@ def place_trailing_stop_long(symbol: str, trailing_dist: float) -> bool:
         return False
 
 
+def market_close_partial(symbol: str, qty: float) -> bool:
+    """Chiude parzialmente la posizione long (reduce-only, market order)."""
+    info     = get_instrument_info(symbol)
+    qty_step = float(info.get("qty_step", 0.01))
+    qty_str  = _format_qty_with_step(qty, qty_step)
+    if float(qty_str) <= 0:
+        return False
+    body = {"category": "linear", "symbol": symbol,
+            "side": "Sell", "orderType": "Market",
+            "qty": qty_str, "reduceOnly": True,
+            "positionIdx": LONG_IDX}
+    try:
+        data = _bybit_signed_post("/v5/order/create", body).json()
+        ret  = data.get("retCode")
+        if ret == 0:
+            return True
+        log(f"[PARTIAL-TP] {symbol} FAIL retCode={ret} {data.get('retMsg')}")
+        return False
+    except Exception as e:
+        log(f"[PARTIAL-TP] {symbol} exc: {e}")
+        return False
+
+
 def set_leverage(symbol: str) -> None:
     try:
         _bybit_signed_post("/v5/position/set-leverage", {
@@ -751,6 +800,32 @@ def trailing_worker() -> None:
                                 f"Prezzo {price_now:.4f} > trigger {trail_trigger:.4f}\n"
                                 f"Riprovo al prossimo ciclo ({TRAIL_SLEEP_SEC}s)"
                             )
+
+                # ── LIVELLO 3: PARTIAL TP a 2R ────────────────────────────────
+                if (entry.get("trailing_active")
+                        and not entry.get("partial_tp_active")):
+                    partial_trigger = entry_price + PARTIAL_TP_R * orig_r_dist
+                    if price_now >= partial_trigger:
+                        cur_qty   = float(entry.get("qty", 0))
+                        close_qty = cur_qty * PARTIAL_TP_PCT
+                        if close_qty > 0:
+                            ok = market_close_partial(symbol, close_qty)
+                            if ok:
+                                entry["partial_tp_active"] = True
+                                entry["qty"] = cur_qty * (1.0 - PARTIAL_TP_PCT)
+                                set_position(symbol, entry)
+                                log(f"[PARTIAL-TP] {symbol} ✅ 50% chiuso a "
+                                    f"+{PARTIAL_TP_R:.1f}R prezzo={price_now:.4f} "
+                                    f"qty={close_qty:.4f}")
+                                notify_telegram(
+                                    f"💰 Partial TP {symbol}\n"
+                                    f"50% chiuso a +{PARTIAL_TP_R:.1f}R | "
+                                    f"Prezzo: {price_now:.4f}\n"
+                                    f"Resto in trailing — profitto protetto"
+                                )
+                            else:
+                                log(f"[PARTIAL-TP] {symbol} ⚠️ FAIL "
+                                    f"prezzo={price_now:.4f}")
         except Exception as e:
             log(f"[TRAIL] exc: {e}")
         time.sleep(TRAIL_SLEEP_SEC)
@@ -881,14 +956,15 @@ def sync_positions_from_wallet() -> None:
             breakeven_active = True
 
         set_position(symbol, {
-            "entry_price":      entry_price,
-            "sl_price":         sl_price,
-            "r_dist":           r_dist,
-            "orig_r_dist":      orig_r_dist,
-            "qty":              qty,
-            "entry_time":       time.time(),
-            "trailing_active":  trailing_active,
-            "breakeven_active": breakeven_active,
+            "entry_price":       entry_price,
+            "sl_price":          sl_price,
+            "r_dist":            r_dist,
+            "orig_r_dist":       orig_r_dist,
+            "qty":               qty,
+            "entry_time":        time.time(),
+            "trailing_active":   trailing_active,
+            "breakeven_active":  breakeven_active,
+            "partial_tp_active": False,
         })
         add_open(symbol)
         if set_sl_on_bybit:
@@ -1015,14 +1091,15 @@ def main_loop() -> None:
             # Salva stato e imposta SL
             sl_price = signal["sl_price"]
             set_position(sym, {
-                "entry_price":      entry_px,
-                "sl_price":         sl_price,
-                "r_dist":           r_dist,
-                "orig_r_dist":      r_dist,   # mai modificato: base per calcolo ratchet
-                "qty":              qty,
-                "entry_time":       time.time(),
-                "trailing_active":  False,
-                "breakeven_active": False,
+                "entry_price":       entry_px,
+                "sl_price":          sl_price,
+                "r_dist":            r_dist,
+                "orig_r_dist":       r_dist,   # mai modificato: base per calcolo ratchet
+                "qty":               qty,
+                "entry_time":        time.time(),
+                "trailing_active":   False,
+                "breakeven_active":  False,
+                "partial_tp_active": False,
             })
             add_open(sym)
             time.sleep(0.3)
@@ -1051,6 +1128,8 @@ if __name__ == "__main__":
         f"dist EMA <{MAX_DIST_EMA}%")
     log(f"  Risk      : {RISK_PCT*100:.1f}%/trade | MAX={MAX_OPEN_POSITIONS} pos | "
         f"Leva {DEFAULT_LEVERAGE}× | Trail={TRAIL_ATR_MULT}×ATR@{TRAIL_START_R}R")
+    log(f"  Exits     : BE@{BREAKEVEN_R}R → Partial TP 50%@{PARTIAL_TP_R}R → Trail@{TRAIL_START_R}R")
+    log(f"  Regime    : BTC daily EMA50 (slope+) + BTC weekly EMA200")
     log("=" * 62)
 
     equity0 = get_total_equity()
@@ -1059,6 +1138,8 @@ if __name__ == "__main__":
     notify_telegram(
         f"📈 PULLBACK BOT AVVIATO — Trend Following 4h\n"
         f"Segnale: EMA20(4h) pullback + daily uptrend\n"
+        f"Regime: BTC daily EMA50 (slope+) + BTC weekly EMA200\n"
+        f"Exit: BE@{BREAKEVEN_R}R → Partial 50%@{PARTIAL_TP_R}R → Trail@{TRAIL_START_R}R\n"
         f"Scan ogni {SCAN_INTERVAL_SEC//60}min | Leva {DEFAULT_LEVERAGE}× | "
         f"Risk {RISK_PCT*100:.1f}%\n"
         f"Equity: {equity0:.2f} USDT"
