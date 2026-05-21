@@ -827,6 +827,18 @@ def trailing_worker() -> None:
                             cur_qty   = float(entry.get("qty", 0))
                             close_qty = cur_qty * PARTIAL_TP_PCT
                             if close_qty > 0:
+                                # Controlla se qty è esprimibile con il qty_step del simbolo.
+                                # Se è troppo piccola (es. dopo restart con residuo già dimezzato),
+                                # segnala e skippa per evitare il loop infinito.
+                                instr     = get_instrument_info(symbol)
+                                qty_step  = float(instr.get("qty_step", 0.01))
+                                qty_check = _format_qty_with_step(close_qty, qty_step)
+                                if float(qty_check) <= 0:
+                                    entry["partial_tp_active"] = True
+                                    set_position(symbol, entry)
+                                    log(f"[PARTIAL-TP] {symbol} ⚠️ qty {close_qty:.6f} "
+                                        f"< step {qty_step} — partial già fatto, skip")
+                                    continue
                                 ok = market_close_partial(symbol, close_qty)
                                 if ok:
                                     entry["partial_tp_active"] = True
