@@ -1111,7 +1111,7 @@ if __name__ == "__main__":
         f"📈 PULLBACK BOT AVVIATO — Trend Following 4h\n"
         f"Segnale: EMA20(4h) pullback + daily uptrend\n"
         f"Regime: BTC daily EMA50 (slope+) + BTC weekly EMA200\n"
-        f"Exit: BE@{BREAKEVEN_R}R → Partial 50%@{PARTIAL_TP_R}R → Trail@{TRAIL_START_R}R\n"
+        f"Exit: Ratchet floor fissi ≥15%→+7% ... ≥150%→+120% | Partial 50%@{PARTIAL_TP_R}R\n"
         f"Scan ogni {SCAN_INTERVAL_SEC//60}min | Leva {DEFAULT_LEVERAGE}× | "
         f"Risk {RISK_PCT*100:.1f}%\n"
         f"Equity: {equity0:.2f} USDT"
