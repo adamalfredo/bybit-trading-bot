@@ -101,6 +101,14 @@ TRAIL_SLEEP_SEC    = 60
 SL_WATCH_SLEEP_SEC = 600    # 10 min
 LONG_IDX           = 1
 
+# Time stop: chiude i trade "coricati" che non vanno da nessuna parte
+TIME_STOP_DAYS    = 10     # giorni massimi in posizione senza slancio
+TIME_STOP_MIN_LEV = 10.0  # soglia: se P&L lev < 10% dopo N giorni → esci a breakeven
+
+# Time stop: chiude i trade "coricati" che non vanno da nessuna parte
+TIME_STOP_DAYS    = 10     # giorni massimi in posizione
+TIME_STOP_MIN_LEV = 10.0  # se dopo N giorni P&L lev < 10%, esce a breakeven
+
 EXCLUDE_SUBSTRINGS = ["USDC", "BUSD", "DAI", "TUSD", "FRAX",
                       "3LUSDT", "3SUSDT", "BULLUSDT", "BEARUSDT"]
 
@@ -776,6 +784,28 @@ def trailing_worker() -> None:
                         else:
                             log(f"[TRAIL] {symbol} ⚠️ ratchet FAIL "
                                 f"floor={floor_price:.4f} pnl={pnl_lev:+.1f}%")
+
+                # ── TIME STOP: trade coricato dopo N giorni ───────────────────
+                days_open = (time.time() - float(entry.get("entry_time", time.time()))) / 86400
+                if (days_open >= TIME_STOP_DAYS
+                        and pnl_lev < TIME_STOP_MIN_LEV
+                        and price_now >= entry_price * 0.999):
+                    cur_qty = float(entry.get("qty", 0))
+                    if cur_qty > 0:
+                        ok = market_close_partial(symbol, cur_qty)
+                        if ok:
+                            discard_open(symbol)
+                            log(f"[TIME-STOP] {symbol} ✅ chiuso dopo {days_open:.1f}gg "
+                                f"pnl={pnl_lev:+.1f}% prezzo={price_now:.4f}")
+                            notify_telegram(
+                                f"⏱️ Time Stop {symbol}\n"
+                                f"Trade aperto da {days_open:.0f} giorni senza slancio\n"
+                                f"P&L: {pnl_lev:+.1f}% lev | Chiuso a {price_now:.4f}\n"
+                                f"Capitale liberato per nuove opportunità"
+                            )
+                        else:
+                            log(f"[TIME-STOP] {symbol} ⚠️ FAIL chiusura dopo {days_open:.1f}gg")
+                    continue
 
                 # ── PARTIAL TP a 2R ───────────────────────────────────────────
                 if (entry.get("trailing_active")
