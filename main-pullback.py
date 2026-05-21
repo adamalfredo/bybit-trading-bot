@@ -54,13 +54,21 @@ MARGIN_USE_PCT     = 0.30
 ORDER_USDT_MAX     = float(os.getenv("ORDER_USDT_MAX", "1000"))
 
 SL_ATR_BUFFER    = 0.3   # buffer aggiuntivo sotto swing low (× ATR)
-TRAIL_ATR_MULT   = 2.0   # trailing = 2×ATR(4h) dal massimo
-TRAIL_START_R    = 1.0   # attiva trailing a 1.0R (stesso momento del breakeven — elimina zona morta)
-BREAKEVEN_R      = 1.0   # sposta SL a entry (breakeven) quando prezzo ≥ 1R
-TRAIL_MAX_RETRIES = 3   # tentativi max per attivare trailing prima di loggare errore
-TRAIL_RETRY_SLEEP = 5   # secondi tra un retry e l'altro del trailing
 PARTIAL_TP_R     = 2.0  # partial TP: chiude 50% posizione a +2R di guadagno
 PARTIAL_TP_PCT   = 0.50 # quota da chiudere al partial TP
+
+# Ratchet floor fissi: (roi_lev_trigger%, floor_lev_garantito%)
+# Quando il P&L leveraged supera il trigger, SL si sposta al floor garantito
+RATCHET_TABLE = [
+    ( 15,   7),
+    ( 25,  15),
+    ( 40,  25),
+    ( 60,  40),
+    ( 80,  60),
+    (100,  80),
+    (125, 100),
+    (150, 120),
+]
 ATR_WINDOW       = 14
 
 # Universo
@@ -706,12 +714,12 @@ def market_long(symbol: str, usdt_amount: float) -> Optional[float]:
 # ── TRAILING WORKER ───────────────────────────────────────────────────────────
 def trailing_worker() -> None:
     """
-    Ratchet a due livelli:
-      1) BREAKEVEN (1R)  — sposta SL a entry: profitto a rischio zero
-      2) TRAILING (1.5R) — attiva Bybit trailing stop 2×ATR dal massimo
-    Retry con backoff su fallimento API. Log esplicito su ogni errore.
+    Ratchet a floor fissi: sposta SL a livelli crescenti al crescere del P&L leveraged.
+    Il SL non scende mai — solo sale. Floor garantiti:
+      ≥15% lev → +7%  | ≥25% → +15% | ≥40% → +25% | ≥60% → +40%
+      ≥80% → +60%     | ≥100% → +80% | ≥125% → +100% | ≥150% → +120%
     """
-    log("[TRAIL] avviato — ratchet BREAKEVEN@1R + TRAIL@1.5R")
+    log("[TRAIL] avviato — ratchet floor fissi")
     while True:
         try:
             for symbol in list(open_positions):
@@ -719,113 +727,77 @@ def trailing_worker() -> None:
                 if not entry:
                     continue
 
-                price_now   = get_last_price(symbol)
+                price_now = get_last_price(symbol)
                 if not price_now:
                     continue
 
                 entry_price = float(entry.get("entry_price", 0))
-                # Usa orig_r_dist (mai modificato) per calcolare le soglie ratchet
-                orig_r_dist = float(entry.get("orig_r_dist") or entry.get("r_dist", 0))
-                if orig_r_dist <= 0:
+                if entry_price <= 0:
                     continue
 
-                # ── LIVELLO 1: BREAKEVEN a 1R ─────────────────────────────────
-                if (not entry.get("breakeven_active")
-                        and not entry.get("trailing_active")):
-                    be_trigger = entry_price + BREAKEVEN_R * orig_r_dist
-                    if price_now >= be_trigger:
-                        ok = set_position_stoploss_long(symbol, entry_price)
+                # P&L leveraged corrente (%)
+                pnl_lev = (price_now - entry_price) / entry_price * 100.0 * DEFAULT_LEVERAGE
+
+                # Trova il floor più alto applicabile dalla tabella
+                best_trigger_lev = None
+                best_floor_lev   = None
+                for trigger_lev, floor_lev in RATCHET_TABLE:
+                    if pnl_lev >= trigger_lev:
+                        best_trigger_lev = trigger_lev
+                        best_floor_lev   = floor_lev
+
+                if best_floor_lev is not None:
+                    floor_price = entry_price * (1.0 + best_floor_lev / 100.0 / DEFAULT_LEVERAGE)
+                    current_sl  = float(entry.get("sl_price", 0))
+
+                    # Aggiorna solo se il nuovo floor è significativamente più alto
+                    if floor_price > current_sl * 1.0005:
+                        ok = set_position_stoploss_long(symbol, floor_price)
                         if ok:
+                            entry["sl_price"]        = floor_price
                             entry["breakeven_active"] = True
-                            entry["sl_price"]         = entry_price
+                            entry["trailing_active"]  = True  # abilita partial TP
                             set_position(symbol, entry)
-                            log(f"[TRAIL] {symbol} ✅ BREAKEVEN: SL → {entry_price:.4f} "
-                                f"(prezzo={price_now:.4f}, trigger={be_trigger:.4f})")
+                            log(f"[TRAIL] {symbol} ✅ Ratchet: P&L={pnl_lev:+.1f}% "
+                                f"→ floor garantito +{best_floor_lev}% lev "
+                                f"SL={floor_price:.4f}")
                             notify_telegram(
-                                f"🔒 Breakeven {symbol}\n"
-                                f"Prezzo: {price_now:.4f} | SL → entry {entry_price:.4f}\n"
-                                f"Profitto ora protetto da perdite"
+                                f"🔒 Ratchet {symbol}\n"
+                                f"P&L: {pnl_lev:+.1f}% lev\n"
+                                f"Floor garantito: +{best_floor_lev}% lev\n"
+                                f"SL → {floor_price:.4f}"
                             )
                         else:
-                            log(f"[TRAIL] {symbol} ⚠️ BREAKEVEN FAIL "
-                                f"prezzo={price_now:.4f} trigger={be_trigger:.4f}")
+                            log(f"[TRAIL] {symbol} ⚠️ ratchet FAIL "
+                                f"floor={floor_price:.4f} pnl={pnl_lev:+.1f}%")
 
-                # ── LIVELLO 2: TRAILING a 1.5R ────────────────────────────────
-                if not entry.get("trailing_active"):
-                    trail_trigger = entry_price + TRAIL_START_R * orig_r_dist
-                    if price_now >= trail_trigger:
-                        # Ricalcola ATR su 4h fresco
-                        df      = fetch_klines(symbol, interval="240", limit=20)
-                        atr_val = orig_r_dist  # fallback = orig_r_dist (non zero)
-                        if df is not None and len(df) > ATR_WINDOW + 2:
-                            try:
-                                atr_val = float(
-                                    AverageTrueRange(
-                                        high=df["High"], low=df["Low"],
-                                        close=df["Close"], window=ATR_WINDOW,
-                                    ).average_true_range().iloc[-1]
-                                )
-                            except Exception:
-                                pass
-                        trail_dist = atr_val * TRAIL_ATR_MULT
-
-                        # Retry con backoff
-                        activated = False
-                        for attempt in range(1, TRAIL_MAX_RETRIES + 1):
-                            if place_trailing_stop_long(symbol, trail_dist):
-                                activated = True
-                                break
-                            log(f"[TRAIL] {symbol} tentativo {attempt}/{TRAIL_MAX_RETRIES} "
-                                f"fallito (dist={trail_dist:.6f})")
-                            if attempt < TRAIL_MAX_RETRIES:
-                                time.sleep(TRAIL_RETRY_SLEEP)
-
-                        if activated:
-                            entry["trailing_active"] = True
-                            entry["breakeven_active"] = True  # trailing implica breakeven
-                            set_position(symbol, entry)
-                            log(f"[TRAIL] {symbol} ✅ TRAILING attivato "
-                                f"dist={trail_dist:.6f} prezzo={price_now:.4f}")
-                            notify_telegram(
-                                f"🎯 Trail attivato {symbol}\n"
-                                f"Prezzo: {price_now:.4f} | "
-                                f"Trail dist: {trail_dist:.6f} ({TRAIL_ATR_MULT}×ATR)"
-                            )
-                        else:
-                            log(f"[TRAIL] {symbol} 🔴 TRAILING NON ATTIVATO dopo "
-                                f"{TRAIL_MAX_RETRIES} tentativi! "
-                                f"prezzo={price_now:.4f} trigger={trail_trigger:.4f}")
-                            notify_telegram(
-                                f"⚠️ TRAIL FALLITO {symbol}\n"
-                                f"Prezzo {price_now:.4f} > trigger {trail_trigger:.4f}\n"
-                                f"Riprovo al prossimo ciclo ({TRAIL_SLEEP_SEC}s)"
-                            )
-
-                # ── LIVELLO 3: PARTIAL TP a 2R ────────────────────────────────
+                # ── PARTIAL TP a 2R ───────────────────────────────────────────
                 if (entry.get("trailing_active")
                         and not entry.get("partial_tp_active")):
-                    partial_trigger = entry_price + PARTIAL_TP_R * orig_r_dist
-                    if price_now >= partial_trigger:
-                        cur_qty   = float(entry.get("qty", 0))
-                        close_qty = cur_qty * PARTIAL_TP_PCT
-                        if close_qty > 0:
-                            ok = market_close_partial(symbol, close_qty)
-                            if ok:
-                                entry["partial_tp_active"] = True
-                                entry["qty"] = cur_qty * (1.0 - PARTIAL_TP_PCT)
-                                set_position(symbol, entry)
-                                log(f"[PARTIAL-TP] {symbol} ✅ 50% chiuso a "
-                                    f"+{PARTIAL_TP_R:.1f}R prezzo={price_now:.4f} "
-                                    f"qty={close_qty:.4f}")
-                                notify_telegram(
-                                    f"💰 Partial TP {symbol}\n"
-                                    f"50% chiuso a +{PARTIAL_TP_R:.1f}R | "
-                                    f"Prezzo: {price_now:.4f}\n"
-                                    f"Resto in trailing — profitto protetto"
-                                )
-                            else:
-                                log(f"[PARTIAL-TP] {symbol} ⚠️ FAIL "
-                                    f"prezzo={price_now:.4f}")
+                    orig_r_dist = float(entry.get("orig_r_dist") or entry.get("r_dist", 0))
+                    if orig_r_dist > 0:
+                        partial_trigger = entry_price + PARTIAL_TP_R * orig_r_dist
+                        if price_now >= partial_trigger:
+                            cur_qty   = float(entry.get("qty", 0))
+                            close_qty = cur_qty * PARTIAL_TP_PCT
+                            if close_qty > 0:
+                                ok = market_close_partial(symbol, close_qty)
+                                if ok:
+                                    entry["partial_tp_active"] = True
+                                    entry["qty"] = cur_qty * (1.0 - PARTIAL_TP_PCT)
+                                    set_position(symbol, entry)
+                                    log(f"[PARTIAL-TP] {symbol} ✅ 50% chiuso a "
+                                        f"+{PARTIAL_TP_R:.1f}R prezzo={price_now:.4f} "
+                                        f"qty={close_qty:.4f}")
+                                    notify_telegram(
+                                        f"💰 Partial TP {symbol}\n"
+                                        f"50% chiuso a +{PARTIAL_TP_R:.1f}R | "
+                                        f"Prezzo: {price_now:.4f}\n"
+                                        f"Resto protetto dal ratchet"
+                                    )
+                                else:
+                                    log(f"[PARTIAL-TP] {symbol} ⚠️ FAIL "
+                                        f"prezzo={price_now:.4f}")
         except Exception as e:
             log(f"[TRAIL] exc: {e}")
         time.sleep(TRAIL_SLEEP_SEC)
@@ -1127,8 +1099,8 @@ if __name__ == "__main__":
     log(f"  Filtri    : EMA50 daily | EMA20(4h) touch | RSI {RSI_MIN_4H}-{RSI_MAX_4H} | "
         f"dist EMA <{MAX_DIST_EMA}%")
     log(f"  Risk      : {RISK_PCT*100:.1f}%/trade | MAX={MAX_OPEN_POSITIONS} pos | "
-        f"Leva {DEFAULT_LEVERAGE}× | Trail={TRAIL_ATR_MULT}×ATR@{TRAIL_START_R}R")
-    log(f"  Exits     : BE@{BREAKEVEN_R}R → Partial TP 50%@{PARTIAL_TP_R}R → Trail@{TRAIL_START_R}R")
+        f"Leva {DEFAULT_LEVERAGE}× | Ratchet floor fissi")
+    log(f"  Exits     : Ratchet(≥15%→+7% ... ≥150%→+120%) + Partial TP 50%@{PARTIAL_TP_R}R")
     log(f"  Regime    : BTC daily EMA50 (slope+) + BTC weekly EMA200")
     log("=" * 62)
 
