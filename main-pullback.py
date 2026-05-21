@@ -105,6 +105,10 @@ LONG_IDX           = 1
 TIME_STOP_DAYS    = 10     # giorni massimi in posizione senza slancio
 TIME_STOP_MIN_LEV = 10.0  # soglia: se P&L lev < 10% dopo N giorni → esci a breakeven
 
+# Circuit breaker: daily loss limit
+CIRCUIT_BREAKER_PCT       = 3.0   # drawdown % giornaliero max prima di bloccare tutto
+CIRCUIT_BREAKER_COOLDOWN_H = 24   # ore di blocco dopo attivazione
+
 # Time stop: chiude i trade "coricati" che non vanno da nessuna parte
 TIME_STOP_DAYS    = 10     # giorni massimi in posizione
 TIME_STOP_MIN_LEV = 10.0  # se dopo N giorni P&L lev < 10%, esce a breakeven
@@ -123,6 +127,12 @@ _price_lock             = threading.RLock()
 _last_log_times:  dict  = {}
 _btc_ok:          bool  = True
 _btc_ts:          float = 0.0
+
+# Circuit breaker state
+_cb_equity_day_start: float = 0.0
+_cb_last_day:         str   = ""
+_cb_triggered:        bool  = False
+_cb_triggered_at:     float = 0.0
 
 # ── HTTP SESSION ──────────────────────────────────────────────────────────────
 SESSION = requests.Session()
@@ -989,6 +999,78 @@ def sync_positions_from_wallet() -> None:
     log(f"[SYNC] {trovate} posizioni recuperate")
 
 
+# ── CIRCUIT BREAKER ───────────────────────────────────────────────────────────
+def check_circuit_breaker() -> bool:
+    """
+    Controlla daily loss limit. Se equity scende > CIRCUIT_BREAKER_PCT%
+    dal valore di inizio giornata: chiude tutto e blocca per 24h.
+    Returns True se il trading è bloccato.
+    """
+    global _cb_equity_day_start, _cb_last_day, _cb_triggered, _cb_triggered_at
+
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Reset giornaliero a mezzanotte UTC
+    if today != _cb_last_day:
+        _cb_last_day          = today
+        _cb_equity_day_start  = get_total_equity()
+        _cb_triggered         = False
+        _cb_triggered_at      = 0.0
+        log(f"[CB] Reset giornaliero — equity start: {_cb_equity_day_start:.2f} USDT")
+        return False
+
+    # Cooldown scaduto → riattiva trading
+    if _cb_triggered:
+        elapsed_h = (time.time() - _cb_triggered_at) / 3600
+        if elapsed_h >= CIRCUIT_BREAKER_COOLDOWN_H:
+            _cb_triggered        = False
+            _cb_equity_day_start = get_total_equity()
+            log("[CB] Cooldown scaduto — circuit breaker resettato, trading riattivato")
+            notify_telegram("✅ Circuit breaker resettato — trading riattivato")
+        return _cb_triggered
+
+    if _cb_equity_day_start <= 0:
+        _cb_equity_day_start = get_total_equity()
+        return False
+
+    current_equity = get_total_equity()
+    if current_equity <= 0:
+        return False
+
+    drawdown_pct = (_cb_equity_day_start - current_equity) / _cb_equity_day_start * 100
+
+    if drawdown_pct >= CIRCUIT_BREAKER_PCT:
+        _cb_triggered    = True
+        _cb_triggered_at = time.time()
+        log(f"[CB] 🔴 CIRCUIT BREAKER — drawdown={drawdown_pct:.2f}% "
+            f"({_cb_equity_day_start:.2f} → {current_equity:.2f} USDT)")
+
+        # Chiudi tutte le posizioni aperte
+        closed = []
+        for symbol in list(open_positions):
+            pos = get_position(symbol)
+            if pos:
+                qty = float(pos.get("qty", 0))
+                if qty > 0 and market_close_partial(symbol, qty):
+                    discard_open(symbol)
+                    closed.append(symbol)
+                    log(f"[CB] {symbol} chiusa")
+                else:
+                    log(f"[CB] {symbol} ⚠️ FAIL chiusura — verifica manuale!")
+
+        notify_telegram(
+            f"🚨 CIRCUIT BREAKER ATTIVATO\n"
+            f"Drawdown giornaliero: -{drawdown_pct:.1f}%\n"
+            f"Equity: {_cb_equity_day_start:.2f} → {current_equity:.2f} USDT\n"
+            f"Chiuse: {', '.join(closed) if closed else 'nessuna'}\n"
+            f"Trading bloccato per {CIRCUIT_BREAKER_COOLDOWN_H}h"
+        )
+        return True
+
+    return False
+
+
 # ── CICLO PRINCIPALE ──────────────────────────────────────────────────────────
 def main_loop() -> None:
     last_scan_ts = 0.0
@@ -1035,6 +1117,11 @@ def main_loop() -> None:
         last_scan_ts = now
         n_open = len(open_positions)
         log(f"[SCAN] ─── Avvio scansione ─── open: {n_open}/{MAX_OPEN_POSITIONS}")
+
+        # Circuit breaker: blocca scan se daily loss limit superato
+        if check_circuit_breaker():
+            tlog("circuit_breaker", "🚨 Circuit breaker attivo — scan bloccata", 1800)
+            continue
 
         if not _btc_ok:
             log("[SCAN] BTC sotto EMA50 daily — bear market, scan sospesa")

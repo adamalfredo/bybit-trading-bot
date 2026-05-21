@@ -86,14 +86,23 @@ fai un controllo su bybit e sui log di short e long su railway e fammi un report
 ### tabella trailing SL/TP (ratchet) 
 
 ROI raggiunto	Floor garantito
-≥15%	        +7%
-≥25%	        +15%
-≥40%	        +25%
-≥60%	        +40%
-≥80%	        +60%
-≥100%	        +80%
-≥125%	        +100%
-≥150%	        +120%
+
+P&L lev	  Floor garantito	  Gap
+≥15%	    +7%	              8%
+≥25%	    +15%	            10%
+≥40%	    +25%	            15%
+≥60%	    +40%	            20%
+≥80%	    +60%	            20%
+≥100%	    +80%	            20%
+≥125%	    +100%	            25%
+≥150%	    +120%	            30%
+≥175%	    +148%	            27%
+≥200%	    +173%	            27%
+≥250%	    +223%	            27%
+≥300%	    +273%	            27%
+≥400%	    +370%	            30%
+≥500%	    +465%	            35%
+
 
 ### tabella EMA
 
