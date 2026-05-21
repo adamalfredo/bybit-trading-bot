@@ -55,7 +55,7 @@ ORDER_USDT_MAX     = float(os.getenv("ORDER_USDT_MAX", "1000"))
 
 SL_ATR_BUFFER    = 0.3   # buffer aggiuntivo sotto swing low (× ATR)
 TRAIL_ATR_MULT   = 2.0   # trailing = 2×ATR(4h) dal massimo
-TRAIL_START_R    = 1.5   # attiva trailing a 1.5R di guadagno
+TRAIL_START_R    = 1.0   # attiva trailing a 1.0R (stesso momento del breakeven — elimina zona morta)
 BREAKEVEN_R      = 1.0   # sposta SL a entry (breakeven) quando prezzo ≥ 1R
 TRAIL_MAX_RETRIES = 3   # tentativi max per attivare trailing prima di loggare errore
 TRAIL_RETRY_SLEEP = 5   # secondi tra un retry e l'altro del trailing
