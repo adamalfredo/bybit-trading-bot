@@ -571,6 +571,17 @@ def check_entry_signal(symbol: str) -> Optional[dict]:
     if sl_pct > MAX_SL_PCT or r_dist <= 0:
         return None
 
+    # ── DIAG: slope EMA20(4h) — non filtra ancora, solo logging ──────────────
+    # slope = variazione % EMA20 tra candela corrente e 3 barre fa
+    # slope > 0 = EMA20 in salita (pullback sano)
+    # slope ≤ 0 = EMA20 piatta/in calo (potenziale breakdown, da filtrare)
+    ema20_3ago   = float(ema20.iloc[-5])   # 3 barre chiuse fa
+    slope_pct    = (last_ema20 - ema20_3ago) / ema20_3ago * 100 if ema20_3ago > 0 else 0.0
+    slope_ok     = slope_pct > 0
+    log(f"[DIAG-SLOPE] {symbol}: EMA20_slope={slope_pct:+.3f}% "
+        f"({'OK salita' if slope_ok else 'WARN piatta/discesa'}) | "
+        f"RSI={last_rsi:.1f} dist_ema={dist_pct:.2f}% sl_pct={sl_pct:.2f}%")
+
     return {
         "entry_price": last_close,
         "sl_price":    sl_price,
@@ -580,6 +591,7 @@ def check_entry_signal(symbol: str) -> Optional[dict]:
         "ema20_4h":    last_ema20,
         "dist_ema":    dist_pct,
         "sl_pct":      sl_pct,
+        "ema20_slope": slope_pct,
     }
 
 
