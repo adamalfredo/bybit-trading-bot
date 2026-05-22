@@ -33,6 +33,33 @@
 
 ## 🧠 4. Qualità dei segnali
 
+### 🔴 Da valutare dopo ~20 trade (discusso 22/05/2026)
+
+> Logging diagnostico `[DIAG-SLOPE]` già attivo in produzione — raccoglie i dati necessari per decidere.
+
+- **[PRIORITÀ 1 — difetto strutturale] Slope EMA20(4h) positiva**
+  Attualmente il bot verifica che il prezzo sia sopra EMA20, ma non che EMA20 stia salendo.
+  Se EMA20 è piatta o in calo, si compra in un trend che si sta indebolendo (pattern pre-breakdown).
+  Fix: aggiungere `ema20[-2] > ema20[-5]` come condizione obbligatoria.
+  Verifica: guardare i log `[DIAG-SLOPE]` — se le perdite coincidono sempre con `WARN piatta/discesa`, implementare.
+
+- **[PRIORITÀ 2] Struttura pre-pullback: 2+ candele sopra EMA20 prima del ritocco**
+  Se una coin oscilla attorno a EMA20 da 5-10 barre, qualsiasi candela verde qualifica come segnale.
+  Un pullback vero presuppone che le ultime 2-3 candele chiuse fossero *chiaramente sopra* EMA20.
+  Fix: `min(close[-3], close[-4], close[-5]) > ema20[-3]` come controllo aggiuntivo.
+
+- **[PRIORITÀ 3] RSI minimo: riportare a 35-38 (era 30)**
+  Il parametro attuale è `RSI_MIN_4H = 30`. RSI 30 = oversold, possibile coltello che cade.
+  La strategia è pensata per pullback sani (RSI 38-45 = zona ideale).
+  Fix: `RSI_MIN_4H = 38`. Verificare prima sui dati quante entry sarebbero state escluse.
+
+- **[PRIORITÀ 4] Profondità del pullback (EMA_TOUCH_TOL)**
+  `EMA_TOUCH_TOL = 0.012` permette al low di essere 1.2% *sopra* EMA20 e qualificare.
+  Il pullback ideale tocca o sfora EMA20 verso il basso. Abbassare la tolleranza a 0.005 (0.5%).
+  Attenzione: filtro molto restrittivo, potrebbe ridurre frequenza segnali significativamente.
+
+### Esistenti
+
 - **Filtro eventi macro**: bloccare nuovi ingressi nelle 2h prima/dopo FOMC, CPI e simili — attualmente nessun filtro calendario.
 - **Divergenza RSI/prezzo**: segnale aggiuntivo (prezzo fa nuovo massimo ma RSI no → debolezza potenziale).
 - **Volume profile su 3 candele**: verificare che il volume sia in espansione sulle ultime 3 candele, non solo l'ultima.
