@@ -1034,6 +1034,18 @@ def sync_positions_from_wallet() -> None:
         if trailing_active:
             breakeven_active = True
 
+        # Determina se il partial TP è già stato eseguito in precedenti run.
+        # Se il trailing è attivo e il prezzo corrente è già sopra la soglia 2R,
+        # il partial è quasi certamente avvenuto — evita un secondo fire al restart.
+        price_now_sync   = get_last_price(symbol) or 0.0
+        partial_trigger  = entry_price + PARTIAL_TP_R * orig_r_dist
+        partial_tp_done  = (trailing_active
+                            and price_now_sync > 0
+                            and price_now_sync >= partial_trigger)
+        if partial_tp_done:
+            log(f"[SYNC] {symbol}: prezzo {price_now_sync:.4f} >= trigger {partial_trigger:.4f} "
+                f"— partial TP già eseguito, skip al restart")
+
         set_position(symbol, {
             "entry_price":       entry_price,
             "sl_price":          sl_price,
@@ -1043,7 +1055,7 @@ def sync_positions_from_wallet() -> None:
             "entry_time":        time.time(),
             "trailing_active":   trailing_active,
             "breakeven_active":  breakeven_active,
-            "partial_tp_active": False,
+            "partial_tp_active": partial_tp_done,
         })
         add_open(symbol)
         if set_sl_on_bybit:
