@@ -54,6 +54,7 @@ MARGIN_USE_PCT     = 0.30
 ORDER_USDT_MAX     = float(os.getenv("ORDER_USDT_MAX", "1000"))
 
 SL_ATR_BUFFER    = 0.3   # buffer aggiuntivo sotto swing low (× ATR)
+TRAIL_ATR_MULT   = 2.0   # moltiplicatore ATR per il trailing stop dal massimo
 PARTIAL_TP_R     = 2.0  # partial TP: chiude 50% posizione a +2R di guadagno
 PARTIAL_TP_PCT   = 0.50 # quota da chiudere al partial TP
 
@@ -621,6 +622,21 @@ def place_trailing_stop_long(symbol: str, trailing_dist: float) -> bool:
         return False
 
 
+def get_atr_4h(symbol: str) -> Optional[float]:
+    """ATR(14) sull'ultima candela 4h chiusa."""
+    df = fetch_klines(symbol, interval="240", limit=30)
+    if df is None or len(df) < ATR_WINDOW + 2:
+        return None
+    try:
+        atr_s = AverageTrueRange(
+            high=df["High"], low=df["Low"], close=df["Close"],
+            window=ATR_WINDOW).average_true_range()
+        val = float(atr_s.iloc[-2])
+        return val if not pd.isna(val) and val > 0 else None
+    except Exception:
+        return None
+
+
 def market_close_partial(symbol: str, qty: float) -> bool:
     """Chiude parzialmente la posizione long (reduce-only, market order)."""
     info     = get_instrument_info(symbol)
@@ -738,12 +754,12 @@ def market_long(symbol: str, usdt_amount: float) -> Optional[float]:
 # ── TRAILING WORKER ───────────────────────────────────────────────────────────
 def trailing_worker() -> None:
     """
-    Ratchet a floor fissi: sposta SL a livelli crescenti al crescere del P&L leveraged.
-    Il SL non scende mai — solo sale. Floor garantiti:
-      ≥15% lev → +7%  | ≥25% → +15% | ≥40% → +25% | ≥60% → +40%
-      ≥80% → +60%     | ≥100% → +80% | ≥125% → +100% | ≥150% → +120%
+    SL management: ratchet floor fissi + ATR trail dal massimo.
+    Il SL non scende mai — solo sale. Usa il migliore tra:
+      1. Ratchet floor garantito (tabella fissa)
+      2. ATR trail: high_water - 2×ATR(4h), attivo appena il ratchet scatta ≥15% lev
     """
-    log("[TRAIL] avviato — ratchet floor fissi")
+    log("[TRAIL] avviato — ratchet + ATR trail")
     while True:
         try:
             for symbol in list(open_positions):
@@ -762,7 +778,11 @@ def trailing_worker() -> None:
                 # P&L leveraged corrente (%)
                 pnl_lev = (price_now - entry_price) / entry_price * 100.0 * DEFAULT_LEVERAGE
 
-                # Trova il floor più alto applicabile dalla tabella
+                # ── High water mark (massimo visto dalla prima attivazione) ──
+                high_water = max(price_now, float(entry.get("high_water", price_now)))
+                entry["high_water"] = high_water
+
+                # ── Ratchet: trova il floor più alto applicabile ──────────
                 best_trigger_lev = None
                 best_floor_lev   = None
                 for trigger_lev, floor_lev in RATCHET_TABLE:
@@ -770,30 +790,59 @@ def trailing_worker() -> None:
                         best_trigger_lev = trigger_lev
                         best_floor_lev   = floor_lev
 
-                if best_floor_lev is not None:
-                    floor_price = entry_price * (1.0 + best_floor_lev / 100.0 / DEFAULT_LEVERAGE)
-                    current_sl  = float(entry.get("sl_price", 0))
+                floor_price = (
+                    entry_price * (1.0 + best_floor_lev / 100.0 / DEFAULT_LEVERAGE)
+                    if best_floor_lev is not None else 0.0
+                )
 
-                    # Aggiorna solo se il nuovo floor è significativamente più alto
-                    if floor_price > current_sl * 1.0005:
-                        ok = set_position_stoploss_long(symbol, floor_price)
-                        if ok:
-                            entry["sl_price"]        = floor_price
-                            entry["breakeven_active"] = True
-                            entry["trailing_active"]  = True  # abilita partial TP
-                            set_position(symbol, entry)
+                # ── ATR trail dal massimo (solo quando ratchet già scattato) ──
+                trail_price = 0.0
+                atr_4h_val  = 0.0
+                if entry.get("trailing_active"):
+                    atr_4h = get_atr_4h(symbol)
+                    if atr_4h and atr_4h > 0:
+                        atr_4h_val  = atr_4h
+                        trail_price = high_water - TRAIL_ATR_MULT * atr_4h
+
+                # ── Candidato migliore: max tra ratchet e ATR trail ────────
+                new_sl_cand = max(floor_price, trail_price)
+                current_sl  = float(entry.get("sl_price", 0))
+
+                if new_sl_cand > current_sl * 1.0005:
+                    ok = set_position_stoploss_long(symbol, new_sl_cand)
+                    if ok:
+                        entry["sl_price"]         = new_sl_cand
+                        entry["breakeven_active"]  = True
+                        if best_floor_lev is not None:
+                            entry["trailing_active"] = True  # abilita partial TP
+                        set_position(symbol, entry)
+
+                        if trail_price > floor_price:
+                            # ATR trail più stretto del ratchet
+                            log(f"[TRAIL] {symbol} ✅ ATR trail: "
+                                f"hwm={high_water:.4f} atr={atr_4h_val:.4f} "
+                                f"SL→{new_sl_cand:.4f} P&L={pnl_lev:+.1f}%")
+                            notify_telegram(
+                                f"🎯 Trail attivato {symbol}\n"
+                                f"Prezzo: {price_now:.4f} | High: {high_water:.4f}\n"
+                                f"Trail dist: {TRAIL_ATR_MULT * atr_4h_val:.6f} "
+                                f"({TRAIL_ATR_MULT:.1f}×ATR)\n"
+                                f"SL → {new_sl_cand:.4f}"
+                            )
+                        else:
+                            # Ratchet floor più alto
                             log(f"[TRAIL] {symbol} ✅ Ratchet: P&L={pnl_lev:+.1f}% "
-                                f"→ floor garantito +{best_floor_lev}% lev "
-                                f"SL={floor_price:.4f}")
+                                f"→ floor +{best_floor_lev}% lev "
+                                f"SL→{new_sl_cand:.4f}")
                             notify_telegram(
                                 f"🔒 Ratchet {symbol}\n"
                                 f"P&L: {pnl_lev:+.1f}% lev\n"
                                 f"Floor garantito: +{best_floor_lev}% lev\n"
-                                f"SL → {floor_price:.4f}"
+                                f"SL → {new_sl_cand:.4f}"
                             )
-                        else:
-                            log(f"[TRAIL] {symbol} ⚠️ ratchet FAIL "
-                                f"floor={floor_price:.4f} pnl={pnl_lev:+.1f}%")
+                    else:
+                        log(f"[TRAIL] {symbol} ⚠️ SL update FAIL "
+                            f"cand={new_sl_cand:.4f} pnl={pnl_lev:+.1f}%")
 
                 # ── TIME STOP: trade coricato dopo N giorni ───────────────────
                 days_open = (time.time() - float(entry.get("entry_time", time.time()))) / 86400
