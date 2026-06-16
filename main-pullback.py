@@ -92,9 +92,9 @@ MIN_BODY_PCT   = 40.0   # corpo candela 4h >= 40% del range: calibrato su backte
 MIN_VOL_RATIO  = 1.5    # volume candela segnale >= 1.5x media20: parametro piu impattante (PF 1.116 vs 0.898)
 MAX_DIST_EMA50_D = 20.0 # daily close max 20% sopra EMA50: evita trend overestesi
 
-# BTC filter
-BTC_BULL_CHECK          = True  # blocca se BTC sotto EMA50 daily (slope positiva)
-BTC_WEEKLY_EMA200_CHECK = True  # regime strutturale: blocca se BTC weekly < EMA200 weekly
+# BTC filter — bull market = BTC daily close > EMA200 daily (niente slope, niente weekly)
+BTC_BULL_CHECK          = True  # blocca nuovi trade se BTC sotto EMA200 daily
+BTC_WEEKLY_EMA200_CHECK = False # disabilitato: ridondante con EMA200 daily
 
 # Timing
 SCAN_INTERVAL_SEC  = 1800   # 30 min tra scan
@@ -372,10 +372,11 @@ def get_open_long_qty(symbol: str) -> float:
 # ── BTC FILTER ────────────────────────────────────────────────────────────────
 def _update_btc_filter() -> None:
     """
-    Doppio filtro regime:
-      1) BTC daily close > EMA50 daily con slope positiva (trend medio periodo)
-      2) BTC weekly close > EMA200 weekly (regime strutturale, anti-bear)
-    Entrambi devono essere OK per aprire nuovi trade.
+    Filtro regime semplificato:
+      BTC daily close (ultima candela chiusa) > EMA200 daily.
+      EMA200 rappresenta il trend strutturale di lungo periodo.
+      Nessun check di slope: la slope EMA200 è quasi sempre positiva in bull,
+      negativa in bear — non serve calcolarla esplicitamente.
     """
     global _btc_ok, _btc_ts
     if time.time() - _btc_ts < 3600:
@@ -385,34 +386,20 @@ def _update_btc_filter() -> None:
         _btc_ts = time.time()
         return
     try:
-        daily_ok  = False
-        weekly_ok = True  # default True se dati insufficienti
-
-        # ── Check 1: BTC daily EMA50 (trend medio + slope) ──────────────────
-        df_d = fetch_klines("BTCUSDT", interval="D", limit=60)
-        if df_d is not None and len(df_d) >= 52:
-            close_d   = df_d["Close"]
-            ema50_d   = close_d.ewm(span=50, adjust=False).mean()
-            btc_d     = float(close_d.iloc[-2])
-            ema50_now = float(ema50_d.iloc[-2])
-            ema50_5d  = float(ema50_d.iloc[-7])
-            daily_ok  = btc_d >= ema50_now and ema50_now >= ema50_5d
-
-        # ── Check 2: BTC weekly EMA200 (regime strutturale) ──────────────────
-        if BTC_WEEKLY_EMA200_CHECK:
-            df_w = fetch_klines("BTCUSDT", interval="W", limit=220)
-            if df_w is not None and len(df_w) >= 50:
-                close_w    = df_w["Close"]
-                ema200_w   = close_w.ewm(span=200, adjust=False).mean()
-                btc_w      = float(close_w.iloc[-2])
-                ema200_now = float(ema200_w.iloc[-2])
-                weekly_ok  = btc_w >= ema200_now
-
-        _btc_ok = daily_ok and weekly_ok
-        tlog("btc_filter",
-             f"[BTC] Daily EMA50={'OK' if daily_ok else 'FAIL'} | "
-             f"Weekly EMA200={'OK' if weekly_ok else 'FAIL'} | "
-             f"gate={'OK ✅' if _btc_ok else 'CHIUSO 🚫 (bear)'}", 3600)
+        df_d = fetch_klines("BTCUSDT", interval="D", limit=210)
+        if df_d is not None and len(df_d) >= 201:
+            close_d    = df_d["Close"]
+            ema200_d   = close_d.ewm(span=200, adjust=False).mean()
+            btc_d      = float(close_d.iloc[-2])   # ultima candela CHIUSA
+            ema200_now = float(ema200_d.iloc[-2])
+            _btc_ok    = btc_d >= ema200_now
+            gap_pct    = (btc_d - ema200_now) / ema200_now * 100
+            tlog("btc_filter",
+                 f"[BTC] EMA200d={ema200_now:,.0f} | BTC={btc_d:,.0f} "
+                 f"({gap_pct:+.1f}%) | "
+                 f"gate={'OK ✅' if _btc_ok else 'CHIUSO 🚫 (sotto EMA200d)'}", 3600)
+        else:
+            _btc_ok = True  # dati insufficienti: non bloccare
     except Exception:
         pass
     _btc_ts = time.time()
