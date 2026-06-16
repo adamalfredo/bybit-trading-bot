@@ -92,9 +92,11 @@ MIN_BODY_PCT   = 40.0   # corpo candela 4h >= 40% del range: calibrato su backte
 MIN_VOL_RATIO  = 1.5    # volume candela segnale >= 1.5x media20: parametro piu impattante (PF 1.116 vs 0.898)
 MAX_DIST_EMA50_D = 20.0 # daily close max 20% sopra EMA50: evita trend overestesi
 
-# BTC filter — bull market = BTC daily close > EMA200 daily (niente slope, niente weekly)
-BTC_BULL_CHECK          = True  # blocca nuovi trade se BTC sotto EMA200 daily
-BTC_WEEKLY_EMA200_CHECK = False # disabilitato: ridondante con EMA200 daily
+# BTC filter — disabilitato: qualsiasi EMA a lungo periodo su BTC è sopra 65k
+# per mesi dopo il picco a 100k. Il filtro individuale daily EMA50 per ogni coin
+# è già sufficiente come protezione.
+BTC_BULL_CHECK          = False  # disabilitato
+BTC_WEEKLY_EMA200_CHECK = False  # disabilitato
 
 # Timing
 SCAN_INTERVAL_SEC  = 1800   # 30 min tra scan
@@ -1196,8 +1198,8 @@ def main_loop() -> None:
             continue
 
         if not _btc_ok:
-            log("[SCAN] BTC sotto EMA50 daily — bear market, scan sospesa")
-            tlog("btc_bear", "⚠️ BTC in bear market (sotto EMA50 daily), scan sospesa", 3600)
+            log("[SCAN] BTC filter attivo — scan sospesa")
+            tlog("btc_bear", "⚠️ BTC filter: scan sospesa", 3600)
             continue
 
         if n_open >= MAX_OPEN_POSITIONS:
