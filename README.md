@@ -1,114 +1,107 @@
-# Bot di trading Bybit
+# Bybit Trading Bot - EMA20 Pullback
 
-## ✅ Come usarlo con Railway
+Sistema dual-bot per trading di futures Bybit in modalita hedge:
+- **Bot LONG** (main-pullback.py): EMA20(4h) pullback su coin in uptrend daily
+- **Bot SHORT** (main-short-pullback.py): EMA20(4h) bounce rejection su coin in downtrend daily
 
-1. Vai su https://railway.app
-2. Crea un nuovo progetto e carica questo repository
-3. Rinomina `.env.example` in `.env` ed inserisci le tue credenziali (puoi impostare `BYBIT_TESTNET=true` per usare la testnet). Se utilizzi l'account unificato non cambiare `BYBIT_ACCOUNT_TYPE` (di default `UNIFIED`)
-4. Imposta `pip install -r requirements.txt` come comando di build e `python main.py` come comando di start
+I due bot operano in parallelo su Railway come servizi indipendenti con regime gate automatico basato su BTC.
 
-## ⚠️ Attenzione
-- Il bot è attivo 24/7
-- Usa almeno 50 USDT per ogni acquisto spot (variabile `ORDER_USDT` ma con
-  soglia minima a 50). Il bot recupera i limiti di Bybit e, se necessari,
-  aumenta automaticamente l'importo per rispettarli. Se il recupero fallisce usa
-  un endpoint alternativo. In uscita il bot vende l'intero saldo della moneta.
-- Il recupero del saldo spot è stato reso più robusto e viene segnalato nel log
-  se la coin richiesta non è presente nella risposta dell'API di Bybit
-- La quantità viene adeguata allo `qtyStep` di Bybit e arrotondata verso l'alto
-  così che il valore rispetti sempre i minimi imposti dall'exchange
-- Prima di ogni acquisto viene controllato il saldo USDT disponibile
-- Riceverai notifiche su Telegram, compreso l'esito degli ordini eseguiti
-- Se non usi l'account unificato imposta `BYBIT_ACCOUNT_TYPE=SPOT` nel file `.env`
-- All'avvio il bot invia un messaggio di prova su Telegram, verifica la
-  connessione a Bybit ed esegue un acquisto iniziale di BTC utilizzando
-  l'importo `ORDER_USDT`
-- In questa versione il bot può inviare ordini automatici su Bybit se imposti le chiavi API
-- Se i dati non contengono la colonna "Close" viene indicata nel log la lista delle colonne trovate
-- Se il download dei dati fallisce per problemi di rete, il bot effettua alcuni tentativi automatici
+---
 
-## 🔄 Aggiornamento
-Il bot ora supporta l'invio di ordini automatici su Bybit utilizzando le chiavi API presenti nel file `.env`.
-All'avvio viene eseguito un breve test di connessione alle API di Bybit per verificare che le credenziali siano corrette.
+## Deploy su Railway
 
-## 📋 Debug
-LOG_DEBUG_ASSETS = os.getenv("LOG_DEBUG_ASSETS", "0") == "1"  
-LOG_DEBUG_DECIMALS = os.getenv("LOG_DEBUG_DECIMALS", "0") == "1"  
-LOG_DEBUG_SYNC = os.getenv("LOG_DEBUG_SYNC", "0") == "1"  
-LOG_DEBUG_STRATEGY = os.getenv("LOG_DEBUG_STRATEGY", "0") == "1"  
-LOG_DEBUG_TRAILING = os.getenv("LOG_DEBUG_TRAILING", "0") == "1"  
-LOG_DEBUG_PORTFOLIO = os.getenv("LOG_DEBUG_PORTFOLIO", "0") == "1"  
+### Servizio LONG
+- **Build command:** pip install -r requirements.txt
+- **Start command:** python main-pullback.py
 
-## 📋 Debug 2
-LOG_LEVEL=INFO  
-LOG_DEBUG_ASSETS=0  
-LOG_DEBUG_DECIMALS=0  
-LOG_DEBUG_SYNC=0  
-LOG_DEBUG_STRATEGY=0  
-LOG_DEBUG_PORTFOLIO=0  
+### Servizio SHORT
+- **Build command:** pip install -r requirements.txt
+- **Start command:** python main-short-pullback.py
 
-Per un’analisi efficace delle cause di perdita dopo 48h:
-- ⚙️ LOG_DEBUG_STRATEGY = 1  
-Così vedo tutti i segnali, le strategie scelte, le condizioni di entry/exit e i motivi per cui un trade viene tentato o saltato.
+### Variabili d ambiente (identiche per entrambi i servizi)
 
-- ⚙️ LOG_DEBUG_TRAILING = 1  
-Così posso analizzare come e quando si attiva il trailing stop, se viene gestito correttamente e se chiude troppo presto/tardi.
+| Variabile | Descrizione |
+|---|---|
+| BYBIT_API_KEY | API key Bybit |
+| BYBIT_API_SECRET | API secret Bybit |
+| BYBIT_ACCOUNT_TYPE | UNIFIED (default) |
+| BYBIT_TESTNET | 	rue per testnet, alse per produzione |
+| TELEGRAM_TOKEN | Token bot Telegram per notifiche |
+| TELEGRAM_CHAT_ID | Chat ID Telegram |
+| PYTHONUNBUFFERED | 1 (obbligatorio per log in tempo reale su Railway) |
+| TZ | Etc/UTC (timestamp coerenti) |
 
-- ⚙️ LOG_DEBUG_PORTFOLIO = 1  
-Così posso vedere l’evoluzione del portafoglio, la ripartizione tra USDT e posizioni, e se il sizing è coerente.
+---
 
-## 🚀 Servizi separati LONG/SHORT su Railway
+## Strategia
 
-Per eseguire i due bot come servizi indipendenti:
+### Logica comune (LONG e SHORT sono speculari)
 
-- Variabili d’ambiente (uguali per entrambi i servizi):
-  - `BYBIT_API_KEY`, `BYBIT_API_SECRET`
-  - `BYBIT_ACCOUNT_TYPE` (es. `UNIFIED`)
-  - `BYBIT_TESTNET` (`true` per testnet, `false` per produzione)
-  - `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID` (opzionali, per notifiche)
+**Filtro daily** - seleziona sole coin con trend strutturale confermato:
+- LONG: close > EMA50 + slope positiva + max 20% sopra EMA50
+- SHORT: close < EMA50 + slope negativa + max 20% sotto EMA50
 
-- Servizio LONG
-  - Build: `pip install -r requirements.txt`
-  - Start: `python main-long.py`
+**Segnale 4h** - entry sulla reazione alla EMA20:
+- LONG: pullback al supporto EMA20, candela verde che rimbalza sopra
+- SHORT: bounce alla resistenza EMA20, candela rossa che rifiuta sotto
 
-- Servizio SHORT
-  - Build: `pip install -r requirements.txt`
-  - Start: `python main-short.py`
+**Filtri segnale 4h (entrambi i bot):**
+- RSI(14): 30-65 (LONG) / 35-65 (SHORT)
+- Corpo candela >= 40% del range
+- Volume >= 1.5x media 20 candele
+- Close entro 3% dalla EMA20
+- SL: sotto/sopra swing low/high ultime 3 barre + 0.3xATR
 
-Note:
-- Le funzioni di Google Sheets sono state rimosse da `main-long.py` e `main-short.py`. Il file `requirements.txt` è stato snellito: se usi script legacy che richiedono Google Sheets, aggiungi manualmente i pacchetti necessari o un file `requirements-sheets.txt` dedicato.
-- Imposta `PYTHONUNBUFFERED=1` su Railway per log in tempo reale. Impostare `TZ=Etc/UTC` aiuta ad avere timestamp coerenti.
+**Regime gate BTC:**
+- Bot LONG: sempre attivo (filtro daily per coin e sufficiente)
+- Bot SHORT: attivo solo quando BTC < EMA50 daily E slope EMA50 negativa; altrimenti idle automatico
 
-## 📈 Reports
+**Exit:**
+- SL iniziale + Ratchet floor fissi (>=15%->+7%lev ... >=500%->+465%lev)
+- ATR trail dal massimo/minimo (2xATR), attivo dal primo ratchet
+- Partial TP: 50% chiuso a +2R
+- Time stop: chiude dopo 10 giorni se P&L < 10% lev
+- Circuit breaker: blocca tutto se drawdown giornaliero > 3%
 
-fai un controllo su bybit e sui log di short e long su railway e fammi un report su come sta andando il trade delle ultime 24 ore. Verifica se ci sono stati errori o problemi di connessione e se le operazioni di short e long sono state eseguite correttamente. Fornisci un'analisi dettagliata delle performance del trade, inclusi eventuali guadagni o perdite (elenca anche le spese dovute alle fee di bybit), e suggerimenti per migliorare la strategia di trading in futuro.
+---
 
-### tabella trailing SL/TP (ratchet) 
+## Ratchet Table
 
-ROI raggiunto	Floor garantito
+| P&L lev | Floor garantito |
+|---|---|
+| >=15% | +7% |
+| >=25% | +15% |
+| >=40% | +25% |
+| >=60% | +40% |
+| >=80% | +60% |
+| >=100% | +80% |
+| >=125% | +100% |
+| >=150% | +120% |
+| >=175% | +148% |
+| >=200% | +173% |
+| >=250% | +223% |
+| >=300% | +273% |
+| >=400% | +370% |
+| >=500% | +465% |
 
-P&L lev	  Floor garantito	  Gap
-≥15%	    +7%	              8%
-≥25%	    +15%	            10%
-≥40%	    +25%	            15%
-≥60%	    +40%	            20%
-≥80%	    +60%	            20%
-≥100%	    +80%	            20%
-≥125%	    +100%	            25%
-≥150%	    +120%	            30%
-≥175%	    +148%	            27%
-≥200%	    +173%	            27%
-≥250%	    +223%	            27%
-≥300%	    +273%	            27%
-≥400%	    +370%	            30%
-≥500%	    +465%	            35%
+---
 
+## MCP Server (VS Code Copilot)
 
-### tabella EMA
+ybit_mcp_server.py espone strumenti MCP per monitorare i bot direttamente da VS Code Copilot:
+- get_bot_summary - equity, posizioni aperte, ultimi 10 trade, statistiche 7gg
+- get_railway_status - stato deploy LONG e SHORT
+- get_railway_logs - ultimi N log di un bot (bot: long o short)
+- get_open_orders - ordini aperti su Bybit
 
-Aggiungi "Moving Average Exponential" tre volte con questi periodi:
+Configurazione in .vscode/mcp.json.
 
-EMA	Timeframe	Ruolo nel bot
-20	1h	Target pullback entry (prezzo deve tornare qui per entrare)
-100	1h	Filtro trend 1h — prezzo deve essere sopra, pendenza crescente
-200	1h	Filtro macro — equivale all'EMA200 4h (200 candele × 1h = ~8 giorni di 4h trend)
+---
+
+## Roadmap
+
+Vedere Roadmap.md per le migliorie segnali pendenti (da valutare dopo 20+ trade aggiuntivi):
+1. [PRIORITA 1] Slope EMA20(4h) positiva - log DIAG-SLOPE gia attivo
+2. [PRIORITA 2] Struttura pre-pullback: 2+ candele sopra EMA20 prima del ritocco
+3. [PRIORITA 3] RSI min da 30 a 38
+4. [PRIORITA 4] EMA_TOUCH_TOL da 1.2% a 0.5%
