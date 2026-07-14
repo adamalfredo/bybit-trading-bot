@@ -49,7 +49,7 @@ BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 # ── PARAMETRI STRATEGIA ───────────────────────────────────────────────────────
 RISK_PCT           = 0.0100   # 1% rischio per trade
 DEFAULT_LEVERAGE   = 5        # leva ridotta: 4h = posizioni più lunghe
-MAX_OPEN_POSITIONS = 5
+MAX_OPEN_POSITIONS = 3
 MARGIN_USE_PCT     = 0.30
 ORDER_USDT_MAX     = float(os.getenv("ORDER_USDT_MAX", "1000"))
 
@@ -80,15 +80,16 @@ ATR_WINDOW       = 14
 
 # Universo
 MIN_VOL_24H_USDT = 10_000_000  # solo coin liquide: >10M USDT/giorno
-COINS_TOP_N      = 100         # top N per volume da scansionare
+COINS_TOP_N      = 60          # top N per momentum+volume da scansionare
+MOMENTUM_MIN_24H = 2.0         # candidati LONG solo se +2% (o meglio) nelle ultime 24h
 
 # Filtri segnale
-RSI_MIN_4H     = 30.0   # RSI minimo: tollera oversold moderato
-RSI_MAX_4H     = 65.0   # RSI massimo: non overbought
+RSI_MIN_4H     = 38.0   # RSI minimo più alto: evita coltelli troppo deboli
+RSI_MAX_4H     = 62.0   # RSI massimo leggermente più stretto
 EMA_TOUCH_TOL  = 0.012  # il low deve essere entro 1.2% sopra EMA20 (o sotto)
-MAX_DIST_EMA   = 3.0    # % massima close sopra EMA20 all'entry
+MAX_DIST_EMA   = 2.0    # % massima close sopra EMA20 all'entry
 MAX_SL_PCT     = 8.0    # SL massimo accettabile: 8% sotto entry
-MIN_BODY_PCT   = 40.0   # corpo candela 4h >= 40% del range: calibrato su backtest 730gg (PF 1.116 vs 0.898 con 35%)
+MIN_BODY_PCT   = 50.0   # corpo candela 4h >= 50% del range: elimina candele deboli/doji-like
 MIN_VOL_RATIO  = 1.5    # volume candela segnale >= 1.5x media20: parametro piu impattante (PF 1.116 vs 0.898)
 MAX_DIST_EMA50_D = 20.0 # daily close max 20% sopra EMA50: evita trend overestesi
 
@@ -410,7 +411,8 @@ def _update_btc_filter() -> None:
 # ── SCANSIONE UNIVERSO ────────────────────────────────────────────────────────
 def scan_universe() -> list:
     """
-    Ritorna le top COINS_TOP_N coin per volume 24h (>10M USDT).
+    Ritorna le top COINS_TOP_N coin per momentum+volume 24h.
+    Prima filtro liquidità (>10M), poi tengo solo coin con momentum 24h >= soglia.
     Una sola chiamata API.
     """
     try:
@@ -436,13 +438,16 @@ def scan_universe() -> list:
         try:
             vol24h = float(t.get("turnover24h", 0) or 0)
             price  = float(t.get("lastPrice", 0) or 0)
+            chg24h = float(t.get("price24hPcnt", 0) or 0) * 100.0
         except Exception:
             continue
         if vol24h < MIN_VOL_24H_USDT or price <= 0:
             continue
-        candidates.append({"symbol": sym, "vol24h": vol24h})
+        if chg24h < MOMENTUM_MIN_24H:
+            continue
+        candidates.append({"symbol": sym, "vol24h": vol24h, "chg24h": chg24h})
 
-    candidates.sort(key=lambda x: x["vol24h"], reverse=True)
+    candidates.sort(key=lambda x: (x["chg24h"], x["vol24h"]), reverse=True)
     return candidates[:COINS_TOP_N]
 
 
@@ -570,6 +575,10 @@ def check_entry_signal(symbol: str) -> Optional[dict]:
     log(f"[DIAG-SLOPE] {symbol}: EMA20_slope={slope_pct:+.3f}% "
         f"({'OK salita' if slope_ok else 'WARN piatta/discesa'}) | "
         f"RSI={last_rsi:.1f} dist_ema={dist_pct:.2f}% sl_pct={sl_pct:.2f}%")
+
+    # Filtro reale: evita pullback LONG con EMA20 già piatta/in calo.
+    if not slope_ok:
+        return None
 
     return {
         "entry_price": last_close,

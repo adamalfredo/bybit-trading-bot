@@ -53,7 +53,7 @@ BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 # ── PARAMETRI STRATEGIA ───────────────────────────────────────────────────────
 RISK_PCT           = 0.0100   # 1% rischio per trade
 DEFAULT_LEVERAGE   = 5
-MAX_OPEN_POSITIONS = 5
+MAX_OPEN_POSITIONS = 3
 MARGIN_USE_PCT     = 0.30
 ORDER_USDT_MAX     = float(os.getenv("ORDER_USDT_MAX", "1000"))
 
@@ -84,15 +84,16 @@ ATR_WINDOW = 14
 
 # Universo
 MIN_VOL_24H_USDT = 10_000_000
-COINS_TOP_N      = 100
+COINS_TOP_N      = 60
+MOMENTUM_MAX_24H = -2.0  # candidati SHORT solo se -2% (o peggio) nelle ultime 24h
 
 # Filtri segnale 4h
-RSI_MIN_4H    = 35.0   # non già in crollo oversold (bounced abbastanza)
-RSI_MAX_4H    = 65.0   # non overbought prolungato
+RSI_MIN_4H    = 40.0   # richiede bounce più strutturato prima del rifiuto
+RSI_MAX_4H    = 60.0   # riduce ingressi su estensioni sporche
 EMA_TOUCH_TOL = 0.012  # il HIGH deve essere entro 1.2% sotto EMA20 (o sopra)
-MAX_DIST_EMA  = 3.0    # % massima close SOTTO EMA20 all'entry (rifiuto fresco)
+MAX_DIST_EMA  = 2.0    # % massima close SOTTO EMA20 all'entry (rifiuto fresco)
 MAX_SL_PCT    = 8.0    # SL massimo accettabile: 8% sopra entry
-MIN_BODY_PCT  = 40.0   # corpo candela >= 40% del range
+MIN_BODY_PCT  = 50.0   # corpo candela >= 50% del range
 MIN_VOL_RATIO = 1.5    # volume candela segnale >= 1.5× media 20
 MAX_DIST_EMA50_D = 20.0  # daily close max 20% SOTTO EMA50 (non in freefall)
 
@@ -449,13 +450,16 @@ def scan_universe() -> list:
         try:
             vol24h = float(t.get("turnover24h", 0) or 0)
             price  = float(t.get("lastPrice", 0) or 0)
+            chg24h = float(t.get("price24hPcnt", 0) or 0) * 100.0
         except Exception:
             continue
         if vol24h < MIN_VOL_24H_USDT or price <= 0:
             continue
-        candidates.append({"symbol": sym, "vol24h": vol24h})
+        if chg24h > MOMENTUM_MAX_24H:
+            continue
+        candidates.append({"symbol": sym, "vol24h": vol24h, "chg24h": chg24h})
 
-    candidates.sort(key=lambda x: x["vol24h"], reverse=True)
+    candidates.sort(key=lambda x: (x["chg24h"], -x["vol24h"]))
     return candidates[:COINS_TOP_N]
 
 
@@ -580,6 +584,10 @@ def check_short_signal(symbol: str) -> Optional[dict]:
     log(f"[DIAG-SLOPE] {symbol}: EMA20_slope={slope_pct:+.3f}% "
         f"({'OK discesa' if slope_ok else 'WARN salita'}) | "
         f"RSI={last_rsi:.1f} dist={dist_pct:.2f}% sl={sl_pct:.2f}%")
+
+    # Filtro reale: evita SHORT quando EMA20 sta già risalendo.
+    if not slope_ok:
+        return None
 
     return {
         "entry_price": last_close,
