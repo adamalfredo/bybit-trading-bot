@@ -9,13 +9,13 @@
 #   - Segnale su ultima candela 4h CHIUSA:
 #     • Il massimo ha sfiorato/toccato EMA20(4h) dalla parte bassa (bounce rejection)
 #     • La candela è chiusa ROSSA sotto EMA20 (rifiuto confermato)
-#     • RSI(14) tra 35 e 65 (bounce sano, non oversold né overbought)
+#     • RSI(14) tra 32 e 68 (bounce sano, non oversold né overbought)
 #     • Close entro 3% sotto EMA20 (rifiuto fresco, non già esteso al ribasso)
-#     • Body >= 40% del range (niente doji/shooting star)
-#     • Volume >= 1.5× media 20 candele (distribuzione reale)
+#     • Body >= 30% del range (niente doji/shooting star)
+#     • Volume >= 1.2× media 20 candele (distribuzione reale)
 #   - SL: sopra swing high (max 3 barre chiuse) + 0.3×ATR
 #   - Trail: 2.0×ATR(4h) dal minimo (low_water), attivo dal primo ratchet tier
-#   - Partial TP: 50% posizione chiusa a 2R (prezzo sceso di 2×r_dist)
+#   - Partial TP: 50% posizione chiusa a 1.5R (prezzo sceso di 1.5×r_dist)
 #   - MAX 5 posizioni | RISK 1% | Leva 5×
 #
 # Razionale:
@@ -91,6 +91,7 @@ RSI_MIN_4H    = 32.0   # più permissivo per intercettare bounce utili
 RSI_MAX_4H    = 68.0   # più permissivo su estensioni temporanee
 EMA_TOUCH_TOL = 0.015  # il HIGH deve essere entro 1.5% sotto EMA20 (o sopra)
 MAX_DIST_EMA  = 3.0    # % massima close SOTTO EMA20 all'entry (rifiuto fresco)
+CLOSE_ABOVE_EMA_TOL = 0.002  # tolleranza 0.2%: accetta close lievemente sopra EMA20
 MAX_SL_PCT    = 8.0    # SL massimo accettabile: 8% sopra entry
 MIN_BODY_PCT  = 30.0   # corpo candela >= 30% del range
 MIN_VOL_RATIO = 1.2    # volume candela segnale >= 1.2× media 20
@@ -546,7 +547,8 @@ def check_short_signal(symbol: str, reject_stats: Optional[dict] = None) -> Opti
         return reject("ema20_not_touched")
 
     # 2) Close sotto EMA20 — rifiuto confermato
-    if last_close > last_ema20:
+    #    tollera piccola violazione (0.2%) per evitare falsi scarti su wick/rounding.
+    if last_close > last_ema20 * (1.0 + CLOSE_ABOVE_EMA_TOL):
         return reject("close_above_ema20")
 
     # 3) Candela rossa
@@ -1313,7 +1315,9 @@ if __name__ == "__main__":
         f"RSI {RSI_MIN_4H:.0f}-{RSI_MAX_4H:.0f}")
     log(f"  Risk      : {RISK_PCT*100:.1f}%/trade | MAX={MAX_OPEN_POSITIONS} pos | "
         f"Leva {DEFAULT_LEVERAGE}× | Ratchet floor fissi")
-    log(f"  Exits     : Ratchet(≥15%→+7% ... ≥150%→+120%) + Partial TP 50%@{PARTIAL_TP_R:.0f}R")
+    first_trigger, first_floor = RATCHET_TABLE[0]
+    log(f"  Exits     : Ratchet(≥{first_trigger}%→+{first_floor}% ... ≥150%→+120%) + "
+        f"Partial TP 50%@{PARTIAL_TP_R:.1f}R")
     log(f"  Regime    : BTC daily < EMA50 + slope negativa → SHORT ON")
     log("=" * 62)
 
@@ -1324,7 +1328,8 @@ if __name__ == "__main__":
         f"📉 SHORT PULLBACK BOT AVVIATO\n"
         f"Segnale: EMA20(4h) bounce rejection + daily downtrend\n"
         f"Regime: BTC daily < EMA50 (slope−) → SHORT attivi\n"
-        f"Exit: Ratchet ≥15%→+7% ... ≥150%→+120% | Partial 50%@{PARTIAL_TP_R:.0f}R\n"
+        f"Exit: Ratchet ≥{first_trigger}%→+{first_floor}% ... ≥150%→+120% | "
+        f"Partial 50%@{PARTIAL_TP_R:.1f}R\n"
         f"Scan ogni {SCAN_INTERVAL_SEC//60}min | Leva {DEFAULT_LEVERAGE}× | "
         f"Risk {RISK_PCT*100:.1f}%\n"
         f"Equity: {equity0:.2f} USDT"

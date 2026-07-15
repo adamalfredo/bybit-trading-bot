@@ -87,6 +87,7 @@ RSI_MIN_4H     = 28.0   # RSI minimo più permissivo
 RSI_MAX_4H     = 68.0   # RSI massimo più permissivo
 EMA_TOUCH_TOL  = 0.015  # il low deve essere entro 1.5% sopra EMA20 (o sotto)
 MAX_DIST_EMA   = 3.0    # % massima close sopra EMA20 all'entry
+CLOSE_BELOW_EMA_TOL = 0.002  # tolleranza 0.2%: accetta close lievemente sotto EMA20
 MAX_SL_PCT     = 8.0    # SL massimo accettabile: 8% sotto entry
 MIN_BODY_PCT   = 30.0   # corpo candela 4h >= 30% del range
 MIN_VOL_RATIO  = 1.2    # volume candela segnale >= 1.2x media20
@@ -526,7 +527,8 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None) -> Opti
         return reject("ema20_not_touched")
 
     # 2) Close sopra EMA20 — rimbalzo confermato
-    if last_close < last_ema20:
+    #    tollera piccola violazione (0.2%) per evitare falsi scarti su wick/rounding.
+    if last_close < last_ema20 * (1.0 - CLOSE_BELOW_EMA_TOL):
         return reject("close_below_ema20")
 
     # 3) Candela verde
@@ -1313,7 +1315,9 @@ if __name__ == "__main__":
         f"dist EMA <{MAX_DIST_EMA}%")
     log(f"  Risk      : {RISK_PCT*100:.1f}%/trade | MAX={MAX_OPEN_POSITIONS} pos | "
         f"Leva {DEFAULT_LEVERAGE}× | Ratchet floor fissi")
-    log(f"  Exits     : Ratchet(≥15%→+7% ... ≥150%→+120%) + Partial TP 50%@{PARTIAL_TP_R}R")
+    first_trigger, first_floor = RATCHET_TABLE[0]
+    log(f"  Exits     : Ratchet(≥{first_trigger}%→+{first_floor}% ... ≥150%→+120%) + "
+        f"Partial TP 50%@{PARTIAL_TP_R:.1f}R")
     log(f"  Regime    : BTC daily EMA50 (slope+) + BTC weekly EMA200")
     log("=" * 62)
 
@@ -1324,7 +1328,8 @@ if __name__ == "__main__":
         f"📈 PULLBACK BOT AVVIATO — Trend Following 4h\n"
         f"Segnale: EMA20(4h) pullback + daily uptrend\n"
         f"Regime: BTC daily EMA50 (slope+) + BTC weekly EMA200\n"
-        f"Exit: Ratchet floor fissi ≥15%→+7% ... ≥150%→+120% | Partial 50%@{PARTIAL_TP_R}R\n"
+        f"Exit: Ratchet floor fissi ≥{first_trigger}%→+{first_floor}% ... ≥150%→+120% | "
+        f"Partial 50%@{PARTIAL_TP_R:.1f}R\n"
         f"Scan ogni {SCAN_INTERVAL_SEC//60}min | Leva {DEFAULT_LEVERAGE}× | "
         f"Risk {RISK_PCT*100:.1f}%\n"
         f"Equity: {equity0:.2f} USDT"
