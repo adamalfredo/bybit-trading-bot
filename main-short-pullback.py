@@ -59,13 +59,13 @@ ORDER_USDT_MAX     = float(os.getenv("ORDER_USDT_MAX", "1000"))
 
 SL_ATR_BUFFER  = 0.3    # buffer sopra swing high (× ATR)
 TRAIL_ATR_MULT = 2.0    # moltiplicatore ATR per il trailing stop dal minimo
-PARTIAL_TP_R   = 2.0    # partial TP: chiude 50% posizione a +2R
+PARTIAL_TP_R   = 1.5    # partial TP: chiude 50% posizione a +1.5R
 PARTIAL_TP_PCT = 0.50
 
 # Ratchet floor fissi: (roi_lev_trigger%, floor_lev_garantito%)
 # Per short: al trigger si sposta SL verso il basso (profit lock)
 RATCHET_TABLE = [
-    ( 15,   7),
+    ( 10,   7),
     ( 25,  15),
     ( 40,  25),
     ( 60,  40),
@@ -87,13 +87,13 @@ MIN_VOL_24H_USDT = 10_000_000
 COINS_TOP_N      = 100
 
 # Filtri segnale 4h
-RSI_MIN_4H    = 35.0   # non già in crollo oversold (bounced abbastanza)
-RSI_MAX_4H    = 65.0   # non overbought prolungato
-EMA_TOUCH_TOL = 0.012  # il HIGH deve essere entro 1.2% sotto EMA20 (o sopra)
+RSI_MIN_4H    = 32.0   # più permissivo per intercettare bounce utili
+RSI_MAX_4H    = 68.0   # più permissivo su estensioni temporanee
+EMA_TOUCH_TOL = 0.015  # il HIGH deve essere entro 1.5% sotto EMA20 (o sopra)
 MAX_DIST_EMA  = 3.0    # % massima close SOTTO EMA20 all'entry (rifiuto fresco)
 MAX_SL_PCT    = 8.0    # SL massimo accettabile: 8% sopra entry
-MIN_BODY_PCT  = 40.0   # corpo candela >= 40% del range
-MIN_VOL_RATIO = 1.5    # volume candela segnale >= 1.5× media 20
+MIN_BODY_PCT  = 30.0   # corpo candela >= 30% del range
+MIN_VOL_RATIO = 1.2    # volume candela segnale >= 1.2× media 20
 MAX_DIST_EMA50_D = 20.0  # daily close max 20% SOTTO EMA50 (non in freefall)
 
 # Regime BTC: attiva short solo quando BTC è strutturalmente bearish
@@ -494,7 +494,7 @@ def is_daily_downtrend(symbol: str) -> bool:
 
 
 # ── SIGNAL CHECK 4h SHORT ─────────────────────────────────────────────────────
-def check_short_signal(symbol: str) -> Optional[dict]:
+def check_short_signal(symbol: str, reject_stats: Optional[dict] = None) -> Optional[dict]:
     """
     Verifica bounce rejection all'EMA20 su 4h (ultima candela CHIUSA).
 
@@ -508,9 +508,14 @@ def check_short_signal(symbol: str) -> Optional[dict]:
     7. Volume >= MIN_VOL_RATIO × media 20: distribuzione reale, non rimbalzo su vuoto
     8. SL = swing high (max 3 barre) + 0.3×ATR
     """
+    def reject(reason: str) -> Optional[dict]:
+        if reject_stats is not None:
+            reject_stats[reason] = reject_stats.get(reason, 0) + 1
+        return None
+
     df = fetch_klines(symbol, interval="240", limit=50)
     if df is None or len(df) < 25:
-        return None
+        return reject("kline_insufficient")
 
     c = df["Close"]
     h = df["High"]
@@ -531,45 +536,45 @@ def check_short_signal(symbol: str) -> Optional[dict]:
     last_atr   = float(atr_series.iloc[-2])
 
     if pd.isna(last_rsi) or pd.isna(last_atr) or last_atr <= 0:
-        return None
+        return reject("invalid_rsi_or_atr")
     if last_ema20 <= 0:
-        return None
+        return reject("invalid_ema20")
 
     # 1) Il massimo ha toccato EMA20 da sotto (bounce verso resistenza)
     #    Accetta se high >= EMA20 * (1 - tolleranza) — anche se non ha sfondato
     if last_high < last_ema20 * (1.0 - EMA_TOUCH_TOL):
-        return None
+        return reject("ema20_not_touched")
 
     # 2) Close sotto EMA20 — rifiuto confermato
     if last_close > last_ema20:
-        return None
+        return reject("close_above_ema20")
 
     # 3) Candela rossa
     if last_close >= last_open:
-        return None
+        return reject("not_red_candle")
 
     # 4) RSI nel range bounce sano
     if not (RSI_MIN_4H <= last_rsi <= RSI_MAX_4H):
-        return None
+        return reject("rsi_out_of_range")
 
     # 5) Close non troppo lontano da EMA20 (rifiuto fresco)
     dist_pct = (last_ema20 - last_close) / last_ema20 * 100
     if dist_pct > MAX_DIST_EMA:
-        return None
+        return reject("distance_from_ema_too_high")
 
     # 6) Qualità candela: corpo reale, non doji
     candle_range = float(h.iloc[-2]) - float(l.iloc[-2])
     if candle_range > 0:
         body_pct = abs(last_close - last_open) / candle_range * 100
         if body_pct < MIN_BODY_PCT:
-            return None
+            return reject("body_too_small")
 
     # 7) Volume: distribuzione reale (non rimbalzo tecnico su aria)
     vol_series = df["Volume"]
     vol_avg = float(vol_series.iloc[-22:-2].mean())
     vol_sig = float(vol_series.iloc[-2])
     if vol_avg > 0 and vol_sig / vol_avg < MIN_VOL_RATIO:
-        return None
+        return reject("volume_too_low")
 
     # 8) SL = sopra swing high delle ultime 3 barre chiuse
     swing_high = max(float(h.iloc[-2]), float(h.iloc[-3]), float(h.iloc[-4]))
@@ -578,7 +583,7 @@ def check_short_signal(symbol: str) -> Optional[dict]:
 
     sl_pct = r_dist / last_close * 100
     if sl_pct > MAX_SL_PCT or r_dist <= 0:
-        return None
+        return reject("sl_too_wide_or_invalid")
 
     # Diagnostica slope EMA20(4h)
     ema20_3ago = float(ema20.iloc[-5])
@@ -1227,6 +1232,7 @@ def main_loop() -> None:
         # 2) Per ogni candidato: filtro daily downtrend → segnale 4h
         entered = 0
         checked = 0
+        reject_stats_scan = {}
         for coin in universe:
             if len(open_positions) >= MAX_OPEN_POSITIONS:
                 break
@@ -1241,7 +1247,7 @@ def main_loop() -> None:
 
             checked += 1
 
-            signal = check_short_signal(sym)
+            signal = check_short_signal(sym, reject_stats_scan)
             if not signal:
                 time.sleep(0.05)
                 continue
@@ -1291,6 +1297,10 @@ def main_loop() -> None:
 
         log(f"[SCAN] {checked} coin in downtrend daily | {entered} ingressi | "
             f"posizioni: {len(open_positions)}")
+        if reject_stats_scan:
+            top_rejects = sorted(reject_stats_scan.items(), key=lambda x: x[1], reverse=True)[:5]
+            reject_msg = ", ".join(f"{k}:{v}" for k, v in top_rejects)
+            log(f"[REJECT] SHORT top motivi: {reject_msg}")
 
 
 # ── AVVIO ─────────────────────────────────────────────────────────────────────
