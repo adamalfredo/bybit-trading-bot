@@ -410,7 +410,9 @@ def _update_btc_filter() -> None:
 # ── SCANSIONE UNIVERSO ────────────────────────────────────────────────────────
 def scan_universe() -> list:
     """
-    Ritorna le top COINS_TOP_N coin per volume 24h (>10M USDT).
+    Ritorna le top COINS_TOP_N coin per momentum rialzista 24h,
+    mantenendo il filtro di liquidità (>10M USDT).
+    Nessuna soglia hard su momentum: ordina per variazione 24h e prende i migliori.
     Una sola chiamata API.
     """
     try:
@@ -436,13 +438,15 @@ def scan_universe() -> list:
         try:
             vol24h = float(t.get("turnover24h", 0) or 0)
             price  = float(t.get("lastPrice", 0) or 0)
+            chg24h = float(t.get("price24hPcnt", 0) or 0) * 100.0
         except Exception:
             continue
         if vol24h < MIN_VOL_24H_USDT or price <= 0:
             continue
-        candidates.append({"symbol": sym, "vol24h": vol24h})
+        candidates.append({"symbol": sym, "vol24h": vol24h, "chg24h": chg24h})
 
-    candidates.sort(key=lambda x: x["vol24h"], reverse=True)
+    # Top gainers prima, poi volume per spezzare i pari-merito.
+    candidates.sort(key=lambda x: (x["chg24h"], x["vol24h"]), reverse=True)
     return candidates[:COINS_TOP_N]
 
 
