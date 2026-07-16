@@ -924,11 +924,11 @@ def trailing_worker() -> None:
                                     entry["partial_tp_active"] = True
                                     entry["qty"] = cur_qty * (1.0 - PARTIAL_TP_PCT)
                                     set_position(symbol, entry)
-                                    log(f"[PARTIAL-TP] {symbol} ✅ 50% chiuso a "
+                                    log(f"[PARTIAL-TP] {symbol} ✅ {PARTIAL_TP_PCT*100:.0f}% chiuso a "
                                         f"+{PARTIAL_TP_R:.1f}R prezzo={price_now:.4f}")
                                     notify_telegram(
                                         f"💰 Partial TP SHORT {symbol}\n"
-                                        f"50% chiuso a +{PARTIAL_TP_R:.1f}R | "
+                                        f"{PARTIAL_TP_PCT*100:.0f}% chiuso a +{PARTIAL_TP_R:.1f}R | "
                                         f"Prezzo: {price_now:.4f}\n"
                                         f"Resto protetto dal ratchet"
                                     )
@@ -1317,7 +1317,7 @@ if __name__ == "__main__":
         f"Leva {DEFAULT_LEVERAGE}× | Ratchet floor fissi")
     first_trigger, first_floor = RATCHET_TABLE[0]
     log(f"  Exits     : Ratchet(≥{first_trigger}%→+{first_floor}% ... ≥150%→+120%) + "
-        f"Partial TP 50%@{PARTIAL_TP_R:.1f}R")
+        f"Partial TP {PARTIAL_TP_PCT*100:.0f}%@{PARTIAL_TP_R:.1f}R")
     log(f"  Regime    : BTC daily < EMA50 + slope negativa → SHORT ON")
     log("=" * 62)
 
