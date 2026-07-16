@@ -60,7 +60,7 @@ ORDER_USDT_MAX     = float(os.getenv("ORDER_USDT_MAX", "1000"))
 SL_ATR_BUFFER  = 0.3    # buffer sopra swing high (× ATR)
 TRAIL_ATR_MULT = 2.0    # moltiplicatore ATR per il trailing stop dal minimo
 PARTIAL_TP_R   = 1.5    # partial TP: chiude 50% posizione a +1.5R
-PARTIAL_TP_PCT = 0.50
+PARTIAL_TP_PCT = 0.25
 
 # Ratchet floor fissi: (roi_lev_trigger%, floor_lev_garantito%)
 # Per short: al trigger si sposta SL verso il basso (profit lock)
