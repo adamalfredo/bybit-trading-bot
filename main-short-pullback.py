@@ -89,12 +89,12 @@ COINS_TOP_N      = 100
 # Filtri segnale 4h
 RSI_MIN_4H    = 32.0   # più permissivo per intercettare bounce utili
 RSI_MAX_4H    = 68.0   # più permissivo su estensioni temporanee
-EMA_TOUCH_TOL = 0.015  # il HIGH deve essere entro 1.5% sotto EMA20 (o sopra)
+EMA_TOUCH_TOL = 0.017  # il HIGH deve essere entro 1.7% sotto EMA20 (o sopra)
 MAX_DIST_EMA  = 3.0    # % massima close SOTTO EMA20 all'entry (rifiuto fresco)
-CLOSE_ABOVE_EMA_TOL = 0.002  # tolleranza 0.2%: accetta close lievemente sopra EMA20
+CLOSE_ABOVE_EMA_TOL = 0.003  # tolleranza 0.3%: accetta close lievemente sopra EMA20
 MAX_SL_PCT    = 8.0    # SL massimo accettabile: 8% sopra entry
 MIN_BODY_PCT  = 30.0   # corpo candela >= 30% del range
-MIN_VOL_RATIO = 1.2    # volume candela segnale >= 1.2× media 20
+MIN_VOL_RATIO = 1.1    # volume candela segnale >= 1.1× media 20
 MAX_DIST_EMA50_D = 20.0  # daily close max 20% SOTTO EMA50 (non in freefall)
 
 # Regime BTC: attiva short solo quando BTC è strutturalmente bearish
