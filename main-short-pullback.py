@@ -86,15 +86,15 @@ ATR_WINDOW = 14
 MIN_VOL_24H_USDT = 10_000_000
 COINS_TOP_N      = 100
 
-# Filtri segnale 4h
-RSI_MIN_4H    = 32.0   # più permissivo per intercettare bounce utili
-RSI_MAX_4H    = 68.0   # più permissivo su estensioni temporanee
+# Filtri segnale 4h — RILASSATI per trend following sui top losers
+RSI_MIN_4H    = 10.0   # RSI minimo: tolera oversold su dump
+RSI_MAX_4H    = 90.0   # RSI massimo: tolera overbought temporaneo
 EMA_TOUCH_TOL = 0.017  # il HIGH deve essere entro 1.7% sotto EMA20 (o sopra)
 MAX_DIST_EMA  = 3.0    # % massima close SOTTO EMA20 all'entry (rifiuto fresco)
 CLOSE_ABOVE_EMA_TOL = 0.003  # tolleranza 0.3%: accetta close lievemente sopra EMA20
 MAX_SL_PCT    = 8.0    # SL massimo accettabile: 8% sopra entry
-MIN_BODY_PCT  = 30.0   # corpo candela >= 30% del range
-MIN_VOL_RATIO = 1.1    # volume candela segnale >= 1.1× media 20
+MIN_BODY_PCT  = 0.0    # corpo candela: TOLTO — i top losers hanno candle piccole
+MIN_VOL_RATIO = 0.0    # volume candela: TOLTO — i top losers su quella candela possono avere vol basso 20
 MAX_DIST_EMA50_D = 20.0  # daily close max 20% SOTTO EMA50 (non in freefall)
 
 # Regime BTC: attiva short solo quando BTC è strutturalmente bearish

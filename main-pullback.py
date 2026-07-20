@@ -82,15 +82,15 @@ ATR_WINDOW       = 14
 MIN_VOL_24H_USDT = 10_000_000  # solo coin liquide: >10M USDT/giorno
 COINS_TOP_N      = 100         # top N per volume da scansionare
 
-# Filtri segnale
-RSI_MIN_4H     = 28.0   # RSI minimo più permissivo
-RSI_MAX_4H     = 68.0   # RSI massimo più permissivo
+# Filtri segnale — RILASSATI per trend following sui top mover
+RSI_MIN_4H     = 10.0   # RSI minimo: tolera oversold su pump
+RSI_MAX_4H     = 90.0   # RSI massimo: tolera overbought su pump
 EMA_TOUCH_TOL  = 0.017  # il low deve essere entro 1.7% sopra EMA20 (o sotto)
 MAX_DIST_EMA   = 3.0    # % massima close sopra EMA20 all'entry
 CLOSE_BELOW_EMA_TOL = 0.003  # tolleranza 0.3%: accetta close lievemente sotto EMA20
 MAX_SL_PCT     = 8.0    # SL massimo accettabile: 8% sotto entry
-MIN_BODY_PCT   = 30.0   # corpo candela 4h >= 30% del range
-MIN_VOL_RATIO  = 1.1    # volume candela segnale >= 1.1x media20
+MIN_BODY_PCT   = 0.0    # corpo candela: TOLTO — i top mover hanno candle piccole
+MIN_VOL_RATIO  = 0.0    # volume candela: TOLTO — i top mover su quella candela possono avere vol basso
 MAX_DIST_EMA50_D = 20.0 # daily close max 20% sopra EMA50: evita trend overestesi
 
 # BTC filter — disabilitato: qualsiasi EMA a lungo periodo su BTC è sopra 65k
