@@ -30,6 +30,7 @@ import time
 import hmac
 import hashlib
 import json
+import re
 import threading
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Optional
@@ -132,6 +133,7 @@ _instrument_cache: dict = {}
 _price_cache:      dict = {}
 _price_lock              = threading.RLock()
 _last_log_times:   dict = {}
+_bybit_ts_offset_ms: int = 0
 
 _btc_short_ok: bool  = True   # True = BTC in bear regime → short attivi
 _btc_ts:       float = 0.0
@@ -175,30 +177,77 @@ def notify_telegram(msg: str) -> None:
 
 
 # ── FIRMA BYBIT ───────────────────────────────────────────────────────────────
+def _signed_ts_ms() -> int:
+    return int(time.time() * 1000) + _bybit_ts_offset_ms
+
+
+def _maybe_adjust_ts_offset(ret_msg: str) -> None:
+    global _bybit_ts_offset_ms
+    m = re.search(r"req_timestamp\[(\d+)\],server_timestamp\[(\d+)\]", ret_msg)
+    if not m:
+        return
+    req_ts = int(m.group(1))
+    srv_ts = int(m.group(2))
+    delta = srv_ts - req_ts
+    if abs(delta) >= 50:
+        _bybit_ts_offset_ms += delta
+        tlog("ts_offset",
+             f"[TIME] offset aggiustato di {delta}ms (tot={_bybit_ts_offset_ms}ms)",
+             120)
+
+
 def _bybit_signed_get(path: str, params: dict):
     from urllib.parse import urlencode
-    qs   = urlencode(sorted(params.items()))
-    ts   = str(int(time.time() * 1000))
-    rw   = "10000"
-    sign = hmac.new(SECRET.encode(), f"{ts}{KEY}{rw}{qs}".encode(),
-                    hashlib.sha256).hexdigest()
-    headers = {"X-BAPI-API-KEY": KEY, "X-BAPI-SIGN": sign,
-               "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": rw}
-    return SESSION.get(f"{BYBIT_BASE_URL}{path}",
-                       headers=headers, params=params, timeout=10)
+    last_resp = None
+    for _ in range(3):
+        qs   = urlencode(sorted(params.items()))
+        ts   = str(_signed_ts_ms())
+        rw   = "30000"
+        sign = hmac.new(SECRET.encode(), f"{ts}{KEY}{rw}{qs}".encode(),
+                        hashlib.sha256).hexdigest()
+        headers = {"X-BAPI-API-KEY": KEY, "X-BAPI-SIGN": sign,
+                   "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": rw}
+        last_resp = SESSION.get(f"{BYBIT_BASE_URL}{path}",
+                                headers=headers, params=params, timeout=10)
+        try:
+            data = last_resp.json()
+            if data.get("retCode") == 0:
+                return last_resp
+            msg = str(data.get("retMsg") or "")
+            if "server timestamp" in msg or "recv_window" in msg:
+                _maybe_adjust_ts_offset(msg)
+                continue
+        except Exception:
+            return last_resp
+        return last_resp
+    return last_resp
 
 
 def _bybit_signed_post(path: str, body: dict):
-    ts        = str(int(time.time() * 1000))
-    rw        = "10000"
     body_json = json.dumps(body, separators=(",", ":"))
-    sign      = hmac.new(SECRET.encode(), f"{ts}{KEY}{rw}{body_json}".encode(),
-                         hashlib.sha256).hexdigest()
-    headers   = {"X-BAPI-API-KEY": KEY, "X-BAPI-SIGN": sign,
-                 "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": rw,
-                 "X-BAPI-SIGN-TYPE": "2", "Content-Type": "application/json"}
-    return SESSION.post(f"{BYBIT_BASE_URL}{path}",
-                        headers=headers, data=body_json, timeout=10)
+    last_resp = None
+    for _ in range(3):
+        ts        = str(_signed_ts_ms())
+        rw        = "30000"
+        sign      = hmac.new(SECRET.encode(), f"{ts}{KEY}{rw}{body_json}".encode(),
+                             hashlib.sha256).hexdigest()
+        headers   = {"X-BAPI-API-KEY": KEY, "X-BAPI-SIGN": sign,
+                     "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": rw,
+                     "X-BAPI-SIGN-TYPE": "2", "Content-Type": "application/json"}
+        last_resp = SESSION.post(f"{BYBIT_BASE_URL}{path}",
+                                 headers=headers, data=body_json, timeout=10)
+        try:
+            data = last_resp.json()
+            if data.get("retCode") == 0:
+                return last_resp
+            msg = str(data.get("retMsg") or "")
+            if "server timestamp" in msg or "recv_window" in msg:
+                _maybe_adjust_ts_offset(msg)
+                continue
+        except Exception:
+            return last_resp
+        return last_resp
+    return last_resp
 
 
 # ── HELPERS STATO ─────────────────────────────────────────────────────────────
@@ -883,6 +932,26 @@ def trailing_worker() -> None:
                 entry = get_position(symbol)
                 if not entry:
                     continue
+
+                # Allinea eventuali drift tra stato interno e avgPrice reale Bybit.
+                ex_qty, ex_entry = get_open_short_fill(symbol)
+                if ex_entry > 0:
+                    saved_entry = float(entry.get("entry_price", 0) or 0)
+                    if saved_entry > 0:
+                        drift_pct = abs(ex_entry - saved_entry) / saved_entry * 100
+                        if drift_pct >= 0.05:
+                            entry["entry_price"] = ex_entry
+                            if (not entry.get("breakeven_active")
+                                    and not entry.get("partial_tp_active")):
+                                sl_now = float(entry.get("sl_price", 0) or 0)
+                                if sl_now > ex_entry:
+                                    new_r = sl_now - ex_entry
+                                    entry["r_dist"] = new_r
+                                    entry["orig_r_dist"] = new_r
+                            set_position(symbol, entry)
+                            log(f"[SYNC-ENTRY] {symbol} avgPrice Bybit {saved_entry:.6f} → {ex_entry:.6f} "
+                                f"(drift {drift_pct:.3f}%)")
+                            entry = get_position(symbol) or entry
 
                 price_now = get_last_price(symbol)
                 if not price_now:
