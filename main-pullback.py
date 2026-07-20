@@ -1205,10 +1205,11 @@ def main_loop() -> None:
         n_open = len(open_positions)
         log(f"[SCAN] ─── Avvio scansione ─── open: {n_open}/{MAX_OPEN_POSITIONS}")
 
-        # Circuit breaker: blocca scan se daily loss limit superato
-        if check_circuit_breaker():
-            tlog("circuit_breaker", "🚨 Circuit breaker attivo — scan bloccata", 1800)
-            continue
+        # Circuit breaker disabilitato: attendendo verifica ranking
+        # Reabilitare dopo aver confermato che il ranking funziona correttamente
+        # if check_circuit_breaker():
+        #     tlog("circuit_breaker", "🚨 Circuit breaker attivo — scan bloccata", 1800)
+        #     continue
 
         if not _btc_ok:
             log("[SCAN] BTC filter attivo — scan sospesa")

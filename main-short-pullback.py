@@ -1208,9 +1208,11 @@ def main_loop() -> None:
         n_open = len(open_positions)
         log(f"[SCAN] ─── Avvio scansione SHORT ─── open: {n_open}/{MAX_OPEN_POSITIONS}")
 
-        if check_circuit_breaker():
-            tlog("circuit_breaker", "🚨 Circuit breaker attivo — scan bloccata", 1800)
-            continue
+        # Circuit breaker disabilitato: attendendo verifica ranking
+        # Reabilitare dopo aver confermato che il ranking funziona correttamente
+        # if check_circuit_breaker():
+        #     tlog("circuit_breaker", "🚨 Circuit breaker attivo — scan bloccata", 1800)
+        #     continue
 
         # Regime gate: solo se BTC in bear regime
         if not _btc_short_ok:
