@@ -386,6 +386,23 @@ def get_open_short_qty(symbol: str) -> float:
     return 0.0
 
 
+def get_open_short_fill(symbol: str) -> tuple[float, float]:
+    try:
+        resp = _bybit_signed_get("/v5/position/list",
+                                 {"category": "linear", "symbol": symbol})
+        data = resp.json()
+        if data.get("retCode") != 0:
+            return 0.0, 0.0
+        for pos in data.get("result", {}).get("list", []):
+            if pos.get("side") == "Sell":
+                qty = float(pos.get("size", 0) or 0)
+                entry_price = float(pos.get("avgPrice", 0) or 0)
+                return qty, entry_price
+    except Exception:
+        pass
+    return 0.0, 0.0
+
+
 # ── BTC REGIME ────────────────────────────────────────────────────────────────
 def _update_btc_regime() -> None:
     """
@@ -942,7 +959,7 @@ def trailing_worker() -> None:
                                 f"SL→{new_sl_cand:.4f}")
                             notify_telegram(
                                 f"🔒 Ratchet SHORT {symbol}\n"
-                                f"P&L: {pnl_lev:+.1f}% lev\n"
+                                f"P&L al trigger: {pnl_lev:+.1f}% lev\n"
                                 f"Floor garantito: +{best_floor_lev}% lev\n"
                                 f"SL → {new_sl_cand:.4f}"
                             )
@@ -1354,12 +1371,24 @@ def main_loop() -> None:
                 log(f"[ENTRY] {sym} SHORT — ordine fallito")
                 continue
 
+            actual_qty, actual_entry_px = get_open_short_fill(sym)
+            if actual_qty > 0:
+                qty = actual_qty
+            if actual_entry_px > 0:
+                entry_px = actual_entry_px
+
+            actual_r_dist = signal["sl_price"] - entry_px
+            if actual_r_dist <= 0:
+                log(f"[ENTRY] {sym} SHORT — r_dist non valido dopo fill reale")
+                continue
+
             sl_price = signal["sl_price"]
+            sl_pct = actual_r_dist / entry_px * 100
             set_position(sym, {
                 "entry_price":       entry_px,
                 "sl_price":          sl_price,
-                "r_dist":            r_dist,
-                "orig_r_dist":       r_dist,
+                "r_dist":            actual_r_dist,
+                "orig_r_dist":       actual_r_dist,
                 "qty":               qty,
                 "entry_time":        time.time(),
                 "trailing_active":   False,
@@ -1372,9 +1401,9 @@ def main_loop() -> None:
 
             notify_telegram(
                 f"📉 ENTRY SHORT {sym} — Bounce EMA20(4h)\n"
-                f"Entry: {entry_px:.4f} | SL: {sl_price:.4f} (+{signal['sl_pct']:.1f}%)\n"
+                f"Entry: {entry_px:.4f} | SL: {sl_price:.4f} (+{sl_pct:.1f}%)\n"
                 f"EMA20: {signal['ema20_4h']:.4f} | RSI: {signal['rsi']:.0f}\n"
-                f"R-dist: {r_dist:.4f} | Risk: {risk_usdt:.2f} USDT"
+                f"R-dist: {actual_r_dist:.4f} | Risk: {risk_usdt:.2f} USDT"
             )
             entered += 1
             time.sleep(0.5)
