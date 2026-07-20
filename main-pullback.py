@@ -1222,6 +1222,12 @@ def main_loop() -> None:
         # 1) Universo: top 100 per volume
         universe = scan_universe()
         log(f"[SCAN] {len(universe)} coin nel universo (vol>{MIN_VOL_24H_USDT/1e6:.0f}M USDT)")
+        
+        # Diagnostica: mostra top 10 gainers
+        if universe:
+            top10 = universe[:10]
+            top10_str = " | ".join([f"{c['symbol']}:{c['chg24h']:+.1f}%" for c in top10])
+            log(f"[SCAN] Top 10 gainers: {top10_str}")
 
         if not universe:
             continue
