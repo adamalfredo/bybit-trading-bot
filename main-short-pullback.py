@@ -86,6 +86,7 @@ ATR_WINDOW = 14
 # Universo
 MIN_VOL_24H_USDT = 10_000_000
 COINS_TOP_N      = 100
+TRADE_TOP_N      = 12
 
 # Filtri segnale 4h — RILASSATI per trend following sui top losers
 RSI_MIN_4H    = 10.0   # RSI minimo: tolera oversold su dump
@@ -174,6 +175,35 @@ def notify_telegram(msg: str) -> None:
         )
     except Exception as e:
         log(f"[TELEGRAM] err: {e}")
+
+
+def run_startup_self_checks() -> None:
+    errs = []
+    if not (0 < RISK_PCT <= 0.05):
+        errs.append(f"RISK_PCT fuori range: {RISK_PCT}")
+    if not (1 <= DEFAULT_LEVERAGE <= 25):
+        errs.append(f"DEFAULT_LEVERAGE fuori range: {DEFAULT_LEVERAGE}")
+    if not (0 < PARTIAL_TP_PCT <= 1.0):
+        errs.append(f"PARTIAL_TP_PCT fuori range: {PARTIAL_TP_PCT}")
+    if not (0 <= RSI_MIN_4H < RSI_MAX_4H <= 100):
+        errs.append(f"RSI range invalido: {RSI_MIN_4H}-{RSI_MAX_4H}")
+    if not (1 <= TOP_MOMENTUM_FALLBACK_RANK <= COINS_TOP_N):
+        errs.append("TOP_MOMENTUM_FALLBACK_RANK invalido")
+    if not (1 <= TRADE_TOP_N <= COINS_TOP_N):
+        errs.append("TRADE_TOP_N invalido")
+    if TRADE_TOP_N < TOP_MOMENTUM_FALLBACK_RANK:
+        errs.append("TRADE_TOP_N deve essere >= TOP_MOMENTUM_FALLBACK_RANK")
+    for i in range(1, len(RATCHET_TABLE)):
+        prev_t, prev_f = RATCHET_TABLE[i - 1]
+        cur_t, cur_f = RATCHET_TABLE[i]
+        if cur_t <= prev_t or cur_f <= prev_f:
+            errs.append(f"RATCHET_TABLE non crescente in posizione {i}")
+            break
+    if errs:
+        for e in errs:
+            log(f"[SELF-CHECK] ❌ {e}")
+        raise RuntimeError("Self-check startup fallito")
+    log("[SELF-CHECK] ✅ configurazione valida")
 
 
 # ── FIRMA BYBIT ───────────────────────────────────────────────────────────────
@@ -1400,6 +1430,8 @@ def main_loop() -> None:
         checked = 0
         reject_stats_scan = {}
         for rank_idx, coin in enumerate(universe, start=1):
+            if rank_idx > TRADE_TOP_N:
+                break
             if len(open_positions) >= MAX_OPEN_POSITIONS:
                 break
             sym = coin["symbol"]
@@ -1487,6 +1519,7 @@ def main_loop() -> None:
 
 # ── AVVIO ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    run_startup_self_checks()
     log("=" * 62)
     log("  TREND FOLLOWING SHORT — 4h EMA20 BOUNCE REJECTION BOT")
     log("=" * 62)
