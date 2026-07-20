@@ -122,6 +122,7 @@ EXCLUDE_SUBSTRINGS = ["USDC", "BUSD", "DAI", "TUSD", "FRAX",
 
 # ── STATO GLOBALE ─────────────────────────────────────────────────────────────
 open_positions:   set  = set()
+blocked_symbols:  set  = set()
 position_data:    dict = {}
 _state_lock             = threading.RLock()
 _instr_lock             = threading.RLock()
@@ -433,6 +434,8 @@ def scan_universe() -> list:
         if not sym.endswith("USDT"):
             continue
         if any(ex in sym for ex in EXCLUDE_SUBSTRINGS):
+            continue
+        if sym in blocked_symbols:
             continue
         if sym in open_positions:
             continue
@@ -759,6 +762,11 @@ def market_long(symbol: str, usdt_amount: float) -> Optional[float]:
             step_dec  = Decimal(str(qty_step))
             qty_aligned = (qty_aligned // step_dec) * step_dec
             continue
+        if ret in (110125, 110126):
+            blocked_symbols.add(symbol)
+            tlog(f"long_blocked:{symbol}",
+                 f"[LONG] {symbol} esclusa dai prossimi scan: {data.get('retMsg')}", 3600)
+            break
         tlog(f"long_err:{symbol}:{ret}",
              f"[LONG] retCode={ret} {data.get('retMsg')}", 300)
         break
@@ -1233,7 +1241,7 @@ def main_loop() -> None:
         if not universe:
             continue
 
-        # 2) Per ogni candidato: filtro daily trend → segnale 4h
+        # 2) Per ogni candidato: ranking 24h → segnale 4h
         entered = 0
         checked = 0
         reject_stats_scan = {}
@@ -1242,11 +1250,6 @@ def main_loop() -> None:
                 break
             sym = coin["symbol"]
             if sym in open_positions:
-                continue
-
-            # Filtro trend daily (fetch 60 daily candles)
-            if not is_daily_uptrend(sym):
-                time.sleep(0.05)
                 continue
             time.sleep(0.05)
 
@@ -1304,7 +1307,7 @@ def main_loop() -> None:
             entered += 1
             time.sleep(0.5)
 
-        log(f"[SCAN] {checked} coin in uptrend daily | {entered} ingressi | "
+        log(f"[SCAN] {checked} coin verificate | {entered} ingressi | "
             f"posizioni: {len(open_positions)}")
         if reject_stats_scan:
             top_rejects = sorted(reject_stats_scan.items(), key=lambda x: x[1], reverse=True)[:5]
