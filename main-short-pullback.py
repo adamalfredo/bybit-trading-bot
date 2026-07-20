@@ -1235,6 +1235,7 @@ def main_loop() -> None:
             top10 = universe[:10]
             top10_str = " | ".join([f"{c['symbol']}:{c['chg24h']:+.1f}%" for c in top10])
             log(f"[SCAN] Top 10 losers: {top10_str}")
+            log(f"[SCAN] *** #1 LOSER TARGET: {universe[0]['symbol']} ({universe[0]['chg24h']:+.2f}%) ***")
 
         if not universe:
             continue
@@ -1250,9 +1251,11 @@ def main_loop() -> None:
             if sym in open_positions:
                 continue
 
-            if not is_daily_downtrend(sym):
-                time.sleep(0.05)
-                continue
+            # REMOVED: daily downtrend filter on SHORT
+            # If a coin is a top loser by 24h momentum, it's already in downtrend.
+            # The 4h bounce rejection signal is sufficient quality gate.
+            # Previously: if not is_daily_downtrend(sym): continue
+            
             time.sleep(0.05)
 
             checked += 1
