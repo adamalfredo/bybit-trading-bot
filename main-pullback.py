@@ -92,6 +92,8 @@ MAX_SL_PCT     = 8.0    # SL massimo accettabile: 8% sotto entry
 MIN_BODY_PCT   = 0.0    # corpo candela: TOLTO — i top mover hanno candle piccole
 MIN_VOL_RATIO  = 0.0    # volume candela: TOLTO — i top mover su quella candela possono avere vol basso
 MAX_DIST_EMA50_D = 20.0 # daily close max 20% sopra EMA50: evita trend overestesi
+TOP_MOMENTUM_FALLBACK_RANK = 10
+MAX_DIST_EMA_MOMENTUM = 12.0
 
 # BTC filter — disabilitato: qualsiasi EMA a lungo periodo su BTC è sopra 65k
 # per mesi dopo il picco a 100k. Il filtro individuale daily EMA50 per ogni coin
@@ -597,6 +599,65 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None) -> Opti
         "dist_ema":    dist_pct,
         "sl_pct":      sl_pct,
         "ema20_slope": slope_pct,
+    }
+
+
+def check_momentum_entry_signal(symbol: str, reject_stats: Optional[dict] = None) -> Optional[dict]:
+    def reject(reason: str) -> Optional[dict]:
+        if reject_stats is not None:
+            reject_stats[reason] = reject_stats.get(reason, 0) + 1
+        return None
+
+    df = fetch_klines(symbol, interval="240", limit=50)
+    if df is None or len(df) < 25:
+        return reject("kline_insufficient")
+
+    c = df["Close"]
+    h = df["High"]
+    l = df["Low"]
+    o = df["Open"]
+
+    ema20 = c.ewm(span=20, adjust=False).mean()
+    atr_series = AverageTrueRange(high=h, low=l, close=c,
+                                  window=ATR_WINDOW).average_true_range()
+    rsi_series = RSIIndicator(close=c, window=14).rsi()
+
+    last_close = float(c.iloc[-2])
+    last_open = float(o.iloc[-2])
+    last_ema20 = float(ema20.iloc[-2])
+    last_rsi = float(rsi_series.iloc[-2])
+    last_atr = float(atr_series.iloc[-2])
+
+    if pd.isna(last_rsi) or pd.isna(last_atr) or last_atr <= 0 or last_ema20 <= 0:
+        return reject("invalid_rsi_or_atr")
+
+    if last_close <= last_open:
+        return reject("not_green_candle")
+
+    dist_pct = (last_close - last_ema20) / last_ema20 * 100
+    if dist_pct < 0 or dist_pct > MAX_DIST_EMA_MOMENTUM:
+        return reject("distance_from_ema_too_high")
+
+    swing_low = min(float(l.iloc[-2]), float(l.iloc[-3]), float(l.iloc[-4]))
+    sl_price = swing_low - SL_ATR_BUFFER * last_atr
+    r_dist = last_close - sl_price
+    sl_pct = r_dist / last_close * 100
+    if sl_pct > MAX_SL_PCT or r_dist <= 0:
+        return reject("sl_too_wide_or_invalid")
+
+    log(f"[SIGNAL-MOMO] {symbol} | EMA20: {last_ema20:.4f} | dist: +{dist_pct:.1f}% | "
+        f"RSI: {last_rsi:.0f} | SL: -{sl_pct:.1f}%")
+
+    return {
+        "entry_price": last_close,
+        "sl_price": sl_price,
+        "r_dist": r_dist,
+        "atr": last_atr,
+        "rsi": last_rsi,
+        "ema20_4h": last_ema20,
+        "dist_ema": dist_pct,
+        "sl_pct": sl_pct,
+        "ema20_slope": 0.0,
     }
 
 
@@ -1245,7 +1306,7 @@ def main_loop() -> None:
         entered = 0
         checked = 0
         reject_stats_scan = {}
-        for coin in universe:
+        for rank_idx, coin in enumerate(universe, start=1):
             if len(open_positions) >= MAX_OPEN_POSITIONS:
                 break
             sym = coin["symbol"]
@@ -1257,6 +1318,8 @@ def main_loop() -> None:
 
             # Segnale 4h pullback
             signal = check_entry_signal(sym, reject_stats_scan)
+            if not signal and rank_idx <= TOP_MOMENTUM_FALLBACK_RANK:
+                signal = check_momentum_entry_signal(sym, reject_stats_scan)
             if not signal:
                 time.sleep(0.05)
                 continue
