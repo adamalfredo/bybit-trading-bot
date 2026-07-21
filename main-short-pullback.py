@@ -123,6 +123,14 @@ CIRCUIT_BREAKER_COOLDOWN_H = 24
 
 EXCLUDE_SUBSTRINGS = ["USDC", "BUSD", "DAI", "TUSD", "FRAX",
                       "3LUSDT", "3SUSDT", "BULLUSDT", "BEARUSDT"]
+EXCLUDE_SYMBOLS = {
+    s.strip().upper() for s in os.getenv(
+        "EXCLUDE_SYMBOLS",
+        "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,TRXUSDT"
+    ).split(",") if s.strip()
+}
+MIN_ABS_24H_CHANGE = float(os.getenv("MIN_ABS_24H_CHANGE", "4.0"))
+MAX_24H_GAP_FROM_LEADER = float(os.getenv("MAX_24H_GAP_FROM_LEADER", "3.0"))
 
 # ── STATO GLOBALE ─────────────────────────────────────────────────────────────
 open_positions:    set  = set()
@@ -548,6 +556,8 @@ def scan_universe() -> list:
         if not sym.endswith("USDT"):
             continue
         if any(ex in sym for ex in EXCLUDE_SUBSTRINGS):
+            continue
+        if sym in EXCLUDE_SYMBOLS:
             continue
         if sym in blocked_symbols:
             continue
@@ -1430,12 +1440,14 @@ def main_loop() -> None:
         entered = 0
         checked = 0
         reject_stats_scan = {}
+        leader_chg = float(universe[0]["chg24h"])
         for rank_idx, coin in enumerate(universe, start=1):
             if rank_idx > TRADE_TOP_N:
                 break
             if len(open_positions) >= MAX_OPEN_POSITIONS:
                 break
             sym = coin["symbol"]
+            chg24h = float(coin["chg24h"])
             if sym in open_positions:
                 continue
 
@@ -1448,9 +1460,19 @@ def main_loop() -> None:
 
             checked += 1
 
+            if abs(chg24h) < MIN_ABS_24H_CHANGE:
+                reject_stats_scan["chg24h_too_low"] = reject_stats_scan.get("chg24h_too_low", 0) + 1
+                continue
+            if (chg24h - leader_chg) > MAX_24H_GAP_FROM_LEADER:
+                reject_stats_scan["too_far_from_leader"] = reject_stats_scan.get("too_far_from_leader", 0) + 1
+                continue
+
             signal = check_short_signal(sym, reject_stats_scan)
+            signal_source = "SIGNAL"
             if not signal and rank_idx <= TOP_MOMENTUM_FALLBACK_RANK:
                 signal = check_short_momentum_signal(sym, reject_stats_scan)
+                if signal:
+                    signal_source = "SIGNAL-MOMO"
             if not signal:
                 time.sleep(0.05)
                 continue
@@ -1463,7 +1485,9 @@ def main_loop() -> None:
             entry_px  = signal["entry_price"]
             usdt_val  = (risk_usdt / r_dist) * entry_px
 
-            log(f"[SIGNAL] {sym} SHORT | EMA20: {signal['ema20_4h']:.4f} | "
+            log(f"[SIGNAL] {sym} SHORT rank#{rank_idx} chg24h={chg24h:+.2f}% src={signal_source} | "
+                f"leader={leader_chg:+.2f}% gap={chg24h - leader_chg:+.2f}pp | "
+                f"EMA20: {signal['ema20_4h']:.4f} | "
                 f"dist: -{signal['dist_ema']:.1f}% | RSI: {signal['rsi']:.0f} | "
                 f"SL: +{signal['sl_pct']:.1f}% | size: {usdt_val:.1f} USDT")
 
@@ -1510,6 +1534,7 @@ def main_loop() -> None:
 
             notify_telegram(
                 f"📉 ENTRY SHORT {sym} — Bounce EMA20(4h)\n"
+                f"Rank: #{rank_idx} | 24h: {chg24h:+.2f}% | Src: {signal_source}\n"
                 f"Entry: {entry_px:.4f} | SL: {sl_price:.4f} (+{sl_pct:.1f}%)\n"
                 f"EMA20: {signal['ema20_4h']:.4f} | RSI: {signal['rsi']:.0f}\n"
                 f"R-dist: {actual_r_dist:.4f} | Risk: {risk_usdt:.2f} USDT"
