@@ -89,21 +89,22 @@ COINS_TOP_N      = 100
 TRADE_TOP_N      = 12
 
 # Filtri segnale 4h — RILASSATI per trend following sui top losers
-RSI_MIN_4H    = 10.0   # RSI minimo: tolera oversold su dump
-RSI_MAX_4H    = 90.0   # RSI massimo: tolera overbought temporaneo
-EMA_TOUCH_TOL = 0.017  # il HIGH deve essere entro 1.7% sotto EMA20 (o sopra)
+RSI_MIN_4H    = 30.0   # range più selettivo: evita estremi rumorosi
+RSI_MAX_4H    = 70.0
+EMA_TOUCH_TOL = 0.012  # bounce più preciso sulla EMA20
 MAX_DIST_EMA  = 3.0    # % massima close SOTTO EMA20 all'entry (rifiuto fresco)
 CLOSE_ABOVE_EMA_TOL = 0.003  # tolleranza 0.3%: accetta close lievemente sopra EMA20
 MAX_SL_PCT    = 8.0    # SL massimo accettabile: 8% sopra entry
-MIN_BODY_PCT  = 0.0    # corpo candela: TOLTO — i top losers hanno candle piccole
-MIN_VOL_RATIO = 0.0    # volume candela: TOLTO — i top losers su quella candela possono avere vol basso 20
+MIN_BODY_PCT  = 25.0   # evita doji e rejection deboli
+MIN_VOL_RATIO = 0.8    # richiede almeno volume vicino alla media
 MAX_DIST_EMA50_D = 20.0  # daily close max 20% SOTTO EMA50 (non in freefall)
 TOP_MOMENTUM_FALLBACK_RANK = 10
-MAX_DIST_EMA_MOMENTUM = 12.0
+MAX_DIST_EMA_MOMENTUM = 6.0
+REQUIRE_SLOPE_CONFIRMATION = True
 
 # Regime BTC: attiva short solo quando BTC è strutturalmente bearish
 # Se False: bot sempre attivo (solo per testing)
-BTC_SHORT_REGIME_CHECK = False
+BTC_SHORT_REGIME_CHECK = True
 
 # Timing
 SCAN_INTERVAL_SEC  = 1800   # 30 min
@@ -124,10 +125,7 @@ CIRCUIT_BREAKER_COOLDOWN_H = 24
 EXCLUDE_SUBSTRINGS = ["USDC", "BUSD", "DAI", "TUSD", "FRAX",
                       "3LUSDT", "3SUSDT", "BULLUSDT", "BEARUSDT"]
 EXCLUDE_SYMBOLS = {
-    s.strip().upper() for s in os.getenv(
-        "EXCLUDE_SYMBOLS",
-        "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,TRXUSDT"
-    ).split(",") if s.strip()
+    s.strip().upper() for s in os.getenv("EXCLUDE_SYMBOLS", "").split(",") if s.strip()
 }
 MIN_ABS_24H_CHANGE = float(os.getenv("MIN_ABS_24H_CHANGE", "4.0"))
 MAX_24H_GAP_FROM_LEADER = float(os.getenv("MAX_24H_GAP_FROM_LEADER", "3.0"))
@@ -706,7 +704,8 @@ def check_short_signal(symbol: str, reject_stats: Optional[dict] = None) -> Opti
         f"({'OK discesa' if slope_ok else 'WARN salita'}) | "
         f"RSI={last_rsi:.1f} dist={dist_pct:.2f}% sl={sl_pct:.2f}%")
 
-    # Diag-only: slope non blocca l'entry.
+    if REQUIRE_SLOPE_CONFIRMATION and not slope_ok:
+        return reject("ema20_slope_not_down")
 
     return {
         "entry_price": last_close,
@@ -756,6 +755,11 @@ def check_short_momentum_signal(symbol: str, reject_stats: Optional[dict] = None
     dist_pct = (last_ema20 - last_close) / last_ema20 * 100
     if dist_pct < 0 or dist_pct > MAX_DIST_EMA_MOMENTUM:
         return reject("distance_from_ema_too_high")
+
+    ema20_3ago = float(ema20.iloc[-5])
+    slope_pct = (last_ema20 - ema20_3ago) / ema20_3ago * 100 if ema20_3ago > 0 else 0.0
+    if REQUIRE_SLOPE_CONFIRMATION and slope_pct >= 0:
+        return reject("ema20_slope_not_down")
 
     swing_high = max(float(h.iloc[-2]), float(h.iloc[-3]), float(h.iloc[-4]))
     sl_price = swing_high + SL_ATR_BUFFER * last_atr
@@ -1404,11 +1408,9 @@ def main_loop() -> None:
         n_open = len(open_positions)
         log(f"[SCAN] ─── Avvio scansione SHORT ─── open: {n_open}/{MAX_OPEN_POSITIONS}")
 
-        # Circuit breaker disabilitato: attendendo verifica ranking
-        # Reabilitare dopo aver confermato che il ranking funziona correttamente
-        # if check_circuit_breaker():
-        #     tlog("circuit_breaker", "🚨 Circuit breaker attivo — scan bloccata", 1800)
-        #     continue
+        if check_circuit_breaker():
+            tlog("circuit_breaker", "🚨 Circuit breaker attivo — scan bloccata", 1800)
+            continue
 
         # Regime gate: solo se BTC in bear regime
         if not _btc_short_ok:

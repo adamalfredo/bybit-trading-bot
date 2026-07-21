@@ -85,17 +85,18 @@ COINS_TOP_N      = 100         # top N per volume da scansionare
 TRADE_TOP_N      = 12          # apre trade solo entro i primi N del ranking 24h
 
 # Filtri segnale — RILASSATI per trend following sui top mover
-RSI_MIN_4H     = 10.0   # RSI minimo: tolera oversold su pump
-RSI_MAX_4H     = 90.0   # RSI massimo: tolera overbought su pump
-EMA_TOUCH_TOL  = 0.017  # il low deve essere entro 1.7% sopra EMA20 (o sotto)
+RSI_MIN_4H     = 30.0   # range più selettivo: evita estremi rumorosi
+RSI_MAX_4H     = 70.0
+EMA_TOUCH_TOL  = 0.012  # tocco più preciso alla EMA20
 MAX_DIST_EMA   = 3.0    # % massima close sopra EMA20 all'entry
 CLOSE_BELOW_EMA_TOL = 0.003  # tolleranza 0.3%: accetta close lievemente sotto EMA20
 MAX_SL_PCT     = 8.0    # SL massimo accettabile: 8% sotto entry
-MIN_BODY_PCT   = 0.0    # corpo candela: TOLTO — i top mover hanno candle piccole
-MIN_VOL_RATIO  = 0.0    # volume candela: TOLTO — i top mover su quella candela possono avere vol basso
+MIN_BODY_PCT   = 25.0   # evita doji e rimbalzi deboli
+MIN_VOL_RATIO  = 0.8    # richiede almeno volume vicino alla media
 MAX_DIST_EMA50_D = 20.0 # daily close max 20% sopra EMA50: evita trend overestesi
 TOP_MOMENTUM_FALLBACK_RANK = 10
-MAX_DIST_EMA_MOMENTUM = 12.0
+MAX_DIST_EMA_MOMENTUM = 6.0
+REQUIRE_SLOPE_CONFIRMATION = True
 
 # BTC filter — disabilitato: qualsiasi EMA a lungo periodo su BTC è sopra 65k
 # per mesi dopo il picco a 100k. Il filtro individuale daily EMA50 per ogni coin
@@ -124,10 +125,7 @@ TIME_STOP_MIN_LEV = 10.0  # se dopo N giorni P&L lev < 10%, esce a breakeven
 EXCLUDE_SUBSTRINGS = ["USDC", "BUSD", "DAI", "TUSD", "FRAX",
                       "3LUSDT", "3SUSDT", "BULLUSDT", "BEARUSDT"]
 EXCLUDE_SYMBOLS = {
-    s.strip().upper() for s in os.getenv(
-        "EXCLUDE_SYMBOLS",
-        "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,TRXUSDT"
-    ).split(",") if s.strip()
+    s.strip().upper() for s in os.getenv("EXCLUDE_SYMBOLS", "").split(",") if s.strip()
 }
 MIN_ABS_24H_CHANGE = float(os.getenv("MIN_ABS_24H_CHANGE", "4.0"))
 MAX_24H_GAP_FROM_LEADER = float(os.getenv("MAX_24H_GAP_FROM_LEADER", "3.0"))
@@ -682,7 +680,7 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None) -> Opti
     if sl_pct > MAX_SL_PCT or r_dist <= 0:
         return reject("sl_too_wide_or_invalid")
 
-    # ── DIAG: slope EMA20(4h) — non filtra ancora, solo logging ──────────────
+    # ── Slope EMA20(4h): conferma direzione trend locale ─────────────────────
     # slope = variazione % EMA20 tra candela corrente e 3 barre fa
     # slope > 0 = EMA20 in salita (pullback sano)
     # slope ≤ 0 = EMA20 piatta/in calo (potenziale breakdown, da filtrare)
@@ -693,7 +691,8 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None) -> Opti
         f"({'OK salita' if slope_ok else 'WARN piatta/discesa'}) | "
         f"RSI={last_rsi:.1f} dist_ema={dist_pct:.2f}% sl_pct={sl_pct:.2f}%")
 
-    # Diag-only: slope non blocca l'entry.
+    if REQUIRE_SLOPE_CONFIRMATION and not slope_ok:
+        return reject("ema20_slope_not_up")
 
     return {
         "entry_price": last_close,
@@ -743,6 +742,11 @@ def check_momentum_entry_signal(symbol: str, reject_stats: Optional[dict] = None
     dist_pct = (last_close - last_ema20) / last_ema20 * 100
     if dist_pct < 0 or dist_pct > MAX_DIST_EMA_MOMENTUM:
         return reject("distance_from_ema_too_high")
+
+    ema20_3ago = float(ema20.iloc[-5])
+    slope_pct = (last_ema20 - ema20_3ago) / ema20_3ago * 100 if ema20_3ago > 0 else 0.0
+    if REQUIRE_SLOPE_CONFIRMATION and slope_pct <= 0:
+        return reject("ema20_slope_not_up")
 
     swing_low = min(float(l.iloc[-2]), float(l.iloc[-3]), float(l.iloc[-4]))
     sl_price = swing_low - SL_ATR_BUFFER * last_atr
@@ -1401,11 +1405,9 @@ def main_loop() -> None:
         n_open = len(open_positions)
         log(f"[SCAN] ─── Avvio scansione ─── open: {n_open}/{MAX_OPEN_POSITIONS}")
 
-        # Circuit breaker disabilitato: attendendo verifica ranking
-        # Reabilitare dopo aver confermato che il ranking funziona correttamente
-        # if check_circuit_breaker():
-        #     tlog("circuit_breaker", "🚨 Circuit breaker attivo — scan bloccata", 1800)
-        #     continue
+        if check_circuit_breaker():
+            tlog("circuit_breaker", "🚨 Circuit breaker attivo — scan bloccata", 1800)
+            continue
 
         if not _btc_ok:
             log("[SCAN] BTC filter attivo — scan sospesa")
