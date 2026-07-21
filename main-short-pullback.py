@@ -778,10 +778,11 @@ def set_position_stoploss_short(symbol: str, sl_price: float) -> bool:
     Man mano che il trade va in profitto (prezzo scende), lo SL viene abbassato.
     """
     cur = get_last_price(symbol)
-    if cur and sl_price <= cur * 1.0005:
-        tlog(f"sl_skip:{symbol}",
-             f"[SL] {symbol} SL={sl_price:.6f} <= prezzo={cur:.6f}, skip", 300)
-        return False
+    if cur and sl_price <= cur:
+        # Fail-safe: se lo SL calcolato è finito sotto/al prezzo corrente
+        # (slippage o drift), riallinealo appena sopra il mercato.
+        sl_price = cur * 1.001
+        log(f"[SL] {symbol} riallineato sopra mercato: {sl_price:.6f}")
     info     = get_instrument_info(symbol)
     # Ceiling: arrotonda al tick superiore (SL short deve stare SOPRA)
     stop_str = format_price_ceil(sl_price, info.get("price_step", 0.01))
@@ -1498,7 +1499,14 @@ def main_loop() -> None:
             })
             add_open(sym)
             time.sleep(0.3)
-            set_position_stoploss_short(sym, sl_price)
+            sl_ok = set_position_stoploss_short(sym, sl_price)
+            if not sl_ok:
+                log(f"[ENTRY] {sym} SHORT ⚠️ SL non impostato — chiusura di sicurezza")
+                market_close_short(sym, qty)
+                discard_open(sym)
+                with _state_lock:
+                    position_data.pop(sym, None)
+                continue
 
             notify_telegram(
                 f"📉 ENTRY SHORT {sym} — Bounce EMA20(4h)\n"

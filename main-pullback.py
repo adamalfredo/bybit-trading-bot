@@ -761,9 +761,10 @@ def check_momentum_entry_signal(symbol: str, reject_stats: Optional[dict] = None
 def set_position_stoploss_long(symbol: str, sl_price: float) -> bool:
     cur = get_last_price(symbol)
     if cur and sl_price >= cur:
-        tlog(f"sl_skip:{symbol}",
-             f"[SL] {symbol} SL={sl_price:.6f} >= prezzo={cur:.6f}, skip", 300)
-        return False
+        # Fail-safe: se lo SL calcolato è finito sopra/al prezzo corrente
+        # (slippage o drift), riallinealo appena sotto il mercato.
+        sl_price = cur * 0.999
+        log(f"[SL] {symbol} riallineato sotto mercato: {sl_price:.6f}")
     info     = get_instrument_info(symbol)
     stop_str = format_price_bybit(sl_price, info.get("price_step", 0.01))
     body = {"category": "linear", "symbol": symbol,
@@ -1489,7 +1490,14 @@ def main_loop() -> None:
             })
             add_open(sym)
             time.sleep(0.3)
-            set_position_stoploss_long(sym, sl_price)
+            sl_ok = set_position_stoploss_long(sym, sl_price)
+            if not sl_ok:
+                log(f"[ENTRY] {sym} ⚠️ SL non impostato — chiusura di sicurezza")
+                market_close_partial(sym, qty)
+                discard_open(sym)
+                with _state_lock:
+                    position_data.pop(sym, None)
+                continue
 
             notify_telegram(
                 f"📈 ENTRY {sym} — Pullback EMA20(4h)\n"
