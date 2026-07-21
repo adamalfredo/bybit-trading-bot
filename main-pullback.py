@@ -129,7 +129,6 @@ EXCLUDE_SYMBOLS = {
     s.strip().upper() for s in os.getenv("EXCLUDE_SYMBOLS", "").split(",") if s.strip()
 }
 MIN_ABS_24H_CHANGE = float(os.getenv("MIN_ABS_24H_CHANGE", "4.0"))
-MAX_24H_GAP_FROM_LEADER = float(os.getenv("MAX_24H_GAP_FROM_LEADER", "3.0"))
 
 # ── STATO GLOBALE ─────────────────────────────────────────────────────────────
 open_positions:   set  = set()
@@ -1483,10 +1482,6 @@ def main_loop() -> None:
             if chg24h < MIN_ABS_24H_CHANGE:
                 reject_stats_scan["chg24h_too_low"] = reject_stats_scan.get("chg24h_too_low", 0) + 1
                 continue
-            if (leader_chg - chg24h) > MAX_24H_GAP_FROM_LEADER:
-                reject_stats_scan["too_far_from_leader"] = reject_stats_scan.get("too_far_from_leader", 0) + 1
-                continue
-
             # Segnale 4h pullback
             signal = check_entry_signal(sym, reject_stats_scan)
             signal_source = "SIGNAL"
