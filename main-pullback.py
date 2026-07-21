@@ -53,6 +53,7 @@ DEFAULT_LEVERAGE   = 5        # leva ridotta: 4h = posizioni più lunghe
 MAX_OPEN_POSITIONS = 5
 MARGIN_USE_PCT     = 0.30
 ORDER_USDT_MAX     = float(os.getenv("ORDER_USDT_MAX", "1000"))
+MAX_TOTAL_OPEN_RISK_PCT = float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", "0.04"))
 
 SL_ATR_BUFFER    = 0.3   # buffer aggiuntivo sotto swing low (× ATR)
 TRAIL_ATR_MULT   = 2.0   # moltiplicatore ATR per il trailing stop dal massimo
@@ -419,6 +420,25 @@ def get_total_equity() -> float:
                      or acct.get("totalAvailableBalance") or 0.0)
     except Exception:
         return get_usdt_balance()
+
+
+def estimate_open_risk_usdt() -> float:
+    """Somma la perdita teorica fino allo SL di tutte le posizioni LONG aperte."""
+    total = 0.0
+    for sym in list(open_positions):
+        entry = get_position(sym)
+        if not entry:
+            continue
+        qty = float(entry.get("qty", 0) or 0)
+        ep = float(entry.get("entry_price", 0) or 0)
+        sl = float(entry.get("sl_price", 0) or 0)
+        if qty <= 0 or ep <= 0 or sl <= 0:
+            continue
+        per_unit_risk = ep - sl
+        if per_unit_risk <= 0:
+            continue
+        total += per_unit_risk * qty
+    return total
 
 
 # ── KLINES ────────────────────────────────────────────────────────────────────
@@ -1418,6 +1438,17 @@ def main_loop() -> None:
             tlog("max_open", f"[SCAN] MAX {MAX_OPEN_POSITIONS} posizioni aperte, attendo", 600)
             continue
 
+        equity_scan = get_total_equity()
+        if equity_scan > 0:
+            open_risk_usdt = estimate_open_risk_usdt()
+            open_risk_pct = open_risk_usdt / equity_scan
+            if open_risk_pct >= MAX_TOTAL_OPEN_RISK_PCT:
+                tlog("risk_cap_open",
+                     f"[RISK-CAP] open risk={open_risk_pct*100:.1f}% >= "
+                     f"{MAX_TOTAL_OPEN_RISK_PCT*100:.1f}% — stop nuovi ingressi",
+                     300)
+                continue
+
         # 1) Universo: top 100 per volume
         universe = scan_universe()
         log(f"[SCAN] {len(universe)} coin nel universo (vol>{MIN_VOL_24H_USDT/1e6:.0f}M USDT)")
@@ -1472,6 +1503,10 @@ def main_loop() -> None:
             if equity <= 0:
                 continue
             risk_usdt = equity * RISK_PCT
+            open_risk_usdt = estimate_open_risk_usdt()
+            if (open_risk_usdt + risk_usdt) > equity * MAX_TOTAL_OPEN_RISK_PCT:
+                reject_stats_scan["portfolio_risk_cap"] = reject_stats_scan.get("portfolio_risk_cap", 0) + 1
+                continue
             r_dist    = signal["r_dist"]
             entry_px  = signal["entry_price"]
             usdt_val  = (risk_usdt / r_dist) * entry_px
