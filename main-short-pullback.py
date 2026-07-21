@@ -1444,16 +1444,16 @@ def main_loop() -> None:
                  f"[SCAN] MAX {MAX_OPEN_POSITIONS} posizioni aperte, attendo", 600)
             continue
 
-           equity_scan = get_total_equity()
-           if equity_scan > 0:
-              open_risk_usdt = estimate_open_risk_usdt()
-              open_risk_pct = open_risk_usdt / equity_scan
-              if open_risk_pct >= MAX_TOTAL_OPEN_RISK_PCT:
-                 tlog("risk_cap_open",
+        equity_scan = get_total_equity()
+        if equity_scan > 0:
+            open_risk_usdt = estimate_open_risk_usdt()
+            open_risk_pct = open_risk_usdt / equity_scan
+            if open_risk_pct >= MAX_TOTAL_OPEN_RISK_PCT:
+                tlog("risk_cap_open",
                      f"[RISK-CAP] open risk={open_risk_pct*100:.1f}% >= "
                      f"{MAX_TOTAL_OPEN_RISK_PCT*100:.1f}% — stop nuovi ingressi",
                      300)
-                 continue
+                continue
 
         # 1) Universo: top 100 per volume
         universe = scan_universe()
