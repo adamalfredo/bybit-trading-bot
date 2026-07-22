@@ -107,12 +107,12 @@ SL_BASE_ATR_BUFFER = 0.2
 
 # Adaptive engine (percentili + ATR-normalized momentum)
 ADAPTIVE_LOOKBACK_BARS = 48
-ADAPTIVE_BASE_WIDTH_PCTL = 0.65
+ADAPTIVE_BASE_WIDTH_PCTL = 0.75
 ADAPTIVE_RVOL_PCTL = 0.45
-ADAPTIVE_MOM_PCTL_SHORT = 0.40
-ADAPTIVE_MIN_NORM_Z_SHORT = 0.0
+ADAPTIVE_MOM_PCTL_SHORT = 0.50
+ADAPTIVE_MIN_NORM_Z_SHORT = -0.20
 ADAPTIVE_BASE_MIN_PCT = 0.8
-ADAPTIVE_BASE_MAX_PCT = 5.0
+ADAPTIVE_BASE_MAX_PCT = 6.5
 ADAPTIVE_RVOL_MIN = 0.70
 ADAPTIVE_RVOL_MAX = 1.25
 MAX_CHG_1H_PCT_CEIL = -0.15
@@ -146,7 +146,7 @@ EXCLUDE_SUBSTRINGS = ["USDC", "BUSD", "DAI", "TUSD", "FRAX",
 EXCLUDE_SYMBOLS = {
     s.strip().upper() for s in os.getenv("EXCLUDE_SYMBOLS", "").split(",") if s.strip()
 }
-MIN_ABS_24H_CHANGE = float(os.getenv("MIN_ABS_24H_CHANGE", "4.0"))
+MIN_ABS_24H_CHANGE = float(os.getenv("MIN_ABS_24H_CHANGE", "3.5"))
 
 # ── STATO GLOBALE ─────────────────────────────────────────────────────────────
 open_positions:    set  = set()
