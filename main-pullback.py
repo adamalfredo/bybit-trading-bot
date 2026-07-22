@@ -720,8 +720,9 @@ def _compute_long_adaptive_thresholds(
 
 
 # ── SIGNAL CHECK 1h (ANTICIPAZIONE BREAKOUT) ─────────────────────────────────
-def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None) -> Optional[dict]:
+def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None, rank: int = 99) -> Optional[dict]:
     """Entry LONG di anticipazione con soglie adattive su breakout 1h."""
+    top_gainer = rank <= 3
     def reject(reason: str) -> Optional[dict]:
         if reject_stats is not None:
             reject_stats[reason] = reject_stats.get(reason, 0) + 1
@@ -763,7 +764,7 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None) -> Opti
     base_high = float(h.iloc[last_idx - BASE_LOOKBACK_BARS:last_idx].max())
     base_low = float(l.iloc[last_idx - BASE_LOOKBACK_BARS:last_idx].min())
     base_range_pct = (base_high - base_low) / last_close * 100 if last_close > 0 else 0.0
-    if base_range_pct > adaptive["base_max_pct"]:
+    if base_range_pct > adaptive["base_max_pct"] and not top_gainer:
         return reject("base_too_wide")
 
     # Breakout confermato: tolleranza minima su close se c'e' wick sopra base.
@@ -1548,7 +1549,7 @@ def main_loop() -> None:
                 reject_stats_scan["chg24h_too_low"] = reject_stats_scan.get("chg24h_too_low", 0) + 1
                 continue
             # Segnale di anticipazione breakout
-            signal = check_entry_signal(sym, reject_stats_scan)
+            signal = check_entry_signal(sym, reject_stats_scan, rank=rank_idx)
             signal_source = "SIGNAL-ANTI"
             if not signal:
                 time.sleep(0.05)

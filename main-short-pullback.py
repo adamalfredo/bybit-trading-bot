@@ -759,8 +759,9 @@ def _compute_short_adaptive_thresholds(
 
 
 # ── SIGNAL CHECK 1h (ANTICIPAZIONE BREAKDOWN) ────────────────────────────────
-def check_short_signal(symbol: str, reject_stats: Optional[dict] = None) -> Optional[dict]:
+def check_short_signal(symbol: str, reject_stats: Optional[dict] = None, rank: int = 99) -> Optional[dict]:
     """Entry SHORT di anticipazione con soglie adattive su breakdown 1h."""
+    top_loser = rank <= 3
     def reject(reason: str) -> Optional[dict]:
         if reject_stats is not None:
             reject_stats[reason] = reject_stats.get(reason, 0) + 1
@@ -802,7 +803,7 @@ def check_short_signal(symbol: str, reject_stats: Optional[dict] = None) -> Opti
     base_high = float(h.iloc[last_idx - BASE_LOOKBACK_BARS:last_idx].max())
     base_low = float(l.iloc[last_idx - BASE_LOOKBACK_BARS:last_idx].min())
     base_range_pct = (base_high - base_low) / last_close * 100 if last_close > 0 else 0.0
-    if base_range_pct > adaptive["base_max_pct"]:
+    if base_range_pct > adaptive["base_max_pct"] and not top_loser:
         return reject("base_too_wide")
 
     # Breakdown confermato: tolleranza minima su close se c'e' wick sotto base.
@@ -1586,7 +1587,7 @@ def main_loop() -> None:
             if abs(chg24h) < MIN_ABS_24H_CHANGE:
                 reject_stats_scan["chg24h_too_low"] = reject_stats_scan.get("chg24h_too_low", 0) + 1
                 continue
-            signal = check_short_signal(sym, reject_stats_scan)
+            signal = check_short_signal(sym, reject_stats_scan, rank=rank_idx)
             signal_source = "SIGNAL-ANTI"
             if not signal:
                 time.sleep(0.05)
