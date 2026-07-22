@@ -107,18 +107,20 @@ SL_BASE_ATR_BUFFER = 0.2
 
 # Adaptive engine (percentili + ATR-normalized momentum)
 ADAPTIVE_LOOKBACK_BARS = 48
-ADAPTIVE_BASE_WIDTH_PCTL = 0.75
+ADAPTIVE_BASE_WIDTH_PCTL = 0.82
 ADAPTIVE_RVOL_PCTL = 0.45
 ADAPTIVE_MOM_PCTL_SHORT = 0.50
 ADAPTIVE_MIN_NORM_Z_SHORT = -0.20
 ADAPTIVE_BASE_MIN_PCT = 0.8
-ADAPTIVE_BASE_MAX_PCT = 6.5
+ADAPTIVE_BASE_MAX_PCT = 7.5
 ADAPTIVE_RVOL_MIN = 0.70
 ADAPTIVE_RVOL_MAX = 1.25
 MAX_CHG_1H_PCT_CEIL = -0.15
 MAX_CHG_1H_PCT_FLOOR = -2.50
 MAX_CHG_4H_PCT_CEIL = -0.40
 MAX_CHG_4H_PCT_FLOOR = -4.00
+BREAK_CONFIRM_ATR_TOL = 0.20
+BREAK_CONFIRM_PCT_TOL = 0.12
 
 # Regime BTC: attiva short solo quando BTC è strutturalmente bearish
 # Se False: bot sempre attivo (solo per testing)
@@ -803,8 +805,10 @@ def check_short_signal(symbol: str, reject_stats: Optional[dict] = None) -> Opti
     if base_range_pct > adaptive["base_max_pct"]:
         return reject("base_too_wide")
 
-    # Breakdown confermato su chiusura.
-    if last_close >= base_low:
+    # Breakdown confermato: tolleranza minima su close se c'e' wick sotto base.
+    close_tol = max(last_atr * BREAK_CONFIRM_ATR_TOL, last_close * BREAK_CONFIRM_PCT_TOL / 100.0)
+    broke_with_wick = float(l.iloc[last_idx]) < base_low
+    if not (last_close <= (base_low + close_tol) and broke_with_wick):
         return reject("breakdown_not_confirmed")
 
     # Candela di conferma rossa.

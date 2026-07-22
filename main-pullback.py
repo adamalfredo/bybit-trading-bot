@@ -103,16 +103,18 @@ SL_BASE_ATR_BUFFER = 0.2
 
 # Adaptive engine (percentili + ATR-normalized momentum)
 ADAPTIVE_LOOKBACK_BARS = 48
-ADAPTIVE_BASE_WIDTH_PCTL = 0.75
+ADAPTIVE_BASE_WIDTH_PCTL = 0.82
 ADAPTIVE_RVOL_PCTL = 0.45
 ADAPTIVE_MOM_PCTL_LONG = 0.60
 ADAPTIVE_MIN_NORM_Z_LONG = -0.20
 ADAPTIVE_BASE_MIN_PCT = 0.8
-ADAPTIVE_BASE_MAX_PCT = 6.5
+ADAPTIVE_BASE_MAX_PCT = 7.5
 ADAPTIVE_RVOL_MIN = 0.70
 ADAPTIVE_RVOL_MAX = 1.25
 MIN_CHG_1H_PCT_FLOOR = 0.15
 MIN_CHG_4H_PCT_FLOOR = 0.45
+BREAK_CONFIRM_ATR_TOL = 0.20
+BREAK_CONFIRM_PCT_TOL = 0.12
 
 # BTC filter — disabilitato: qualsiasi EMA a lungo periodo su BTC è sopra 65k
 # per mesi dopo il picco a 100k. Il filtro individuale daily EMA50 per ogni coin
@@ -764,8 +766,10 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None) -> Opti
     if base_range_pct > adaptive["base_max_pct"]:
         return reject("base_too_wide")
 
-    # Breakout confermato su chiusura.
-    if last_close <= base_high:
+    # Breakout confermato: tolleranza minima su close se c'e' wick sopra base.
+    close_tol = max(last_atr * BREAK_CONFIRM_ATR_TOL, last_close * BREAK_CONFIRM_PCT_TOL / 100.0)
+    broke_with_wick = float(h.iloc[last_idx]) > base_high
+    if not (last_close >= (base_high - close_tol) and broke_with_wick):
         return reject("breakout_not_confirmed")
 
     # Candela di conferma verde.
