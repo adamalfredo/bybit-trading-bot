@@ -101,6 +101,19 @@ MIN_CHG_4H_PCT = 1.0
 BASE_LOOKBACK_BARS = 8
 SL_BASE_ATR_BUFFER = 0.2
 
+# Adaptive engine (percentili + ATR-normalized momentum)
+ADAPTIVE_LOOKBACK_BARS = 48
+ADAPTIVE_BASE_WIDTH_PCTL = 0.65
+ADAPTIVE_RVOL_PCTL = 0.45
+ADAPTIVE_MOM_PCTL_LONG = 0.60
+ADAPTIVE_MIN_NORM_Z_LONG = 0.0
+ADAPTIVE_BASE_MIN_PCT = 0.8
+ADAPTIVE_BASE_MAX_PCT = 5.0
+ADAPTIVE_RVOL_MIN = 0.70
+ADAPTIVE_RVOL_MAX = 1.25
+MIN_CHG_1H_PCT_FLOOR = 0.20
+MIN_CHG_4H_PCT_FLOOR = 0.60
+
 # BTC filter — disabilitato: qualsiasi EMA a lungo periodo su BTC è sopra 65k
 # per mesi dopo il picco a 100k. Il filtro individuale daily EMA50 per ogni coin
 # è già sufficiente come protezione.
@@ -197,6 +210,14 @@ def run_startup_self_checks() -> None:
         errs.append("BASE_LOOKBACK_BARS troppo basso")
     if MIN_CHG_4H_PCT < MIN_CHG_1H_PCT:
         errs.append("MIN_CHG_4H_PCT deve essere >= MIN_CHG_1H_PCT")
+    if ADAPTIVE_LOOKBACK_BARS < 24:
+        errs.append("ADAPTIVE_LOOKBACK_BARS troppo basso")
+    if not (0.0 < ADAPTIVE_BASE_WIDTH_PCTL < 1.0):
+        errs.append("ADAPTIVE_BASE_WIDTH_PCTL fuori range")
+    if not (0.0 < ADAPTIVE_RVOL_PCTL < 1.0):
+        errs.append("ADAPTIVE_RVOL_PCTL fuori range")
+    if not (0.0 < ADAPTIVE_MOM_PCTL_LONG < 1.0):
+        errs.append("ADAPTIVE_MOM_PCTL_LONG fuori range")
     for i in range(1, len(RATCHET_TABLE)):
         prev_t, prev_f = RATCHET_TABLE[i - 1]
         cur_t, cur_f = RATCHET_TABLE[i]
@@ -603,9 +624,102 @@ def is_daily_uptrend(symbol: str) -> bool:
     return True
 
 
+def _clamp(value: float, min_value: float, max_value: float) -> float:
+    return max(min_value, min(max_value, value))
+
+
+def _safe_quantile(values: list[float], q: float, fallback: float) -> float:
+    if not values:
+        return fallback
+    s = pd.Series(values).dropna()
+    if s.empty:
+        return fallback
+    return float(s.quantile(q))
+
+
+def _compute_long_adaptive_thresholds(
+    c: pd.Series,
+    h: pd.Series,
+    l: pd.Series,
+    v: pd.Series,
+    atr_series: pd.Series,
+    last_idx: int,
+) -> dict:
+    lookback = max(24, min(ADAPTIVE_LOOKBACK_BARS, last_idx - 6))
+
+    base_hist = []
+    base_start_j = max(BASE_LOOKBACK_BARS, last_idx - lookback + 1)
+    for j in range(base_start_j, last_idx + 1):
+        close_j = float(c.iloc[j])
+        if close_j <= 0:
+            continue
+        bh = float(h.iloc[j - BASE_LOOKBACK_BARS:j].max())
+        bl = float(l.iloc[j - BASE_LOOKBACK_BARS:j].min())
+        base_hist.append((bh - bl) / close_j * 100.0)
+
+    rvol_hist = []
+    rvol_start_j = max(22, last_idx - lookback + 1)
+    for j in range(rvol_start_j, last_idx + 1):
+        vol_avg = float(v.iloc[j - 20:j].mean())
+        if vol_avg <= 0:
+            continue
+        rvol_hist.append(float(v.iloc[j]) / vol_avg)
+
+    chg1h_hist = (c.pct_change(1) * 100.0).iloc[max(1, last_idx - lookback + 1):last_idx + 1]
+    chg4h_hist = (c.pct_change(4) * 100.0).iloc[max(4, last_idx - lookback + 1):last_idx + 1]
+    chg1h_vals = [float(x) for x in chg1h_hist.dropna().tolist()]
+    chg4h_vals = [float(x) for x in chg4h_hist.dropna().tolist()]
+
+    norm_hist = []
+    norm_start_j = max(1, last_idx - lookback + 1)
+    for j in range(norm_start_j, last_idx + 1):
+        close_j = float(c.iloc[j])
+        atr_j = float(atr_series.iloc[j])
+        prev_j = float(c.iloc[j - 1])
+        if close_j <= 0 or prev_j <= 0 or atr_j <= 0:
+            continue
+        atr_pct = atr_j / close_j * 100.0
+        if atr_pct <= 0:
+            continue
+        ret_1h = (close_j / prev_j - 1.0) * 100.0
+        norm_hist.append(ret_1h / atr_pct)
+
+    base_thr = _clamp(
+        _safe_quantile(base_hist, ADAPTIVE_BASE_WIDTH_PCTL, MAX_DIST_EMA),
+        ADAPTIVE_BASE_MIN_PCT,
+        ADAPTIVE_BASE_MAX_PCT,
+    )
+    rvol_thr = _clamp(
+        _safe_quantile(rvol_hist, ADAPTIVE_RVOL_PCTL, MIN_VOL_RATIO),
+        ADAPTIVE_RVOL_MIN,
+        ADAPTIVE_RVOL_MAX,
+    )
+    min_chg_1h = max(
+        MIN_CHG_1H_PCT_FLOOR,
+        _safe_quantile(chg1h_vals, ADAPTIVE_MOM_PCTL_LONG, MIN_CHG_1H_PCT),
+    )
+    min_chg_4h = max(
+        MIN_CHG_4H_PCT_FLOOR,
+        _safe_quantile(chg4h_vals, ADAPTIVE_MOM_PCTL_LONG, MIN_CHG_4H_PCT),
+    )
+
+    norm_series = pd.Series(norm_hist).dropna()
+    norm_mu = float(norm_series.mean()) if not norm_series.empty else 0.0
+    norm_std = float(norm_series.std(ddof=0)) if len(norm_series) > 1 else 0.0
+
+    return {
+        "base_max_pct": base_thr,
+        "min_rvol": rvol_thr,
+        "min_chg_1h": min_chg_1h,
+        "min_chg_4h": max(min_chg_4h, min_chg_1h),
+        "norm_mu": norm_mu,
+        "norm_std": norm_std,
+    }
+
+
 # ── SIGNAL CHECK 1h (ANTICIPAZIONE BREAKOUT) ─────────────────────────────────
 def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None) -> Optional[dict]:
-    """Entry LONG di anticipazione su breakout 1h da base compressa."""
+    """Entry LONG di anticipazione con soglie adattive su breakout 1h."""
     def reject(reason: str) -> Optional[dict]:
         if reject_stats is not None:
             reject_stats[reason] = reject_stats.get(reason, 0) + 1
@@ -638,12 +752,16 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None) -> Opti
     if last_ema20 <= 0:
         return reject("invalid_ema20")
 
-    base_start = -2 - BASE_LOOKBACK_BARS
-    base_end = -2
-    base_high = float(h.iloc[base_start:base_end].max())
-    base_low = float(l.iloc[base_start:base_end].min())
+    last_idx = len(df) - 2
+    if last_idx - BASE_LOOKBACK_BARS < 0 or last_idx - 6 < 0:
+        return reject("kline_window_too_short")
+
+    adaptive = _compute_long_adaptive_thresholds(c, h, l, v, atr_series, last_idx)
+
+    base_high = float(h.iloc[last_idx - BASE_LOOKBACK_BARS:last_idx].max())
+    base_low = float(l.iloc[last_idx - BASE_LOOKBACK_BARS:last_idx].min())
     base_range_pct = (base_high - base_low) / last_close * 100 if last_close > 0 else 0.0
-    if base_range_pct > MAX_DIST_EMA:
+    if base_range_pct > adaptive["base_max_pct"]:
         return reject("base_too_wide")
 
     # Breakout confermato su chiusura.
@@ -675,18 +793,27 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None) -> Opti
     vol_avg = float(v.iloc[-22:-2].mean())
     vol_sig = float(v.iloc[-2])
     rvol = (vol_sig / vol_avg) if vol_avg > 0 else 0.0
-    if rvol < MIN_VOL_RATIO:
+    if rvol < adaptive["min_rvol"]:
         return reject("volume_too_low")
 
     chg_1h_pct = (last_close / float(c.iloc[-3]) - 1.0) * 100.0
     chg_4h_pct = (last_close / float(c.iloc[-6]) - 1.0) * 100.0
-    if chg_1h_pct < MIN_CHG_1H_PCT:
+    if chg_1h_pct < adaptive["min_chg_1h"]:
         return reject("chg1h_too_low")
-    if chg_4h_pct < MIN_CHG_4H_PCT:
+    if chg_4h_pct < adaptive["min_chg_4h"]:
         return reject("chg4h_too_low")
 
+    atr_pct = (last_atr / last_close * 100.0) if last_close > 0 else 0.0
+    if atr_pct <= 0:
+        return reject("invalid_atr_pct")
+    norm_move = chg_1h_pct / atr_pct
+    norm_std = adaptive["norm_std"]
+    norm_z = ((norm_move - adaptive["norm_mu"]) / norm_std) if norm_std > 1e-9 else 0.0
+    if norm_z < ADAPTIVE_MIN_NORM_Z_LONG:
+        return reject("norm_move_z_too_low")
+
     # Slope EMA20: vogliamo trend locale già in accelerazione.
-    ema20_3ago = float(ema20.iloc[-5])
+    ema20_3ago = float(ema20.iloc[last_idx - 3])
     slope_pct = (last_ema20 - ema20_3ago) / ema20_3ago * 100 if ema20_3ago > 0 else 0.0
     if REQUIRE_SLOPE_CONFIRMATION and slope_pct <= 0:
         return reject("ema20_slope_not_up")
@@ -698,9 +825,10 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None) -> Opti
     if sl_pct > MAX_SL_PCT or r_dist <= 0:
         return reject("sl_too_wide_or_invalid")
 
-    log(f"[SETUP-ANTI] {symbol} | base={base_range_pct:.2f}% rvol={rvol:.2f} "
+    log(f"[SETUP-ANTI] {symbol} | base={base_range_pct:.2f}%<=<{adaptive['base_max_pct']:.2f}% "
+        f"rvol={rvol:.2f}>=<{adaptive['min_rvol']:.2f} "
         f"chg1h={chg_1h_pct:+.2f}% chg4h={chg_4h_pct:+.2f}% "
-        f"dist={dist_pct:.2f}% RSI={last_rsi:.1f} slope={slope_pct:+.3f}%")
+        f"normZ={norm_z:+.2f} dist={dist_pct:.2f}% RSI={last_rsi:.1f} slope={slope_pct:+.3f}%")
 
     return {
         "entry_price": last_close,
@@ -716,6 +844,11 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None) -> Opti
         "chg_4h":      chg_4h_pct,
         "rvol":        rvol,
         "base_range":  base_range_pct,
+        "min_chg_1h":  adaptive["min_chg_1h"],
+        "min_chg_4h":  adaptive["min_chg_4h"],
+        "min_rvol":    adaptive["min_rvol"],
+        "base_max":    adaptive["base_max_pct"],
+        "norm_z":      norm_z,
     }
 
 
@@ -1432,7 +1565,9 @@ def main_loop() -> None:
 
             log(f"[SIGNAL] {sym} rank#{rank_idx} chg24h={chg24h:+.2f}% src={signal_source} | "
                 f"chg1h={signal['chg_1h']:+.2f}% chg4h={signal['chg_4h']:+.2f}% "
-                f"rvol={signal['rvol']:.2f} base={signal['base_range']:.2f}% | "
+                f"rvol={signal['rvol']:.2f}/{signal['min_rvol']:.2f} "
+                f"base={signal['base_range']:.2f}%/{signal['base_max']:.2f}% "
+                f"normZ={signal['norm_z']:+.2f} | "
                 f"EMA20: {signal['ema20_4h']:.4f} | dist: +{signal['dist_ema']:.1f}% | RSI: {signal['rsi']:.0f} | "
                 f"SL: -{signal['sl_pct']:.1f}% | size: {usdt_val:.1f} USDT")
 
@@ -1505,8 +1640,8 @@ if __name__ == "__main__":
     log("  TREND FOLLOWING — 1h ANTICIPATION BREAKOUT BOT")
     log("=" * 62)
     log(f"  Timeframe : Daily trend + 1h segnale | Scan ogni {SCAN_INTERVAL_SEC//60}min")
-    log(f"  Filtri    : breakout base {BASE_LOOKBACK_BARS}h | RSI {RSI_MIN_4H}-{RSI_MAX_4H} | "
-        f"RVOL >= {MIN_VOL_RATIO:.2f} | dist EMA <{MAX_DIST_EMA}%")
+    log(f"  Filtri    : breakout base {BASE_LOOKBACK_BARS}h (adaptive p{ADAPTIVE_BASE_WIDTH_PCTL:.2f}) | "
+        f"RSI {RSI_MIN_4H}-{RSI_MAX_4H} | RVOL adaptive p{ADAPTIVE_RVOL_PCTL:.2f}")
     log(f"  Risk      : {RISK_PCT*100:.1f}%/trade | MAX={MAX_OPEN_POSITIONS} pos | "
         f"Leva {DEFAULT_LEVERAGE}× | Ratchet floor fissi")
     first_trigger, first_floor = RATCHET_TABLE[0]
