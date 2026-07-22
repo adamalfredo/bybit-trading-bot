@@ -1583,6 +1583,7 @@ def main_loop() -> None:
             r_dist    = signal["r_dist"]
             entry_px  = signal["entry_price"]
             usdt_val  = (risk_usdt / r_dist) * entry_px
+            usdt_val  = max(usdt_val, 5.5)  # floor: minimo Bybit è 5 USDT
 
             log(f"[SIGNAL] {sym} rank#{rank_idx} chg24h={chg24h:+.2f}% src={signal_source} | "
                 f"chg1h={signal['chg_1h']:+.2f}% chg4h={signal['chg_4h']:+.2f}% "
