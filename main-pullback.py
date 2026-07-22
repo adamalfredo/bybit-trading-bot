@@ -95,9 +95,11 @@ MAX_SL_PCT     = 8.0    # SL massimo accettabile: 8% sotto entry
 MIN_BODY_PCT   = 25.0   # evita doji e rimbalzi deboli
 MIN_VOL_RATIO  = 0.8    # richiede almeno volume vicino alla media
 MAX_DIST_EMA50_D = 20.0 # daily close max 20% sopra EMA50: evita trend overestesi
-TOP_MOMENTUM_FALLBACK_RANK = 10
-MAX_DIST_EMA_MOMENTUM = 6.0
 REQUIRE_SLOPE_CONFIRMATION = True
+MIN_CHG_1H_PCT = 0.4
+MIN_CHG_4H_PCT = 1.0
+BASE_LOOKBACK_BARS = 8
+SL_BASE_ATR_BUFFER = 0.2
 
 # BTC filter — disabilitato: qualsiasi EMA a lungo periodo su BTC è sopra 65k
 # per mesi dopo il picco a 100k. Il filtro individuale daily EMA50 per ogni coin
@@ -118,10 +120,6 @@ TIME_STOP_MIN_LEV = 10.0  # soglia: se P&L lev < 10% dopo N giorni → esci a br
 # Circuit breaker: daily loss limit
 CIRCUIT_BREAKER_PCT       = 3.0   # drawdown % giornaliero max prima di bloccare tutto
 CIRCUIT_BREAKER_COOLDOWN_H = 24   # ore di blocco dopo attivazione
-
-# Time stop: chiude i trade "coricati" che non vanno da nessuna parte
-TIME_STOP_DAYS    = 10     # giorni massimi in posizione
-TIME_STOP_MIN_LEV = 10.0  # se dopo N giorni P&L lev < 10%, esce a breakeven
 
 EXCLUDE_SUBSTRINGS = ["USDC", "BUSD", "DAI", "TUSD", "FRAX",
                       "3LUSDT", "3SUSDT", "BULLUSDT", "BEARUSDT"]
@@ -193,12 +191,12 @@ def run_startup_self_checks() -> None:
         errs.append(f"PARTIAL_TP_PCT fuori range: {PARTIAL_TP_PCT}")
     if not (0 <= RSI_MIN_4H < RSI_MAX_4H <= 100):
         errs.append(f"RSI range invalido: {RSI_MIN_4H}-{RSI_MAX_4H}")
-    if not (1 <= TOP_MOMENTUM_FALLBACK_RANK <= COINS_TOP_N):
-        errs.append("TOP_MOMENTUM_FALLBACK_RANK invalido")
     if not (1 <= TRADE_TOP_N <= COINS_TOP_N):
         errs.append("TRADE_TOP_N invalido")
-    if TRADE_TOP_N < TOP_MOMENTUM_FALLBACK_RANK:
-        errs.append("TRADE_TOP_N deve essere >= TOP_MOMENTUM_FALLBACK_RANK")
+    if BASE_LOOKBACK_BARS < 4:
+        errs.append("BASE_LOOKBACK_BARS troppo basso")
+    if MIN_CHG_4H_PCT < MIN_CHG_1H_PCT:
+        errs.append("MIN_CHG_4H_PCT deve essere >= MIN_CHG_1H_PCT")
     for i in range(1, len(RATCHET_TABLE)):
         prev_t, prev_f = RATCHET_TABLE[i - 1]
         cur_t, cur_f = RATCHET_TABLE[i]
@@ -605,42 +603,32 @@ def is_daily_uptrend(symbol: str) -> bool:
     return True
 
 
-# ── SIGNAL CHECK 4h ───────────────────────────────────────────────────────────
+# ── SIGNAL CHECK 1h (ANTICIPAZIONE BREAKOUT) ─────────────────────────────────
 def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None) -> Optional[dict]:
-    """
-    Verifica pullback all'EMA20 su 4h (ultima candela CHIUSA).
-
-    Condizioni:
-    1. Minimo della candela ≤ EMA20 × (1 + tolleranza) — tocco al supporto
-    2. Close > EMA20 — chiude sopra (rimbalzo confermato)
-    3. Close > Open — candela verde (bulls tornati)
-    4. RSI(14) tra 38 e 62 — pullback sano
-    5. Close entro 3% sopra EMA20 — non già esteso
-    6. SL sotto swing low (min 3 barre) — rischio definito
-    """
+    """Entry LONG di anticipazione su breakout 1h da base compressa."""
     def reject(reason: str) -> Optional[dict]:
         if reject_stats is not None:
             reject_stats[reason] = reject_stats.get(reason, 0) + 1
         return None
 
-    df = fetch_klines(symbol, interval="240", limit=50)
-    if df is None or len(df) < 25:
+    df = fetch_klines(symbol, interval="60", limit=80)
+    if df is None or len(df) < 40:
         return reject("kline_insufficient")
 
     c = df["Close"]
     h = df["High"]
     l = df["Low"]
     o = df["Open"]
+    v = df["Volume"]
 
     ema20      = c.ewm(span=20, adjust=False).mean()
     atr_series = AverageTrueRange(high=h, low=l, close=c,
                                   window=ATR_WINDOW).average_true_range()
     rsi_series = RSIIndicator(close=c, window=14).rsi()
 
-    # Ultima candela CHIUSA
+    # Ultima candela CHIUSA su 1h
     last_close = float(c.iloc[-2])
     last_open  = float(o.iloc[-2])
-    last_low   = float(l.iloc[-2])
     last_ema20 = float(ema20.iloc[-2])
     last_rsi   = float(rsi_series.iloc[-2])
     last_atr   = float(atr_series.iloc[-2])
@@ -650,68 +638,69 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None) -> Opti
     if last_ema20 <= 0:
         return reject("invalid_ema20")
 
-    # 1) Il minimo ha toccato EMA20 (o è sceso sotto)
-    if last_low > last_ema20 * (1 + EMA_TOUCH_TOL):
-        return reject("ema20_not_touched")
+    base_start = -2 - BASE_LOOKBACK_BARS
+    base_end = -2
+    base_high = float(h.iloc[base_start:base_end].max())
+    base_low = float(l.iloc[base_start:base_end].min())
+    base_range_pct = (base_high - base_low) / last_close * 100 if last_close > 0 else 0.0
+    if base_range_pct > MAX_DIST_EMA:
+        return reject("base_too_wide")
 
-    # 2) Close sopra EMA20 — rimbalzo confermato
-    #    tollera piccola violazione (0.2%) per evitare falsi scarti su wick/rounding.
-    if last_close < last_ema20 * (1.0 - CLOSE_BELOW_EMA_TOL):
-        return reject("close_below_ema20")
+    # Breakout confermato su chiusura.
+    if last_close <= base_high:
+        return reject("breakout_not_confirmed")
 
-    # 3) Candela verde
+    # Candela di conferma verde.
     if last_close <= last_open:
         return reject("not_green_candle")
 
-    # 4) RSI nel range pullback
+    # RSI in area costruttiva, evita inseguimento estremo.
     if not (RSI_MIN_4H <= last_rsi <= RSI_MAX_4H):
         return reject("rsi_out_of_range")
 
-    # 5) Non esteso: close entro MAX_DIST_EMA% sopra EMA20
+    # Anti-chase: breakout non deve essere troppo distante da EMA20.
     dist_pct = (last_close - last_ema20) / last_ema20 * 100
+    if dist_pct < 0:
+        return reject("below_ema20")
     if dist_pct > MAX_DIST_EMA:
         return reject("distance_from_ema_too_high")
 
-    # 6) Qualità candela: corpo >= MIN_BODY_PCT% del range totale
-    #    Filtra shooting star, doji, hammer invertiti
+    # Corpo minimo per evitare false rotture su candele deboli.
     candle_range = float(h.iloc[-2]) - float(l.iloc[-2])
     if candle_range > 0:
         body_pct = abs(last_close - last_open) / candle_range * 100
         if body_pct < MIN_BODY_PCT:
             return reject("body_too_small")
 
-    # 7) Conferma volume: la candela segnale deve avere volume >= MIN_VOL_RATIO
-    #    rispetto alla media delle ultime 20 candele chiuse
-    #    Un rimbalzo su volume debole non ha domanda reale
-    vol_series = df["Volume"]
-    vol_avg = float(vol_series.iloc[-22:-2].mean())
-    vol_sig = float(vol_series.iloc[-2])
-    if vol_avg > 0 and vol_sig / vol_avg < MIN_VOL_RATIO:
+    vol_avg = float(v.iloc[-22:-2].mean())
+    vol_sig = float(v.iloc[-2])
+    rvol = (vol_sig / vol_avg) if vol_avg > 0 else 0.0
+    if rvol < MIN_VOL_RATIO:
         return reject("volume_too_low")
 
-    # 8) SL = sotto swing low delle ultime 3 barre chiuse
-    swing_low = min(float(l.iloc[-2]), float(l.iloc[-3]), float(l.iloc[-4]))
-    sl_price  = swing_low - SL_ATR_BUFFER * last_atr
-    r_dist    = last_close - sl_price
+    chg_1h_pct = (last_close / float(c.iloc[-3]) - 1.0) * 100.0
+    chg_4h_pct = (last_close / float(c.iloc[-6]) - 1.0) * 100.0
+    if chg_1h_pct < MIN_CHG_1H_PCT:
+        return reject("chg1h_too_low")
+    if chg_4h_pct < MIN_CHG_4H_PCT:
+        return reject("chg4h_too_low")
 
-    # Sanity: SL non troppo lontano
+    # Slope EMA20: vogliamo trend locale già in accelerazione.
+    ema20_3ago = float(ema20.iloc[-5])
+    slope_pct = (last_ema20 - ema20_3ago) / ema20_3ago * 100 if ema20_3ago > 0 else 0.0
+    if REQUIRE_SLOPE_CONFIRMATION and slope_pct <= 0:
+        return reject("ema20_slope_not_up")
+
+    # SL sotto la base del breakout, con piccolo buffer ATR.
+    sl_price = base_low - SL_BASE_ATR_BUFFER * last_atr
+    r_dist    = last_close - sl_price
     sl_pct = r_dist / last_close * 100
     if sl_pct > MAX_SL_PCT or r_dist <= 0:
         return reject("sl_too_wide_or_invalid")
 
-    # ── Slope EMA20(4h): conferma direzione trend locale ─────────────────────
-    # slope = variazione % EMA20 tra candela corrente e 3 barre fa
-    # slope > 0 = EMA20 in salita (pullback sano)
-    # slope ≤ 0 = EMA20 piatta/in calo (potenziale breakdown, da filtrare)
-    ema20_3ago   = float(ema20.iloc[-5])   # 3 barre chiuse fa
-    slope_pct    = (last_ema20 - ema20_3ago) / ema20_3ago * 100 if ema20_3ago > 0 else 0.0
-    slope_ok     = slope_pct > 0
-    log(f"[DIAG-SLOPE] {symbol}: EMA20_slope={slope_pct:+.3f}% "
-        f"({'OK salita' if slope_ok else 'WARN piatta/discesa'}) | "
-        f"RSI={last_rsi:.1f} dist_ema={dist_pct:.2f}% sl_pct={sl_pct:.2f}%")
-
-    if REQUIRE_SLOPE_CONFIRMATION and not slope_ok:
-        return reject("ema20_slope_not_up")
+    log(f"[SETUP-ANTI] {symbol} | base={base_range_pct:.2f}% rvol={rvol:.2f} "
+        f"chg1h={chg_1h_pct:+.2f}% chg4h={chg_4h_pct:+.2f}% "
+        f"dist={dist_pct:.2f}% RSI={last_rsi:.1f} slope={slope_pct:+.3f}%")
 
     return {
         "entry_price": last_close,
@@ -723,70 +712,10 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None) -> Opti
         "dist_ema":    dist_pct,
         "sl_pct":      sl_pct,
         "ema20_slope": slope_pct,
-    }
-
-
-def check_momentum_entry_signal(symbol: str, reject_stats: Optional[dict] = None) -> Optional[dict]:
-    def reject(reason: str) -> Optional[dict]:
-        if reject_stats is not None:
-            reject_stats[reason] = reject_stats.get(reason, 0) + 1
-        return None
-
-    df = fetch_klines(symbol, interval="240", limit=50)
-    if df is None or len(df) < 25:
-        return reject("kline_insufficient")
-
-    c = df["Close"]
-    h = df["High"]
-    l = df["Low"]
-    o = df["Open"]
-
-    ema20 = c.ewm(span=20, adjust=False).mean()
-    atr_series = AverageTrueRange(high=h, low=l, close=c,
-                                  window=ATR_WINDOW).average_true_range()
-    rsi_series = RSIIndicator(close=c, window=14).rsi()
-
-    last_close = float(c.iloc[-2])
-    last_open = float(o.iloc[-2])
-    last_ema20 = float(ema20.iloc[-2])
-    last_rsi = float(rsi_series.iloc[-2])
-    last_atr = float(atr_series.iloc[-2])
-
-    if pd.isna(last_rsi) or pd.isna(last_atr) or last_atr <= 0 or last_ema20 <= 0:
-        return reject("invalid_rsi_or_atr")
-
-    if last_close <= last_open:
-        return reject("not_green_candle")
-
-    dist_pct = (last_close - last_ema20) / last_ema20 * 100
-    if dist_pct < 0 or dist_pct > MAX_DIST_EMA_MOMENTUM:
-        return reject("distance_from_ema_too_high")
-
-    ema20_3ago = float(ema20.iloc[-5])
-    slope_pct = (last_ema20 - ema20_3ago) / ema20_3ago * 100 if ema20_3ago > 0 else 0.0
-    if REQUIRE_SLOPE_CONFIRMATION and slope_pct <= 0:
-        return reject("ema20_slope_not_up")
-
-    swing_low = min(float(l.iloc[-2]), float(l.iloc[-3]), float(l.iloc[-4]))
-    sl_price = swing_low - SL_ATR_BUFFER * last_atr
-    r_dist = last_close - sl_price
-    sl_pct = r_dist / last_close * 100
-    if sl_pct > MAX_SL_PCT or r_dist <= 0:
-        return reject("sl_too_wide_or_invalid")
-
-    log(f"[SIGNAL-MOMO] {symbol} | EMA20: {last_ema20:.4f} | dist: +{dist_pct:.1f}% | "
-        f"RSI: {last_rsi:.0f} | SL: -{sl_pct:.1f}%")
-
-    return {
-        "entry_price": last_close,
-        "sl_price": sl_price,
-        "r_dist": r_dist,
-        "atr": last_atr,
-        "rsi": last_rsi,
-        "ema20_4h": last_ema20,
-        "dist_ema": dist_pct,
-        "sl_pct": sl_pct,
-        "ema20_slope": 0.0,
+        "chg_1h":      chg_1h_pct,
+        "chg_4h":      chg_4h_pct,
+        "rvol":        rvol,
+        "base_range":  base_range_pct,
     }
 
 
@@ -1461,11 +1390,10 @@ def main_loop() -> None:
         if not universe:
             continue
 
-        # 2) Per ogni candidato: ranking 24h → segnale 4h
+        # 2) Per ogni candidato: ranking 24h → segnale di anticipazione 1h
         entered = 0
         checked = 0
         reject_stats_scan = {}
-        leader_chg = float(universe[0]["chg24h"])
         for rank_idx, coin in enumerate(universe, start=1):
             if rank_idx > TRADE_TOP_N:
                 break
@@ -1482,13 +1410,9 @@ def main_loop() -> None:
             if chg24h < MIN_ABS_24H_CHANGE:
                 reject_stats_scan["chg24h_too_low"] = reject_stats_scan.get("chg24h_too_low", 0) + 1
                 continue
-            # Segnale 4h pullback
+            # Segnale di anticipazione breakout
             signal = check_entry_signal(sym, reject_stats_scan)
-            signal_source = "SIGNAL"
-            if not signal and rank_idx <= TOP_MOMENTUM_FALLBACK_RANK:
-                signal = check_momentum_entry_signal(sym, reject_stats_scan)
-                if signal:
-                    signal_source = "SIGNAL-MOMO"
+            signal_source = "SIGNAL-ANTI"
             if not signal:
                 time.sleep(0.05)
                 continue
@@ -1507,9 +1431,9 @@ def main_loop() -> None:
             usdt_val  = (risk_usdt / r_dist) * entry_px
 
             log(f"[SIGNAL] {sym} rank#{rank_idx} chg24h={chg24h:+.2f}% src={signal_source} | "
-                f"leader={leader_chg:+.2f}% gap={leader_chg - chg24h:+.2f}pp | "
-                f"EMA20: {signal['ema20_4h']:.4f} | "
-                f"dist: +{signal['dist_ema']:.1f}% | RSI: {signal['rsi']:.0f} | "
+                f"chg1h={signal['chg_1h']:+.2f}% chg4h={signal['chg_4h']:+.2f}% "
+                f"rvol={signal['rvol']:.2f} base={signal['base_range']:.2f}% | "
+                f"EMA20: {signal['ema20_4h']:.4f} | dist: +{signal['dist_ema']:.1f}% | RSI: {signal['rsi']:.0f} | "
                 f"SL: -{signal['sl_pct']:.1f}% | size: {usdt_val:.1f} USDT")
 
             # Imposta leva e apri
@@ -1556,8 +1480,9 @@ def main_loop() -> None:
                 continue
 
             notify_telegram(
-                f"📈 ENTRY {sym} — Pullback EMA20(4h)\n"
+                f"📈 ENTRY {sym} — Anticipation Breakout (1h)\n"
                 f"Rank: #{rank_idx} | 24h: {chg24h:+.2f}% | Src: {signal_source}\n"
+                f"1h: {signal['chg_1h']:+.2f}% | 4h: {signal['chg_4h']:+.2f}% | RVOL: {signal['rvol']:.2f}\n"
                 f"Entry: {entry_px:.4f} | SL: {sl_price:.4f} ({sl_pct:.1f}%)\n"
                 f"EMA20: {signal['ema20_4h']:.4f} | RSI: {signal['rsi']:.0f}\n"
                 f"R-dist: {actual_r_dist:.4f} | Risk: {risk_usdt:.2f} USDT"
@@ -1577,11 +1502,11 @@ def main_loop() -> None:
 if __name__ == "__main__":
     run_startup_self_checks()
     log("=" * 62)
-    log("  TREND FOLLOWING — 4h EMA20 PULLBACK BOT")
+    log("  TREND FOLLOWING — 1h ANTICIPATION BREAKOUT BOT")
     log("=" * 62)
-    log(f"  Timeframe : Daily trend + 4h segnale | Scan ogni {SCAN_INTERVAL_SEC//60}min")
-    log(f"  Filtri    : EMA50 daily | EMA20(4h) touch | RSI {RSI_MIN_4H}-{RSI_MAX_4H} | "
-        f"dist EMA <{MAX_DIST_EMA}%")
+    log(f"  Timeframe : Daily trend + 1h segnale | Scan ogni {SCAN_INTERVAL_SEC//60}min")
+    log(f"  Filtri    : breakout base {BASE_LOOKBACK_BARS}h | RSI {RSI_MIN_4H}-{RSI_MAX_4H} | "
+        f"RVOL >= {MIN_VOL_RATIO:.2f} | dist EMA <{MAX_DIST_EMA}%")
     log(f"  Risk      : {RISK_PCT*100:.1f}%/trade | MAX={MAX_OPEN_POSITIONS} pos | "
         f"Leva {DEFAULT_LEVERAGE}× | Ratchet floor fissi")
     first_trigger, first_floor = RATCHET_TABLE[0]
@@ -1594,8 +1519,8 @@ if __name__ == "__main__":
     log(f"[AVVIO] Equity: {equity0:.2f} USDT")
 
     notify_telegram(
-        f"📈 PULLBACK BOT AVVIATO — Trend Following 4h\n"
-        f"Segnale: EMA20(4h) pullback + daily uptrend\n"
+        f"📈 ANTICIPATION BOT AVVIATO — Trend Following 1h\n"
+        f"Segnale: breakout da base compressa + daily uptrend\n"
         f"Regime: BTC daily EMA50 (slope+) + BTC weekly EMA200\n"
         f"Exit: Ratchet floor fissi ≥{first_trigger}%→+{first_floor}% ... ≥150%→+120% | "
         f"Partial 50%@{PARTIAL_TP_R:.1f}R\n"
