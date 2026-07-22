@@ -806,30 +806,41 @@ def check_short_signal(symbol: str, reject_stats: Optional[dict] = None, rank: i
     if base_range_pct > adaptive["base_max_pct"] and not top_loser:
         return reject("base_too_wide")
 
-    # Breakdown confermato: tolleranza minima su close se c'e' wick sotto base.
-    close_tol = max(last_atr * BREAK_CONFIRM_ATR_TOL, last_close * BREAK_CONFIRM_PCT_TOL / 100.0)
-    broke_with_wick = float(l.iloc[last_idx]) < base_low
-    if not (last_close <= (base_low + close_tol) and broke_with_wick):
-        return reject("breakdown_not_confirmed")
+    if top_loser:
+        # Top 3 loser: entrata trend-following al ribasso (già sotto la base da ore).
+        # Richiediamo solo che il prezzo sia sotto EMA20 e RSI > 18.
+        if last_close > last_ema20:
+            return reject("above_ema20")
+        if last_rsi <= 18.0:
+            return reject("rsi_out_of_range")
+        if last_close >= last_open:
+            return reject("not_red_candle")
+    else:
+        # Breakdown confermato: tolleranza minima su close se c'e' wick sotto base.
+        close_tol = max(last_atr * BREAK_CONFIRM_ATR_TOL, last_close * BREAK_CONFIRM_PCT_TOL / 100.0)
+        broke_with_wick = float(l.iloc[last_idx]) < base_low
+        if not (last_close <= (base_low + close_tol) and broke_with_wick):
+            return reject("breakdown_not_confirmed")
 
-    # Candela di conferma rossa.
-    if last_close >= last_open:
-        return reject("not_red_candle")
+        # Candela di conferma rossa.
+        if last_close >= last_open:
+            return reject("not_red_candle")
 
-    # RSI in area di debolezza ma non estrema.
-    if not (RSI_MIN_4H <= last_rsi <= RSI_MAX_4H):
-        return reject("rsi_out_of_range")
+        # RSI in area di debolezza ma non estrema.
+        if not (RSI_MIN_4H <= last_rsi <= RSI_MAX_4H):
+            return reject("rsi_out_of_range")
 
     # Anti-chase: breakdown non deve essere troppo esteso sotto EMA20.
     dist_pct = (last_ema20 - last_close) / last_ema20 * 100
-    if dist_pct < 0:
-        return reject("above_ema20")
-    if dist_pct > MAX_DIST_EMA:
-        return reject("distance_from_ema_too_high")
+    if not top_loser:
+        if dist_pct < 0:
+            return reject("above_ema20")
+        if dist_pct > MAX_DIST_EMA:
+            return reject("distance_from_ema_too_high")
 
     # Corpo minimo per evitare false rotture.
     candle_range = float(h.iloc[-2]) - float(l.iloc[-2])
-    if candle_range > 0:
+    if candle_range > 0 and not top_loser:
         body_pct = abs(last_close - last_open) / candle_range * 100
         if body_pct < MIN_BODY_PCT:
             return reject("body_too_small")
