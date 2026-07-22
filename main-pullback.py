@@ -831,14 +831,19 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None, rank: i
     # Slope EMA20: vogliamo trend locale già in accelerazione.
     ema20_3ago = float(ema20.iloc[last_idx - 3])
     slope_pct = (last_ema20 - ema20_3ago) / ema20_3ago * 100 if ema20_3ago > 0 else 0.0
-    if REQUIRE_SLOPE_CONFIRMATION and slope_pct <= 0:
+    if REQUIRE_SLOPE_CONFIRMATION and slope_pct <= 0 and not top_gainer:
         return reject("ema20_slope_not_up")
 
-    # SL sotto la base del breakout, con piccolo buffer ATR.
-    sl_price = base_low - SL_BASE_ATR_BUFFER * last_atr
+    # SL: top gainer usa 2×ATR sotto entry; altri usano base_low.
+    if top_gainer:
+        sl_price = last_close - 2.0 * last_atr
+    else:
+        sl_price = base_low - SL_BASE_ATR_BUFFER * last_atr
     r_dist    = last_close - sl_price
     sl_pct = r_dist / last_close * 100
-    if sl_pct > MAX_SL_PCT or r_dist <= 0:
+    if not top_gainer and (sl_pct > MAX_SL_PCT or r_dist <= 0):
+        return reject("sl_too_wide_or_invalid")
+    if top_gainer and r_dist <= 0:
         return reject("sl_too_wide_or_invalid")
 
     log(f"[SETUP-ANTI] {symbol} | base={base_range_pct:.2f}%<=<{adaptive['base_max_pct']:.2f}% "

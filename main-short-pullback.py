@@ -870,14 +870,19 @@ def check_short_signal(symbol: str, reject_stats: Optional[dict] = None, rank: i
     # Slope EMA20: vogliamo trend locale già in deterioramento.
     ema20_3ago = float(ema20.iloc[last_idx - 3])
     slope_pct  = (last_ema20 - ema20_3ago) / ema20_3ago * 100 if ema20_3ago > 0 else 0.0
-    if REQUIRE_SLOPE_CONFIRMATION and slope_pct >= 0:
+    if REQUIRE_SLOPE_CONFIRMATION and slope_pct >= 0 and not top_loser:
         return reject("ema20_slope_not_down")
 
-    # SL sopra la base del breakdown, con piccolo buffer ATR.
-    sl_price = base_high + SL_BASE_ATR_BUFFER * last_atr
+    # SL: top loser usa 2×ATR sopra entry; altri usano base_high.
+    if top_loser:
+        sl_price = last_close + 2.0 * last_atr
+    else:
+        sl_price = base_high + SL_BASE_ATR_BUFFER * last_atr
     r_dist     = sl_price - last_close
     sl_pct = r_dist / last_close * 100
-    if sl_pct > MAX_SL_PCT or r_dist <= 0:
+    if not top_loser and (sl_pct > MAX_SL_PCT or r_dist <= 0):
+        return reject("sl_too_wide_or_invalid")
+    if top_loser and r_dist <= 0:
         return reject("sl_too_wide_or_invalid")
 
     log(f"[SETUP-ANTI] {symbol} SHORT | base={base_range_pct:.2f}%<=<{adaptive['base_max_pct']:.2f}% "
