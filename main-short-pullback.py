@@ -61,8 +61,8 @@ MAX_TOTAL_OPEN_RISK_PCT = float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", "0.04"))
 
 SL_ATR_BUFFER  = 0.3    # buffer sopra swing high (× ATR)
 TRAIL_ATR_MULT = 2.0    # moltiplicatore ATR per il trailing stop dal minimo
-PARTIAL_TP_R   = 1.5    # partial TP: chiude 50% posizione a +1.5R
-PARTIAL_TP_PCT = 0.25
+PARTIAL_TP_R   = 2.0    # partial TP più tardi: lascia correre i vincenti
+PARTIAL_TP_PCT = 0.20
 
 # Ratchet floor fissi: (roi_lev_trigger%, floor_lev_garantito%)
 # Per short: al trigger si sposta SL verso il basso (profit lock)
@@ -125,6 +125,10 @@ TOP_MOVER_RSI_MIN_SHORT = 24.0
 TOP_MOVER_MAX_DIST_EMA_PCT = 12.0
 TOP_MOVER_MIN_CHG1H_PCT = -10.0
 TOP_MOVER_MIN_CHG4H_PCT = -18.0
+TOP_MOVER_SL_ATR_MULT = 1.2
+RR_SWING_LOOKBACK = 24
+FALLBACK_TP_ATR_MULT = 2.5
+MIN_RR_EST = 1.8
 
 # Regime BTC: attiva short solo quando BTC è strutturalmente bearish
 # Se False: bot sempre attivo (solo per testing)
@@ -893,9 +897,9 @@ def check_short_signal(symbol: str, reject_stats: Optional[dict] = None, rank: i
     if REQUIRE_SLOPE_CONFIRMATION and slope_pct >= 0 and not top_loser:
         return reject("ema20_slope_not_down")
 
-    # SL: top loser usa 2×ATR sopra entry; altri usano base_high.
+    # SL: top loser usa ATR stretto sopra entry; altri usano base_high.
     if top_loser:
-        sl_price = last_close + 1.5 * last_atr
+        sl_price = last_close + TOP_MOVER_SL_ATR_MULT * last_atr
     else:
         sl_price = base_high + SL_BASE_ATR_BUFFER * last_atr
     r_dist     = sl_price - last_close
@@ -905,10 +909,21 @@ def check_short_signal(symbol: str, reject_stats: Optional[dict] = None, rank: i
     if top_loser and r_dist <= 0:
         return reject("sl_too_wide_or_invalid")
 
+    # Filtro qualità: richiede un reward/risk minimo già stimabile all'ingresso.
+    swing_start = max(0, last_idx - RR_SWING_LOOKBACK)
+    tp_ref = float(l.iloc[swing_start:last_idx].min()) if last_idx > swing_start else 0.0
+    tp_est = tp_ref if (tp_ref > 0 and tp_ref < last_close) else (last_close - FALLBACK_TP_ATR_MULT * last_atr)
+    reward_dist = last_close - tp_est
+    if reward_dist <= 0:
+        return reject("rr_too_low")
+    rr_est = reward_dist / r_dist
+    if rr_est < MIN_RR_EST:
+        return reject("rr_too_low")
+
     log(f"[SETUP-ANTI] {symbol} SHORT | base={base_range_pct:.2f}%<=<{adaptive['base_max_pct']:.2f}% "
         f"rvol={rvol:.2f}>=<{adaptive['min_rvol']:.2f} "
         f"chg1h={chg_1h_pct:+.2f}% chg4h={chg_4h_pct:+.2f}% "
-        f"normZ={norm_z:+.2f} dist={dist_pct:.2f}% RSI={last_rsi:.1f} slope={slope_pct:+.3f}%")
+        f"normZ={norm_z:+.2f} RR={rr_est:.2f} dist={dist_pct:.2f}% RSI={last_rsi:.1f} slope={slope_pct:+.3f}%")
 
     return {
         "entry_price": last_close,
@@ -929,6 +944,8 @@ def check_short_signal(symbol: str, reject_stats: Optional[dict] = None, rank: i
         "min_rvol":    adaptive["min_rvol"],
         "base_max":    adaptive["base_max_pct"],
         "norm_z":      norm_z,
+        "rr_est":      rr_est,
+        "tp_est":      tp_est,
     }
 
 
@@ -1673,7 +1690,7 @@ def main_loop() -> None:
                 f"chg1h={signal['chg_1h']:+.2f}% chg4h={signal['chg_4h']:+.2f}% "
                 f"rvol={signal['rvol']:.2f}/{signal['min_rvol']:.2f} "
                 f"base={signal['base_range']:.2f}%/{signal['base_max']:.2f}% "
-                f"normZ={signal['norm_z']:+.2f} | "
+                f"normZ={signal['norm_z']:+.2f} RR={signal['rr_est']:.2f} | "
                 f"EMA20: {signal['ema20_4h']:.4f} | "
                 f"dist: -{signal['dist_ema']:.1f}% | RSI: {signal['rsi']:.0f} | "
                 f"SL: +{signal['sl_pct']:.1f}% | size: {usdt_val:.1f} USDT")

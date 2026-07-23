@@ -57,8 +57,8 @@ MAX_TOTAL_OPEN_RISK_PCT = float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", "0.04"))
 
 SL_ATR_BUFFER    = 0.3   # buffer aggiuntivo sotto swing low (× ATR)
 TRAIL_ATR_MULT   = 2.0   # moltiplicatore ATR per il trailing stop dal massimo
-PARTIAL_TP_R     = 1.5  # partial TP: chiude 50% posizione a +1.5R di guadagno
-PARTIAL_TP_PCT   = 0.25 # quota da chiudere al partial TP
+PARTIAL_TP_R     = 2.0  # partial TP più tardi: lascia correre i vincenti
+PARTIAL_TP_PCT   = 0.20 # quota ridotta al partial TP
 
 # Ratchet floor fissi: (roi_lev_trigger%, floor_lev_garantito%)
 # Quando il P&L leveraged supera il trigger, SL si sposta al floor garantito
@@ -119,6 +119,10 @@ TOP_MOVER_RSI_MAX_LONG = 76.0
 TOP_MOVER_MAX_DIST_EMA_PCT = 12.0
 TOP_MOVER_MAX_CHG1H_PCT = 10.0
 TOP_MOVER_MAX_CHG4H_PCT = 18.0
+TOP_MOVER_SL_ATR_MULT = 1.2
+RR_SWING_LOOKBACK = 24
+FALLBACK_TP_ATR_MULT = 2.5
+MIN_RR_EST = 1.8
 
 # BTC filter — disabilitato: qualsiasi EMA a lungo periodo su BTC è sopra 65k
 # per mesi dopo il picco a 100k. Il filtro individuale daily EMA50 per ogni coin
@@ -854,9 +858,9 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None, rank: i
     if REQUIRE_SLOPE_CONFIRMATION and slope_pct <= 0 and not top_gainer:
         return reject("ema20_slope_not_up")
 
-    # SL: top gainer usa 2×ATR sotto entry; altri usano base_low.
+    # SL: top gainer usa ATR stretto sotto entry; altri usano base_low.
     if top_gainer:
-        sl_price = last_close - 1.5 * last_atr
+        sl_price = last_close - TOP_MOVER_SL_ATR_MULT * last_atr
     else:
         sl_price = base_low - SL_BASE_ATR_BUFFER * last_atr
     r_dist    = last_close - sl_price
@@ -866,10 +870,21 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None, rank: i
     if top_gainer and r_dist <= 0:
         return reject("sl_too_wide_or_invalid")
 
+    # Filtro qualità: richiede un reward/risk minimo già stimabile all'ingresso.
+    swing_start = max(0, last_idx - RR_SWING_LOOKBACK)
+    tp_ref = float(h.iloc[swing_start:last_idx].max()) if last_idx > swing_start else 0.0
+    tp_est = tp_ref if tp_ref > last_close else (last_close + FALLBACK_TP_ATR_MULT * last_atr)
+    reward_dist = tp_est - last_close
+    if reward_dist <= 0:
+        return reject("rr_too_low")
+    rr_est = reward_dist / r_dist
+    if rr_est < MIN_RR_EST:
+        return reject("rr_too_low")
+
     log(f"[SETUP-ANTI] {symbol} | base={base_range_pct:.2f}%<=<{adaptive['base_max_pct']:.2f}% "
         f"rvol={rvol:.2f}>=<{adaptive['min_rvol']:.2f} "
         f"chg1h={chg_1h_pct:+.2f}% chg4h={chg_4h_pct:+.2f}% "
-        f"normZ={norm_z:+.2f} dist={dist_pct:.2f}% RSI={last_rsi:.1f} slope={slope_pct:+.3f}%")
+        f"normZ={norm_z:+.2f} RR={rr_est:.2f} dist={dist_pct:.2f}% RSI={last_rsi:.1f} slope={slope_pct:+.3f}%")
 
     return {
         "entry_price": last_close,
@@ -890,6 +905,8 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None, rank: i
         "min_rvol":    adaptive["min_rvol"],
         "base_max":    adaptive["base_max_pct"],
         "norm_z":      norm_z,
+        "rr_est":      rr_est,
+        "tp_est":      tp_est,
     }
 
 
@@ -1636,7 +1653,7 @@ def main_loop() -> None:
                 f"chg1h={signal['chg_1h']:+.2f}% chg4h={signal['chg_4h']:+.2f}% "
                 f"rvol={signal['rvol']:.2f}/{signal['min_rvol']:.2f} "
                 f"base={signal['base_range']:.2f}%/{signal['base_max']:.2f}% "
-                f"normZ={signal['norm_z']:+.2f} | "
+                f"normZ={signal['norm_z']:+.2f} RR={signal['rr_est']:.2f} | "
                 f"EMA20: {signal['ema20_4h']:.4f} | dist: +{signal['dist_ema']:.1f}% | RSI: {signal['rsi']:.0f} | "
                 f"SL: -{signal['sl_pct']:.1f}% | size: {usdt_val:.1f} USDT")
 
