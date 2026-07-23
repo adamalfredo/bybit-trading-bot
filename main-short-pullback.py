@@ -121,6 +121,10 @@ MAX_CHG_4H_PCT_CEIL = -0.40
 MAX_CHG_4H_PCT_FLOOR = -4.00
 BREAK_CONFIRM_ATR_TOL = 0.20
 BREAK_CONFIRM_PCT_TOL = 0.12
+TOP_MOVER_RSI_MIN_SHORT = 24.0
+TOP_MOVER_MAX_DIST_EMA_PCT = 12.0
+TOP_MOVER_MIN_CHG1H_PCT = -10.0
+TOP_MOVER_MIN_CHG4H_PCT = -18.0
 
 # Regime BTC: attiva short solo quando BTC è strutturalmente bearish
 # Se False: bot sempre attivo (solo per testing)
@@ -170,6 +174,12 @@ _cb_equity_day_start: float = 0.0
 _cb_last_day:         str   = ""
 _cb_triggered:        bool  = False
 _cb_triggered_at:     float = 0.0
+
+# Entry cooldown dopo una sequenza negativa
+LOSS_STREAK_LIMIT = 2
+LOSS_STREAK_COOLDOWN_H = 6
+_loss_streak: int = 0
+_entry_cooldown_until_ts: float = 0.0
 
 # ── HTTP SESSION ──────────────────────────────────────────────────────────────
 SESSION = requests.Session()
@@ -230,6 +240,10 @@ def run_startup_self_checks() -> None:
         errs.append("ADAPTIVE_MOM_PCTL_SHORT fuori range")
     if not (0.0 <= BTC_SHORT_REGIME_SCORE_MIN <= 1.0):
         errs.append("BTC_SHORT_REGIME_SCORE_MIN fuori range")
+    if TOP_MOVER_RSI_MIN_SHORT >= RSI_MAX_4H:
+        errs.append("TOP_MOVER_RSI_MIN_SHORT incoerente")
+    if TOP_MOVER_MAX_DIST_EMA_PCT <= 0:
+        errs.append("TOP_MOVER_MAX_DIST_EMA_PCT fuori range")
     for i in range(1, len(RATCHET_TABLE)):
         prev_t, prev_f = RATCHET_TABLE[i - 1]
         cur_t, cur_f = RATCHET_TABLE[i]
@@ -808,10 +822,10 @@ def check_short_signal(symbol: str, reject_stats: Optional[dict] = None, rank: i
 
     if top_loser:
         # Top 3 loser: entrata trend-following al ribasso (già sotto la base da ore).
-        # Richiediamo solo che il prezzo sia sotto EMA20 e RSI > 18.
+        # Richiediamo trend ma evitiamo condizioni estreme di panic selling.
         if last_close > last_ema20:
             return reject("above_ema20")
-        if last_rsi <= 18.0:
+        if last_rsi <= TOP_MOVER_RSI_MIN_SHORT:
             return reject("rsi_out_of_range")
         if last_close >= last_open:
             return reject("not_red_candle")
@@ -832,6 +846,8 @@ def check_short_signal(symbol: str, reject_stats: Optional[dict] = None, rank: i
 
     # Anti-chase: breakdown non deve essere troppo esteso sotto EMA20.
     dist_pct = (last_ema20 - last_close) / last_ema20 * 100
+    if top_loser and dist_pct > TOP_MOVER_MAX_DIST_EMA_PCT:
+        return reject("top_mover_too_extended")
     if not top_loser:
         if dist_pct < 0:
             return reject("above_ema20")
@@ -853,6 +869,10 @@ def check_short_signal(symbol: str, reject_stats: Optional[dict] = None, rank: i
 
     chg_1h_pct = (last_close / float(c.iloc[-3]) - 1.0) * 100.0
     chg_4h_pct = (last_close / float(c.iloc[-6]) - 1.0) * 100.0
+    if top_loser and chg_1h_pct < TOP_MOVER_MIN_CHG1H_PCT:
+        return reject("top_mover_momo_exhausted")
+    if top_loser and chg_4h_pct < TOP_MOVER_MIN_CHG4H_PCT:
+        return reject("top_mover_momo_exhausted")
     if chg_1h_pct > adaptive["max_chg_1h"]:
         return reject("chg1h_not_negative_enough")
     if chg_4h_pct > adaptive["max_chg_4h"]:
@@ -875,7 +895,7 @@ def check_short_signal(symbol: str, reject_stats: Optional[dict] = None, rank: i
 
     # SL: top loser usa 2×ATR sopra entry; altri usano base_high.
     if top_loser:
-        sl_price = last_close + 2.0 * last_atr
+        sl_price = last_close + 1.5 * last_atr
     else:
         sl_price = base_high + SL_BASE_ATR_BUFFER * last_atr
     r_dist     = sl_price - last_close
@@ -1491,6 +1511,7 @@ def check_circuit_breaker() -> bool:
 
 # ── CICLO PRINCIPALE ──────────────────────────────────────────────────────────
 def main_loop() -> None:
+    global _loss_streak, _entry_cooldown_until_ts
     last_scan_ts = 0.0
 
     while True:
@@ -1518,6 +1539,21 @@ def main_loop() -> None:
                         # Per short: profitto quando prezzo scende sotto entry
                         pnl   = (ep - cur) / ep * 100 if ep else 0
                         log(f"[CLOSE] {sym} SHORT chiusa ~{pnl:+.1f}%")
+                        if pnl < 0:
+                            _loss_streak += 1
+                            if _loss_streak >= LOSS_STREAK_LIMIT:
+                                _entry_cooldown_until_ts = max(
+                                    _entry_cooldown_until_ts,
+                                    time.time() + LOSS_STREAK_COOLDOWN_H * 3600,
+                                )
+                                log(f"[COOLDOWN] SHORT attivato per {LOSS_STREAK_COOLDOWN_H}h "
+                                    f"dopo {_loss_streak} chiusure negative consecutive")
+                                notify_telegram(
+                                    f"🧊 Cooldown SHORT attivato {LOSS_STREAK_COOLDOWN_H}h\n"
+                                    f"Motivo: {_loss_streak} chiusure negative consecutive"
+                                )
+                        else:
+                            _loss_streak = 0
                         notify_telegram(
                             f"📊 Chiusa SHORT {sym}\n"
                             f"PnL ~{pnl:+.1f}% | Entry: {ep:.4f} | Uscita ~{cur:.4f}"
@@ -1539,6 +1575,17 @@ def main_loop() -> None:
         if check_circuit_breaker():
             tlog("circuit_breaker", "🚨 Circuit breaker attivo — scan bloccata", 1800)
             continue
+
+        if _entry_cooldown_until_ts > now:
+            rem_h = (_entry_cooldown_until_ts - now) / 3600
+            tlog("loss_cooldown",
+                 f"🧊 Cooldown SHORT attivo per {rem_h:.1f}h dopo loss streak",
+                 300)
+            continue
+        if _entry_cooldown_until_ts > 0 and now >= _entry_cooldown_until_ts:
+            _entry_cooldown_until_ts = 0.0
+            _loss_streak = 0
+            log("[COOLDOWN] SHORT scaduto — ingressi riattivati")
 
         # Regime gate: solo se BTC in bear regime
         if not _btc_short_ok:

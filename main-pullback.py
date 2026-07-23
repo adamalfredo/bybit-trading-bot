@@ -115,6 +115,10 @@ MIN_CHG_1H_PCT_FLOOR = 0.15
 MIN_CHG_4H_PCT_FLOOR = 0.45
 BREAK_CONFIRM_ATR_TOL = 0.20
 BREAK_CONFIRM_PCT_TOL = 0.12
+TOP_MOVER_RSI_MAX_LONG = 76.0
+TOP_MOVER_MAX_DIST_EMA_PCT = 12.0
+TOP_MOVER_MAX_CHG1H_PCT = 10.0
+TOP_MOVER_MAX_CHG4H_PCT = 18.0
 
 # BTC filter — disabilitato: qualsiasi EMA a lungo periodo su BTC è sopra 65k
 # per mesi dopo il picco a 100k. Il filtro individuale daily EMA50 per ogni coin
@@ -162,6 +166,12 @@ _cb_equity_day_start: float = 0.0
 _cb_last_day:         str   = ""
 _cb_triggered:        bool  = False
 _cb_triggered_at:     float = 0.0
+
+# Entry cooldown dopo una sequenza negativa
+LOSS_STREAK_LIMIT = 2
+LOSS_STREAK_COOLDOWN_H = 6
+_loss_streak: int = 0
+_entry_cooldown_until_ts: float = 0.0
 
 # ── HTTP SESSION ──────────────────────────────────────────────────────────────
 SESSION = requests.Session()
@@ -220,6 +230,10 @@ def run_startup_self_checks() -> None:
         errs.append("ADAPTIVE_RVOL_PCTL fuori range")
     if not (0.0 < ADAPTIVE_MOM_PCTL_LONG < 1.0):
         errs.append("ADAPTIVE_MOM_PCTL_LONG fuori range")
+    if TOP_MOVER_RSI_MAX_LONG <= RSI_MIN_4H:
+        errs.append("TOP_MOVER_RSI_MAX_LONG incoerente")
+    if TOP_MOVER_MAX_DIST_EMA_PCT <= 0:
+        errs.append("TOP_MOVER_MAX_DIST_EMA_PCT fuori range")
     for i in range(1, len(RATCHET_TABLE)):
         prev_t, prev_f = RATCHET_TABLE[i - 1]
         cur_t, cur_f = RATCHET_TABLE[i]
@@ -769,10 +783,10 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None, rank: i
 
     if top_gainer:
         # Top 3 gainer: entrata trend-following (già sopra la base da ore).
-        # Richiediamo solo che il prezzo sia sopra EMA20 e RSI < 82.
+        # Richiediamo trend ma evitiamo condizioni estreme di euforia.
         if last_close < last_ema20:
             return reject("below_ema20")
-        if last_rsi >= 82.0:
+        if last_rsi >= TOP_MOVER_RSI_MAX_LONG:
             return reject("rsi_out_of_range")
         if last_close <= last_open:
             return reject("not_green_candle")
@@ -793,6 +807,8 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None, rank: i
 
     # Anti-chase: breakout non deve essere troppo distante da EMA20.
     dist_pct = (last_close - last_ema20) / last_ema20 * 100
+    if top_gainer and dist_pct > TOP_MOVER_MAX_DIST_EMA_PCT:
+        return reject("top_mover_too_extended")
     if not top_gainer:
         if dist_pct < 0:
             return reject("below_ema20")
@@ -814,6 +830,10 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None, rank: i
 
     chg_1h_pct = (last_close / float(c.iloc[-3]) - 1.0) * 100.0
     chg_4h_pct = (last_close / float(c.iloc[-6]) - 1.0) * 100.0
+    if top_gainer and chg_1h_pct > TOP_MOVER_MAX_CHG1H_PCT:
+        return reject("top_mover_momo_exhausted")
+    if top_gainer and chg_4h_pct > TOP_MOVER_MAX_CHG4H_PCT:
+        return reject("top_mover_momo_exhausted")
     if chg_1h_pct < adaptive["min_chg_1h"]:
         return reject("chg1h_too_low")
     if chg_4h_pct < adaptive["min_chg_4h"]:
@@ -836,7 +856,7 @@ def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None, rank: i
 
     # SL: top gainer usa 2×ATR sotto entry; altri usano base_low.
     if top_gainer:
-        sl_price = last_close - 2.0 * last_atr
+        sl_price = last_close - 1.5 * last_atr
     else:
         sl_price = base_low - SL_BASE_ATR_BUFFER * last_atr
     r_dist    = last_close - sl_price
@@ -1462,6 +1482,7 @@ def check_circuit_breaker() -> bool:
 
 # ── CICLO PRINCIPALE ──────────────────────────────────────────────────────────
 def main_loop() -> None:
+    global _loss_streak, _entry_cooldown_until_ts
     last_scan_ts = 0.0
 
     while True:
@@ -1488,6 +1509,21 @@ def main_loop() -> None:
                         cur   = get_last_price(sym) or 0
                         pnl   = (cur - ep) / ep * 100 if ep else 0
                         log(f"[CLOSE] {sym} chiusa ~{pnl:+.1f}%")
+                        if pnl < 0:
+                            _loss_streak += 1
+                            if _loss_streak >= LOSS_STREAK_LIMIT:
+                                _entry_cooldown_until_ts = max(
+                                    _entry_cooldown_until_ts,
+                                    time.time() + LOSS_STREAK_COOLDOWN_H * 3600,
+                                )
+                                log(f"[COOLDOWN] attivato per {LOSS_STREAK_COOLDOWN_H}h "
+                                    f"dopo {_loss_streak} chiusure negative consecutive")
+                                notify_telegram(
+                                    f"🧊 Cooldown LONG attivato {LOSS_STREAK_COOLDOWN_H}h\n"
+                                    f"Motivo: {_loss_streak} chiusure negative consecutive"
+                                )
+                        else:
+                            _loss_streak = 0
                         notify_telegram(
                             f"📊 Chiusa {sym}\n"
                             f"PnL ~{pnl:+.1f}% | Entry: {ep:.4f} | Uscita ~{cur:.4f}"
@@ -1510,6 +1546,17 @@ def main_loop() -> None:
         if check_circuit_breaker():
             tlog("circuit_breaker", "🚨 Circuit breaker attivo — scan bloccata", 1800)
             continue
+
+        if _entry_cooldown_until_ts > now:
+            rem_h = (_entry_cooldown_until_ts - now) / 3600
+            tlog("loss_cooldown",
+                 f"🧊 Cooldown LONG attivo per {rem_h:.1f}h dopo loss streak",
+                 300)
+            continue
+        if _entry_cooldown_until_ts > 0 and now >= _entry_cooldown_until_ts:
+            _entry_cooldown_until_ts = 0.0
+            _loss_streak = 0
+            log("[COOLDOWN] LONG scaduto — ingressi riattivati")
 
         if not _btc_ok:
             log("[SCAN] BTC filter attivo — scan sospesa")
