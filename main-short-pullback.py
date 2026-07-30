@@ -52,14 +52,14 @@ BYBIT_BASE_URL     = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "http
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
 # ── PARAMETRI STRATEGIA ───────────────────────────────────────────────────────
-RISK_PCT           = 0.0100   # 1% rischio per trade
+RISK_PCT           = 0.0050   # 0.5% rischio per trade
 DEFAULT_LEVERAGE   = 5
-MAX_OPEN_POSITIONS = 5
+MAX_OPEN_POSITIONS = 3
 MARGIN_USE_PCT     = 0.30
 ORDER_USDT_MAX     = float(os.getenv("ORDER_USDT_MAX", "1000"))
-MAX_TOTAL_OPEN_RISK_PCT = float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", "0.04"))
+MAX_TOTAL_OPEN_RISK_PCT = float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", "0.025"))
 
-SL_ATR_BUFFER  = 0.3    # buffer sopra swing high (× ATR)
+SL_ATR_BUFFER  = 0.1    # buffer sopra swing high (× ATR)
 TRAIL_ATR_MULT = 2.0    # moltiplicatore ATR per il trailing stop dal minimo
 PARTIAL_TP_R   = 2.0    # partial TP più tardi: lascia correre i vincenti
 PARTIAL_TP_PCT = 0.20
@@ -95,7 +95,7 @@ RSI_MAX_4H    = 70.0
 EMA_TOUCH_TOL = 0.012  # bounce più preciso sulla EMA20
 MAX_DIST_EMA  = 3.0    # % massima close SOTTO EMA20 all'entry (rifiuto fresco)
 CLOSE_ABOVE_EMA_TOL = 0.003  # tolleranza 0.3%: accetta close lievemente sopra EMA20
-MAX_SL_PCT    = 8.0    # SL massimo accettabile: 8% sopra entry
+MAX_SL_PCT    = 5.0    # SL massimo accettabile: 5% sopra entry
 MIN_BODY_PCT  = 25.0   # evita doji e rejection deboli
 MIN_VOL_RATIO = 0.8    # richiede almeno volume vicino alla media
 MAX_DIST_EMA50_D = 20.0  # daily close max 20% SOTTO EMA50 (non in freefall)
@@ -103,7 +103,7 @@ REQUIRE_SLOPE_CONFIRMATION = True
 MAX_CHG_1H_PCT = -0.4
 MAX_CHG_4H_PCT = -1.0
 BASE_LOOKBACK_BARS = 6
-SL_BASE_ATR_BUFFER = 0.2
+SL_BASE_ATR_BUFFER = 0.1
 
 # Adaptive engine (percentili + ATR-normalized momentum)
 ADAPTIVE_LOOKBACK_BARS = 48
