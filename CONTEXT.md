@@ -24,18 +24,22 @@
 
 | Parametro | Valore | Descrizione |
 |---|---|---|
-| RISK_PCT | 1.0% | Rischio per trade su equity |
+| RISK_PCT | 0.5% | Rischio per trade su equity |
 | DEFAULT_LEVERAGE | 5x | Leva cross |
-| MAX_OPEN_POSITIONS | 5 | Posizioni simultanee per bot |
-| SL_ATR_BUFFER | 0.3 | Buffer ATR oltre swing low/high |
+| MAX_OPEN_POSITIONS | 3 | Posizioni simultanee per bot |
+| MAX_TOTAL_OPEN_RISK_PCT | 2.5% | Rischio totale aperto massimo |
+| SL_ATR_BUFFER | 0.1 | Buffer ATR oltre swing low/high |
 | TRAIL_ATR_MULT | 2.0 | Moltiplicatore ATR per il trail |
-| PARTIAL_TP_R | 2.0 | R multiplo per il partial TP (50%) |
-| MIN_BODY_PCT | 40% | Corpo candela segnale minimo |
-| MIN_VOL_RATIO | 1.5x | Volume candela vs media 20 |
+| PARTIAL_TP_R | 2.0 | R multiplo per il partial TP (20%) |
+| MIN_BODY_PCT | 25% | Corpo candela segnale minimo |
+| MIN_VOL_RATIO | 0.8x | Volume candela vs media 20 |
 | MAX_DIST_EMA | 3.0% | Distanza max close da EMA20 |
-| MAX_SL_PCT | 8.0% | SL max accettabile |
+| MAX_SL_PCT | 5.0% | SL max accettabile |
 | EMA_TOUCH_TOL | 1.2% | Tolleranza tocco EMA20 |
 | MAX_DIST_EMA50_D | 20.0% | Distanza max da EMA50 daily |
+| ADAPTIVE_BASE_MAX_PCT | 16.0% | Larghezza massima base ammessa (allentata il 07/08) |
+| BREAK_CONFIRM_ATR_TOL | 0.35 | Tolleranza conferma breakout in multipli ATR |
+| BREAK_CONFIRM_PCT_TOL | 0.22% | Tolleranza conferma breakout in percentuale prezzo |
 | TIME_STOP_DAYS | 10 | Giorni max in posizione |
 | TIME_STOP_MIN_LEV | 10% | P&L lev minimo dopo TIME_STOP_DAYS |
 | CIRCUIT_BREAKER_PCT | 3.0% | Drawdown giornaliero max |
@@ -56,11 +60,11 @@
 1. low <= EMA20 * 1.012  (tocco al supporto)
 2. close > EMA20         (rimbalzo confermato)
 3. close > open          (candela verde)
-4. RSI 30-65
+4. RSI 30-70
 5. close entro 3% sopra EMA20
-6. body >= 40% del range
-7. volume >= 1.5x media 20
-8. SL = swing_low(3 barre) - 0.3xATR
+6. body >= 25% del range
+7. volume >= 0.8x media 20
+8. SL = swing low base - 0.1xATR (con max SL 5%)
 
 **Regime gate:** BTC_BULL_CHECK = False (disabilitato da giugno 2026 - BTC sotto EMA50 per mesi dopo ATH 100k; filtro daily per singola coin e sufficiente)
 
@@ -81,15 +85,16 @@
 1. high >= EMA20 * 0.988  (bounce tocca la resistenza)
 2. close < EMA20          (rifiuto confermato)
 3. close < open           (candela rossa)
-4. RSI 35-65
+4. RSI 30-70
 5. close entro 3% sotto EMA20
-6. body >= 40% del range
-7. volume >= 1.5x media 20
-8. SL = swing_high(3 barre) + 0.3xATR
+6. body >= 25% del range
+7. volume >= 0.8x media 20
+8. SL = swing high base + 0.1xATR (con max SL 5%)
 
 **Regime gate (BTC_SHORT_REGIME_CHECK = True):**
 - ATTIVO quando: BTC < EMA50 daily E EMA50 slope negativa
 - IDLE automatico quando: BTC rimbalza sopra EMA50 o slope si inverte
+- Soglia score short: BTC_SHORT_REGIME_SCORE_MIN = 0.20 (ridotta il 07/08)
 
 **Trailing:** low_water + 2xATR (SL scende man mano che il prezzo cala)
 **Ratchet floor SHORT:** entry * (1 - floor_lev/100/lev) - SL si abbassa verso profit
@@ -121,6 +126,11 @@
 
 | Data | Decisione | Motivazione |
 |---|---|---|
+| 2026-08-07 | Allentati i filtri setup (base e breakout) su LONG/SHORT | Aumentare il numero di ingressi dopo fase di eccessivo under-trading |
+| 2026-08-07 | Ridotta soglia regime short (score min 0.55 -> 0.20) | Ridurre i periodi di idle totale del bot SHORT |
+| 2026-07-30 | Rischio per trade ridotto a 0.5% e max posizioni a 3 | Ridurre l’impatto delle perdite e contenere il drawdown di singolo trade |
+| 2026-07-30 | Max total open risk ridotto a 2.5% | Evitare concentrazione eccessiva di rischio su più posizioni aperte |
+| 2026-07-30 | SL massimo accettabile ridotto a 5% e buffer ATR a 0.1 | Limitare l’ampiezza delle perdite e rendere gli stop più reattivi |
 | 2026-06-30 | Creato main-short-pullback.py | Mercato bearish (BTC -40% da ATH), opportunita short sistematiche; strategia speculare al long |
 | 2026-06-30 | Eliminato main-short.py (vecchio) | Troppo complesso (~200 parametri), mai validato con backtest, rimosso da Railway a maggio |
 | 2026-06-16 | BTC_BULL_CHECK = False | EMA50 daily BTC ancora a 73k dopo calo da 100k; filtro daily per singola coin e sufficiente |
@@ -192,4 +202,36 @@ equirements.txt | Dipendenze Python | Repo |
 
 ---
 
-*Ultimo aggiornamento: 2026-06-30*
+## 11. Protocollo Go/No-Go (anti-tuning infinito)
+
+Regola base: ogni modifica entra in una finestra di valutazione fissa, senza ulteriori ritocchi durante il test.
+
+**Finestra di test:**
+1. Durata minima: 14 giorni
+2. Campione minimo: 30 trade chiusi complessivi (LONG+SHORT)
+3. Se non si raggiungono 30 trade: estendere finestra fino a 30 trade
+
+**KPI di promozione (Go):**
+1. Profit Factor >= 1.15
+2. Expectancy > 0
+3. Max drawdown contenuto e non peggiore del ciclo precedente
+4. Avg loss non superiore a 2.2x avg win
+
+**KPI di bocciatura (No-Go):**
+1. Profit Factor < 1.00 su campione valido
+2. Expectancy <= 0
+3. Drawdown peggiorativo rispetto al ciclo precedente
+
+**Regole operative:**
+1. Nessun cambio parametri durante la finestra in corso
+2. Una sola modifica strutturale per ciclo (non pacchetti multipli)
+3. Se 2 cicli consecutivi sono No-Go: stop tuning e pivot strategia
+
+**Pivot strategy (se No-Go x2):**
+1. Mettere bot in paper/sandbox
+2. Rieseguire validazione walk-forward + montecarlo su set aggiornato
+3. Riattivare live solo con KPI minimi passati in test
+
+---
+
+*Ultimo aggiornamento: 2026-08-07*
