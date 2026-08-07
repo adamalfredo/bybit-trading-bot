@@ -234,4 +234,17 @@ Regola base: ogni modifica entra in una finestra di valutazione fissa, senza ult
 
 ---
 
+## 12. Report settimanale standard
+
+File template ufficiale:
+- WEEKLY_GO_NO_GO_REPORT_TEMPLATE.md
+
+Regola operativa:
+1. Compilare il report una volta a settimana sempre sullo stesso orizzonte temporale.
+2. Non decidere modifiche senza report compilato.
+3. Se esito NO-GO, pianificare una sola modifica per il ciclo successivo.
+4. Se due NO-GO consecutivi, applicare pivot strategy senza eccezioni.
+
+---
+
 *Ultimo aggiornamento: 2026-08-07*
