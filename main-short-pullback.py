@@ -44,7 +44,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from strategy_gate import should_allow_live_trading
-from live_mean_reversion import get_mean_reversion_signal
+from live_mean_reversion import get_mean_reversion_signal, load_live_config
 
 # ── ENV VARS ──────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN     = os.getenv("TELEGRAM_TOKEN")
@@ -1512,6 +1512,7 @@ def sync_positions_from_wallet() -> None:
             "sl_price":          sl_price,
             "r_dist":            r_dist,
             "orig_r_dist":       orig_r_dist,
+            "target_price":      entry_price - float(load_live_config()["target_r_multiple"]) * orig_r_dist if LIVE_STRATEGY_MODE == "mean_reversion" else 0.0,
             "qty":               qty,
             "entry_time":        time.time(),
             "trailing_active":   trailing_active,
@@ -1759,7 +1760,7 @@ def main_loop() -> None:
                 f"base={signal['base_range']:.2f}%/{signal['base_max']:.2f}% "
                 f"normZ={signal['norm_z']:+.2f} RR={signal['rr_est']:.2f} | "
                 f"EMA20: {signal['ema20_4h']:.4f} | "
-                f"dist: -{signal['dist_ema']:.1f}% | RSI: {signal['rsi']:.0f} | "
+                f"dist: {signal['dist_ema']:+.1f}% | RSI: {signal['rsi']:.0f} | "
                 f"SL: +{signal['sl_pct']:.1f}% | size: {usdt_val:.1f} USDT")
 
             set_leverage(sym)
