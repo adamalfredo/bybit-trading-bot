@@ -91,6 +91,7 @@ def get_mean_reversion_signal(
         "chg_1h": (entry_price / previous_close - 1.0) * 100.0,
         "chg_4h": (entry_price / float(signals["Close"].iloc[idx - 4]) - 1.0) * 100.0,
         "rvol": float(signals["Volume"].iloc[idx]) / volume_avg if volume_avg > 0 else 0.0,
+        "min_rvol": 0.0,
         "base_range": candle_range / entry_price * 100.0 if entry_price > 0 else 0.0,
         "base_max": 0.0,
         "norm_z": 0.0,

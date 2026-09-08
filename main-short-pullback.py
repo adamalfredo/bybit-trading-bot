@@ -1844,8 +1844,8 @@ if __name__ == "__main__":
     log(f"[AVVIO] Equity: {equity0:.2f} USDT")
 
     notify_telegram(
-        f"📉 SHORT ANTICIPATION BOT AVVIATO\n"
-        f"Segnale: breakdown da base compressa + daily downtrend\n"
+        f"📉 {'SHORT MEAN-REVERSION BOT AVVIATO' if LIVE_STRATEGY_MODE == 'mean_reversion' else 'SHORT ANTICIPATION BOT AVVIATO'}\n"
+        f"Segnale: {'bounce EMA20 4h in ipercomprato' if LIVE_STRATEGY_MODE == 'mean_reversion' else 'breakdown da base compressa'} + daily downtrend\n"
         f"Regime: BTC daily < EMA50 (slope−) → SHORT attivi\n"
         f"Exit: Ratchet ≥{first_trigger}%→+{first_floor}% ... ≥150%→+120% | "
         f"Partial 50%@{PARTIAL_TP_R:.1f}R\n"
