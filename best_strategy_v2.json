@@ -1,0 +1,39 @@
+{
+  "config": {
+    "strategy_family": "mean_reversion",
+    "max_hold_bars": 12,
+    "stop_atr_buffer": 0.8,
+    "target_r_multiple": 1.1,
+    "long_rsi_min": 35.0,
+    "long_rsi_max": 58.0,
+    "short_rsi_min": 45.0,
+    "short_rsi_max": 78.0
+  },
+  "train_gate": true,
+  "test_gate": true,
+  "train_metrics": {
+    "total_trades": 437,
+    "wins": 265,
+    "losses": 171,
+    "win_rate": 0.6064073226544623,
+    "avg_win": 3.196623782737603,
+    "avg_loss": 2.307888845654252,
+    "expectancy": 1.0300879198465298,
+    "profit_factor": 2.146477802540077,
+    "net": 452.4563098185876,
+    "min_trades_required": 10
+  },
+  "test_metrics": {
+    "total_trades": 124,
+    "wins": 72,
+    "losses": 52,
+    "win_rate": 0.5806451612903226,
+    "avg_win": 2.729345219026761,
+    "avg_loss": 2.204666115492994,
+    "expectancy": 0.6602436916475092,
+    "profit_factor": 1.7141341056742474,
+    "net": 81.87021776429113,
+    "min_trades_required": 10
+  },
+  "notes": "Selected by rolling out-of-sample ranking in validate_strategy_v2.py"
+}

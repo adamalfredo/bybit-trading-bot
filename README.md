@@ -105,3 +105,33 @@ Vedere Roadmap.md per le migliorie segnali pendenti (da valutare dopo 20+ trade 
 2. [PRIORITA 2] Struttura pre-pullback: 2+ candele sopra EMA20 prima del ritocco
 3. [PRIORITA 3] RSI min da 30 a 38
 4. [PRIORITA 4] EMA_TOUCH_TOL da 1.2% a 0.5%
+
+---
+
+## Runner operativo (best strategy v2)
+
+La nuova strategia è implementata nei due entrypoint live e `mean_reversion` è il default. Per tornare temporaneamente al motore precedente, impostare `LIVE_STRATEGY_MODE=pullback`.
+
+Per eseguire un dry run paper-ready con la configurazione vincente salvata in best_strategy_v2.json:
+
+```bash
+python run_best_strategy_v2.py
+```
+
+Il comando:
+- carica automaticamente la famiglia e i parametri dal JSON vincitore,
+- scarica dati 4h/daily dai simboli in universo,
+- applica il regime gate long/short,
+- calcola metriche per simbolo + aggregato,
+- applica il gate GO/NO-GO,
+- salva un report testuale in validation_v2_latest.txt,
+- salva uno stato macchina-legibile in live_gate_status_v2.json.
+
+Opzioni utili:
+
+```bash
+python run_best_strategy_v2.py --min-trades 50 --bars-4h 1500 --bars-d 350
+python run_best_strategy_v2.py --symbols BTCUSDT ETHUSDT SOLUSDT
+python run_best_strategy_v2.py --report-out my_latest_report.txt
+python run_best_strategy_v2.py --status-out my_live_gate_status.json
+```

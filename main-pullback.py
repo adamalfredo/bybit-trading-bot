@@ -29,6 +29,7 @@ import json
 import re
 import threading
 from decimal import Decimal, ROUND_DOWN
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -37,6 +38,9 @@ from ta.volatility import AverageTrueRange
 from ta.momentum import RSIIndicator
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+from strategy_gate import should_allow_live_trading
+from live_mean_reversion import get_mean_reversion_signal
 
 # ── ENV VARS ──────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN     = os.getenv("TELEGRAM_TOKEN")
@@ -54,6 +58,7 @@ MAX_OPEN_POSITIONS = 3
 MARGIN_USE_PCT     = 0.30
 ORDER_USDT_MAX     = float(os.getenv("ORDER_USDT_MAX", "1000"))
 MAX_TOTAL_OPEN_RISK_PCT = float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", "0.025"))
+LIVE_STRATEGY_MODE = os.getenv("LIVE_STRATEGY_MODE", "mean_reversion").lower()
 
 SL_ATR_BUFFER    = 0.1   # buffer aggiuntivo sotto swing low (× ATR)
 TRAIL_ATR_MULT   = 2.0   # moltiplicatore ATR per il trailing stop dal massimo
@@ -137,12 +142,13 @@ SL_WATCH_SLEEP_SEC = 600    # 10 min
 LONG_IDX           = 1
 
 # Time stop: chiude i trade "coricati" che non vanno da nessuna parte
-TIME_STOP_DAYS    = 10     # giorni massimi in posizione senza slancio
+TIME_STOP_DAYS    = 2 if LIVE_STRATEGY_MODE == "mean_reversion" else 10
 TIME_STOP_MIN_LEV = 10.0  # soglia: se P&L lev < 10% dopo N giorni → esci a breakeven
 
 # Circuit breaker: daily loss limit
 CIRCUIT_BREAKER_PCT       = 3.0   # drawdown % giornaliero max prima di bloccare tutto
 CIRCUIT_BREAKER_COOLDOWN_H = 24   # ore di blocco dopo attivazione
+LIVE_TRADING_MIN_TRADES = 30
 
 EXCLUDE_SUBSTRINGS = ["USDC", "BUSD", "DAI", "TUSD", "FRAX",
                       "3LUSDT", "3SUSDT", "BULLUSDT", "BEARUSDT"]
@@ -460,6 +466,47 @@ def get_total_equity() -> float:
         return get_usdt_balance()
 
 
+def evaluate_live_strategy_gate() -> tuple[bool, dict]:
+    """Controlla che la strategia attuale abbia davvero edge prima di aprire nuovi trade."""
+    if LIVE_STRATEGY_MODE == "mean_reversion":
+        try:
+            payload = json.loads(Path(__file__).with_name("best_strategy_v2.json").read_text(encoding="utf-8"))
+            config = payload.get("config", {})
+            metrics = dict(payload.get("test_metrics", {}))
+            if (config.get("strategy_family") == "mean_reversion"
+                    and payload.get("train_gate") is True
+                    and payload.get("test_gate") is True):
+                metrics["source"] = "walk_forward_oos"
+                log(f"[GATE] MEAN-REV GO — OOS trade={metrics.get('total_trades', 0)} expectancy={metrics.get('expectancy', 0):.4f} PF={metrics.get('profit_factor', 0):.2f}")
+                return True, metrics
+            log("[GATE] MEAN-REV NO-GO — best_strategy_v2.json non validato")
+            return False, {"total_trades": 0, "reason": "walk_forward_not_validated"}
+        except Exception as exc:
+            log(f"[GATE] MEAN-REV config error: {exc}")
+            return False, {"total_trades": 0, "reason": "config_error"}
+    try:
+        resp = _bybit_signed_get("/v5/position/closed-pnl",
+                                 {"category": "linear", "limit": "100"})
+        data = resp.json()
+        if data.get("retCode") != 0:
+            log(f"[GATE] Errore closed-pnl: {data.get('retMsg')}")
+            return False, {"total_trades": 0, "reason": "api_error"}
+        values = []
+        for trade in data.get("result", {}).get("list", []):
+            pnl = float(trade.get("closedPnl") or 0.0)
+            if pnl != 0:
+                values.append(pnl)
+        gate_ok, metrics = should_allow_live_trading(values, min_trades=LIVE_TRADING_MIN_TRADES)
+        if gate_ok:
+            log(f"[GATE] GO — {metrics['total_trades']} trade, expectancy={metrics['expectancy']:.4f}, PF={metrics['profit_factor']:.2f}")
+        else:
+            log(f"[GATE] NO-GO — {metrics['total_trades']} trade, expectancy={metrics['expectancy']:.4f}, PF={metrics['profit_factor']:.2f}")
+        return gate_ok, metrics
+    except Exception as exc:
+        log(f"[GATE] Eccezione durante valutazione: {exc}")
+        return False, {"total_trades": 0, "reason": "exception"}
+
+
 def estimate_open_risk_usdt() -> float:
     """Somma la perdita teorica fino allo SL di tutte le posizioni LONG aperte."""
     total = 0.0
@@ -613,8 +660,11 @@ def scan_universe() -> list:
             continue
         candidates.append({"symbol": sym, "vol24h": vol24h, "chg24h": chg24h})
 
-    # Top gainers prima, poi volume per spezzare i pari-merito.
-    candidates.sort(key=lambda x: (x["chg24h"], x["vol24h"]), reverse=True)
+    if LIVE_STRATEGY_MODE == "mean_reversion":
+        candidates.sort(key=lambda x: x["vol24h"], reverse=True)
+    else:
+        # Top gainers prima, poi volume per spezzare i pari-merito.
+        candidates.sort(key=lambda x: (x["chg24h"], x["vol24h"]), reverse=True)
     return candidates[:COINS_TOP_N]
 
 
@@ -740,6 +790,11 @@ def _compute_long_adaptive_thresholds(
 # ── SIGNAL CHECK 1h (ANTICIPAZIONE BREAKOUT) ─────────────────────────────────
 def check_entry_signal(symbol: str, reject_stats: Optional[dict] = None, rank: int = 99) -> Optional[dict]:
     """Entry LONG di anticipazione con soglie adattive su breakout 1h."""
+    if LIVE_STRATEGY_MODE == "mean_reversion":
+        signal = get_mean_reversion_signal(symbol, "long", fetch_klines)
+        if signal is None and reject_stats is not None:
+            reject_stats["mean_reversion_not_confirmed"] = reject_stats.get("mean_reversion_not_confirmed", 0) + 1
+        return signal
     top_gainer = rank <= 3
     def reject(reason: str) -> Optional[dict]:
         if reject_stats is not None:
@@ -1128,6 +1183,17 @@ def trailing_worker() -> None:
                 if entry_price <= 0:
                     continue
 
+                if (LIVE_STRATEGY_MODE == "mean_reversion"
+                        and float(entry.get("target_price", 0)) > 0
+                        and price_now >= float(entry["target_price"])):
+                    cur_qty = float(entry.get("qty", 0))
+                    if cur_qty > 0 and market_close_partial(symbol, cur_qty):
+                        discard_open(symbol)
+                        with _state_lock:
+                            position_data.pop(symbol, None)
+                        log(f"[MEAN-REV-TP] {symbol} chiusa a target 1.1R")
+                    continue
+
                 # P&L leveraged corrente (%)
                 pnl_lev = (price_now - entry_price) / entry_price * 100.0 * DEFAULT_LEVERAGE
 
@@ -1200,8 +1266,9 @@ def trailing_worker() -> None:
                 # ── TIME STOP: trade coricato dopo N giorni ───────────────────
                 days_open = (time.time() - float(entry.get("entry_time", time.time()))) / 86400
                 if (days_open >= TIME_STOP_DAYS
-                        and pnl_lev < TIME_STOP_MIN_LEV
-                        and price_now >= entry_price * 0.999):
+                    and (LIVE_STRATEGY_MODE == "mean_reversion"
+                         or (pnl_lev < TIME_STOP_MIN_LEV
+                         and price_now >= entry_price * 0.999))):
                     cur_qty = float(entry.get("qty", 0))
                     if cur_qty > 0:
                         ok = market_close_partial(symbol, cur_qty)
@@ -1564,6 +1631,13 @@ def main_loop() -> None:
             tlog("circuit_breaker", "🚨 Circuit breaker attivo — scan bloccata", 1800)
             continue
 
+        gate_ok, gate_metrics = evaluate_live_strategy_gate()
+        if not gate_ok:
+            tlog("live_gate_block",
+                 f"⛔ LONG gate NO-GO — trade={gate_metrics.get('total_trades', 0)} expectancy={gate_metrics.get('expectancy', 0):.4f} PF={gate_metrics.get('profit_factor', 0):.2f}",
+                 1800)
+            continue
+
         if _entry_cooldown_until_ts > now:
             rem_h = (_entry_cooldown_until_ts - now) / 3600
             tlog("loss_cooldown",
@@ -1625,12 +1699,12 @@ def main_loop() -> None:
 
             checked += 1
 
-            if chg24h < MIN_ABS_24H_CHANGE:
+            if LIVE_STRATEGY_MODE != "mean_reversion" and chg24h < MIN_ABS_24H_CHANGE:
                 reject_stats_scan["chg24h_too_low"] = reject_stats_scan.get("chg24h_too_low", 0) + 1
                 continue
             # Segnale di anticipazione breakout
             signal = check_entry_signal(sym, reject_stats_scan, rank=rank_idx)
-            signal_source = "SIGNAL-ANTI"
+            signal_source = "SIGNAL-MEAN-REV" if LIVE_STRATEGY_MODE == "mean_reversion" else "SIGNAL-ANTI"
             if not signal:
                 time.sleep(0.05)
                 continue
@@ -1683,6 +1757,7 @@ def main_loop() -> None:
                 "sl_price":          sl_price,
                 "r_dist":            actual_r_dist,
                 "orig_r_dist":       actual_r_dist,   # mai modificato: base per calcolo ratchet
+                "target_price":      entry_px + float(signal.get("rr_est", 1.1)) * actual_r_dist,
                 "qty":               qty,
                 "entry_time":        time.time(),
                 "trailing_active":   False,
@@ -1725,7 +1800,7 @@ if __name__ == "__main__":
     log("=" * 62)
     log("  TREND FOLLOWING — 1h ANTICIPATION BREAKOUT BOT")
     log("=" * 62)
-    log(f"  Timeframe : Daily trend + 1h segnale | Scan ogni {SCAN_INTERVAL_SEC//60}min")
+    log(f"  Timeframe : Daily trend + {'4h mean-reversion' if LIVE_STRATEGY_MODE == 'mean_reversion' else '1h segnale'} | Scan ogni {SCAN_INTERVAL_SEC//60}min")
     log(f"  Filtri    : breakout base {BASE_LOOKBACK_BARS}h (adaptive p{ADAPTIVE_BASE_WIDTH_PCTL:.2f}) | "
         f"RSI {RSI_MIN_4H}-{RSI_MAX_4H} | RVOL adaptive p{ADAPTIVE_RVOL_PCTL:.2f}")
     log(f"  Risk      : {RISK_PCT*100:.1f}%/trade | MAX={MAX_OPEN_POSITIONS} pos | "
