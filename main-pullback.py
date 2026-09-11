@@ -1191,7 +1191,13 @@ def trailing_worker() -> None:
                         discard_open(symbol)
                         with _state_lock:
                             position_data.pop(symbol, None)
+                        pnl_pct = (price_now - entry_price) / entry_price * 100.0
                         log(f"[MEAN-REV-TP] {symbol} chiusa a target 1.1R")
+                        notify_telegram(
+                            f"🎯 TARGET {symbol}\n"
+                            f"Chiusa a +1.1R | Entry: {entry_price:.4f} → Uscita: {price_now:.4f}\n"
+                            f"P&L: {pnl_pct:+.2f}%"
+                        )
                     continue
 
                 # P&L leveraged corrente (%)
