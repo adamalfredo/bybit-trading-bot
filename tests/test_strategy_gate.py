@@ -1,6 +1,14 @@
 import math
 
-from strategy_gate import compute_trade_metrics, should_allow_live_trading
+from strategy_gate import compute_trade_metrics, order_notional_for_risk, should_allow_live_trading
+
+
+def test_order_notional_rejects_minimum_that_exceeds_risk():
+    assert order_notional_for_risk(100.0, 10.0, 0.5, 6.0) is None
+
+
+def test_order_notional_keeps_risk_sized_value_above_minimum():
+    assert order_notional_for_risk(100.0, 5.0, 0.5, 6.0) == 10.0
 
 
 def test_negative_expectancy_blocks_live_trading():

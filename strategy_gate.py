@@ -1,6 +1,18 @@
 from __future__ import annotations
 
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Optional, Tuple
+
+
+def order_notional_for_risk(
+    entry_price: float,
+    stop_distance: float,
+    risk_usdt: float,
+    min_notional: float,
+) -> Optional[float]:
+    if entry_price <= 0 or stop_distance <= 0 or risk_usdt <= 0 or min_notional <= 0:
+        return None
+    notional = (risk_usdt / stop_distance) * entry_price
+    return notional if notional >= min_notional else None
 
 
 def compute_trade_metrics(trades: Iterable[float]) -> dict:

@@ -43,7 +43,7 @@ from ta.momentum import RSIIndicator
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from strategy_gate import should_allow_live_trading
+from strategy_gate import order_notional_for_risk, should_allow_live_trading
 from live_mean_reversion import get_mean_reversion_signal, load_live_config
 
 # ── ENV VARS ──────────────────────────────────────────────────────────────────
@@ -1757,8 +1757,16 @@ def main_loop() -> None:
                 continue
             r_dist    = signal["r_dist"]
             entry_px  = signal["entry_price"]
-            usdt_val  = (risk_usdt / r_dist) * entry_px
-            usdt_val  = max(usdt_val, 5.5)  # floor: minimo Bybit è 5 USDT
+            instrument = get_instrument_info(sym)
+            min_notional = max(
+                5.5,
+                float(instrument.get("min_order_amt", 5.0)),
+                float(instrument.get("min_qty", 0.0)) * entry_px,
+            )
+            usdt_val = order_notional_for_risk(entry_px, r_dist, risk_usdt, min_notional)
+            if usdt_val is None:
+                reject_stats_scan["min_order_exceeds_risk"] = reject_stats_scan.get("min_order_exceeds_risk", 0) + 1
+                continue
 
             log(f"[SIGNAL] {sym} SHORT rank#{rank_idx} chg24h={chg24h:+.2f}% src={signal_source} | "
                 f"chg1h={signal['chg_1h']:+.2f}% chg4h={signal['chg_4h']:+.2f}% "
