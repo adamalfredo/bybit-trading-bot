@@ -1719,8 +1719,9 @@ def main_loop() -> None:
         entered = 0
         checked = 0
         reject_stats_scan = {}
+        scan_top_n = COINS_TOP_N if LIVE_STRATEGY_MODE == "mean_reversion" else TRADE_TOP_N
         for rank_idx, coin in enumerate(universe, start=1):
-            if rank_idx > TRADE_TOP_N:
+            if rank_idx > scan_top_n:
                 break
             if len(open_positions) >= MAX_OPEN_POSITIONS:
                 break
