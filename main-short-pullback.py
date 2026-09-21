@@ -159,9 +159,13 @@ LIVE_TRADING_MIN_TRADES = 30
 
 EXCLUDE_SUBSTRINGS = ["USDC", "BUSD", "DAI", "TUSD", "FRAX",
                       "3LUSDT", "3SUSDT", "BULLUSDT", "BEARUSDT"]
+# Contratti non-crypto (materie prime/equity tokenizzati): richiedono termini
+# di trading separati su Bybit e falliscono all'ordine se non accettati.
+NON_CRYPTO_SYMBOLS = {"XAUUSDT", "XAGUSDT", "CLUSDT", "SOXLUSDT", "SOXSUSDT",
+                      "USOILUSDT", "UKOILUSDT", "NGUSDT", "XPTUSDT", "XPDUSDT"}
 EXCLUDE_SYMBOLS = {
     s.strip().upper() for s in os.getenv("EXCLUDE_SYMBOLS", "").split(",") if s.strip()
-}
+} | NON_CRYPTO_SYMBOLS
 MIN_ABS_24H_CHANGE = float(os.getenv("MIN_ABS_24H_CHANGE", "3.5"))
 
 # ── STATO GLOBALE ─────────────────────────────────────────────────────────────
