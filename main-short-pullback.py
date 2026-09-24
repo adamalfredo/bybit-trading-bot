@@ -159,13 +159,9 @@ LIVE_TRADING_MIN_TRADES = 30
 
 EXCLUDE_SUBSTRINGS = ["USDC", "BUSD", "DAI", "TUSD", "FRAX",
                       "3LUSDT", "3SUSDT", "BULLUSDT", "BEARUSDT"]
-# Contratti non-crypto (materie prime/equity tokenizzati): richiedono termini
-# di trading separati su Bybit e falliscono all'ordine se non accettati.
-NON_CRYPTO_SYMBOLS = {"XAUUSDT", "XAGUSDT", "CLUSDT", "SOXLUSDT", "SOXSUSDT",
-                      "USOILUSDT", "UKOILUSDT", "NGUSDT", "XPTUSDT", "XPDUSDT"}
 EXCLUDE_SYMBOLS = {
     s.strip().upper() for s in os.getenv("EXCLUDE_SYMBOLS", "").split(",") if s.strip()
-} | NON_CRYPTO_SYMBOLS
+}
 MIN_ABS_24H_CHANGE = float(os.getenv("MIN_ABS_24H_CHANGE", "3.5"))
 
 # ── STATO GLOBALE ─────────────────────────────────────────────────────────────
@@ -659,6 +655,32 @@ def _update_btc_regime() -> None:
     _btc_ts = time.time()
 
 
+# ── FILTRO STRUMENTI NON-CRYPTO ───────────────────────────────────────────────
+_non_crypto_symbols: set = set()
+_non_crypto_ts: float = 0.0
+
+
+def get_non_crypto_symbols() -> set:
+    """Simboli con symbolType valorizzato (stock/ETF/commodity): non sono crypto
+    e richiedono termini di trading separati su Bybit. Cache oraria."""
+    global _non_crypto_symbols, _non_crypto_ts
+    if time.time() - _non_crypto_ts < 3600 and _non_crypto_symbols:
+        return _non_crypto_symbols
+    try:
+        resp = SESSION.get(f"{BYBIT_BASE_URL}/v5/market/instruments-info",
+                           params={"category": "linear", "limit": 1000}, timeout=15)
+        data = resp.json()
+        if data.get("retCode") == 0:
+            _non_crypto_symbols = {
+                item["symbol"] for item in data["result"]["list"]
+                if item.get("symbolType")
+            }
+            _non_crypto_ts = time.time()
+    except Exception as e:
+        log(f"[SCAN] Errore fetch non-crypto symbols: {e}")
+    return _non_crypto_symbols
+
+
 # ── SCANSIONE UNIVERSO ────────────────────────────────────────────────────────
 def scan_universe() -> list:
     """
@@ -677,6 +699,7 @@ def scan_universe() -> list:
         log(f"[SCAN] Errore fetch tickers: {e}")
         return []
 
+    non_crypto = get_non_crypto_symbols()
     candidates = []
     for t in tickers:
         sym = t.get("symbol", "")
@@ -685,6 +708,8 @@ def scan_universe() -> list:
         if any(ex in sym for ex in EXCLUDE_SUBSTRINGS):
             continue
         if sym in EXCLUDE_SYMBOLS:
+            continue
+        if sym in non_crypto:
             continue
         if sym in blocked_symbols:
             continue
