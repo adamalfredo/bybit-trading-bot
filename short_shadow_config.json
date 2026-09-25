@@ -1,0 +1,28 @@
+{
+  "strategy_family": "volatility_expansion_short",
+  "status": "shadow_only",
+  "config": {
+    "expansion_percentile": 0.6,
+    "min_volume_ratio": 1.0,
+    "stop_lookback_bars": 8,
+    "stop_atr_buffer": 1.0,
+    "target_r_multiple": 1.5,
+    "max_hold_bars": 24,
+    "short_rsi_min": 20,
+    "short_rsi_max": 48
+  },
+  "oos_metrics": {
+    "trades": 30,
+    "profit_factor": 1.8455,
+    "expectancy": 1.7591,
+    "win_rate": 0.5333,
+    "positive_windows": "10/16",
+    "top_symbol_profit_share": 0.298
+  },
+  "promotion_requirements": {
+    "additional_shadow_trades": 30,
+    "minimum_profit_factor": 1.2,
+    "minimum_expectancy": 0.0,
+    "maximum_top_symbol_profit_share": 0.4
+  }
+}

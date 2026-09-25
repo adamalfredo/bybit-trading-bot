@@ -54,6 +54,8 @@ SECRET             = os.getenv("BYBIT_API_SECRET", "")
 BYBIT_TESTNET      = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
 BYBIT_BASE_URL     = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
+ENABLE_SHORT_SHADOW_MONITOR = os.getenv("ENABLE_SHORT_SHADOW_MONITOR", "true").lower() == "true"
+SHORT_SHADOW_SCAN_INTERVAL_SEC = int(os.getenv("SHORT_SHADOW_SCAN_INTERVAL_SEC", "1800"))
 
 # ── PARAMETRI STRATEGIA ───────────────────────────────────────────────────────
 RISK_PCT           = 0.0050   # 0.5% rischio per trade
@@ -1869,6 +1871,26 @@ def main_loop() -> None:
 
 
 # ── AVVIO ─────────────────────────────────────────────────────────────────────
+def short_shadow_worker() -> None:
+    try:
+        from shadow_short_monitor import load_state, save_state, scan_once
+    except Exception as exc:
+        log(f"[SHADOW-SHORT] import fallito: {exc}")
+        return
+
+    state = load_state()
+    log(f"[SHADOW-SHORT] monitor avviato su Railway | interval={SHORT_SHADOW_SCAN_INTERVAL_SEC}s | read-only")
+    while True:
+        try:
+            scan_once(state)
+            save_state(state)
+        except Exception as exc:
+            state["last_error"] = str(exc)
+            save_state(state)
+            log(f"[SHADOW-SHORT] errore scan: {exc}")
+        time.sleep(SHORT_SHADOW_SCAN_INTERVAL_SEC)
+
+
 if __name__ == "__main__":
     run_startup_self_checks()
     log("=" * 62)
@@ -1904,5 +1926,9 @@ if __name__ == "__main__":
 
     threading.Thread(target=trailing_worker, daemon=True).start()
     threading.Thread(target=sl_watchdog,     daemon=True).start()
+    if ENABLE_SHORT_SHADOW_MONITOR:
+        threading.Thread(target=short_shadow_worker, daemon=True).start()
+    else:
+        log("[SHADOW-SHORT] disabilitato da ENABLE_SHORT_SHADOW_MONITOR=false")
 
     main_loop()
