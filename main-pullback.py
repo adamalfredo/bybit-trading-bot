@@ -59,6 +59,8 @@ MARGIN_USE_PCT     = 0.30
 ORDER_USDT_MAX     = float(os.getenv("ORDER_USDT_MAX", "1000"))
 MAX_TOTAL_OPEN_RISK_PCT = float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", "0.025"))
 LIVE_STRATEGY_MODE = os.getenv("LIVE_STRATEGY_MODE", "mean_reversion").lower()
+ENABLE_LONG_SHADOW_MONITOR = os.getenv("ENABLE_LONG_SHADOW_MONITOR", "true").lower() == "true"
+LONG_SHADOW_SCAN_INTERVAL_SEC = int(os.getenv("LONG_SHADOW_SCAN_INTERVAL_SEC", "1800"))
 
 SL_ATR_BUFFER    = 0.1   # buffer aggiuntivo sotto swing low (× ATR)
 TRAIL_ATR_MULT   = 2.0   # moltiplicatore ATR per il trailing stop dal massimo
@@ -1875,5 +1877,9 @@ if __name__ == "__main__":
 
     threading.Thread(target=trailing_worker, daemon=True).start()
     threading.Thread(target=sl_watchdog,     daemon=True).start()
+    if ENABLE_LONG_SHADOW_MONITOR:
+        threading.Thread(target=long_shadow_worker, daemon=True).start()
+    else:
+        log("[SHADOW-LONG] disabilitato da ENABLE_LONG_SHADOW_MONITOR=false")
 
     main_loop()
