@@ -1841,6 +1841,27 @@ def main_loop() -> None:
             log(f"[REJECT] LONG top motivi: {reject_msg}")
 
 
+# ── SHADOW LONG WORKER ─────────────────────────────────────────────────────
+def long_shadow_worker() -> None:
+    try:
+        from shadow_long_monitor import load_state, save_state, scan_once
+    except Exception as exc:
+        log(f"[SHADOW-LONG] import fallito: {exc}")
+        return
+
+    state = load_state()
+    log(f"[SHADOW-LONG] monitor avviato su Railway | interval={LONG_SHADOW_SCAN_INTERVAL_SEC}s | read-only")
+    while True:
+        try:
+            scan_once(state)
+            save_state(state)
+        except Exception as exc:
+            state["last_error"] = str(exc)
+            save_state(state)
+            log(f"[SHADOW-LONG] errore scan: {exc}")
+        time.sleep(LONG_SHADOW_SCAN_INTERVAL_SEC)
+
+
 # ── AVVIO ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     run_startup_self_checks()
