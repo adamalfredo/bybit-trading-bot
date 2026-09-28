@@ -197,6 +197,7 @@ def _backtest_simple_directional(
     rsi_min: float = 45.0,
     rsi_max: float = 75.0,
     regime_column: Optional[str] = None,
+    round_trip_cost_pct: float = 0.11,
 ) -> dict:
     data = build_signal_frame(df, direction=direction, strategy_name=strategy_name, rsi_min=rsi_min, rsi_max=rsi_max)
     if regime_column is not None and regime_column in df.columns:
@@ -211,7 +212,9 @@ def _backtest_simple_directional(
     for i in range(len(data)):
         regime_ok = True if regime_column is None else bool(data[regime_column].iloc[i])
         if not in_trade and regime_ok and data["signal"].iloc[i]:
-            entry_price = float(data["Close"].iloc[i])
+            if i + 1 >= len(data):
+                continue
+            entry_price = float(data["Open"].iloc[i + 1])
             if direction == "long":
                 lookback = 20 if strategy_name == "breakout" else 8 if strategy_name == "mean_reversion" else 12
                 stop_price = float(min(data["Low"].iloc[max(0, i - lookback): i + 1])) - stop_atr_buffer * float(data["atr14"].iloc[i])
@@ -235,37 +238,37 @@ def _backtest_simple_directional(
 
             if direction == "long":
                 if low <= stop_price:
-                    pnl = ((stop_price - entry_price) / entry_price) * 100.0
+                    pnl = ((stop_price - entry_price) / entry_price) * 100.0 - round_trip_cost_pct
                     trades.append(pnl)
                     in_trade = False
                     continue
 
                 if high >= target_price:
-                    pnl = ((target_price - entry_price) / entry_price) * 100.0
+                    pnl = ((target_price - entry_price) / entry_price) * 100.0 - round_trip_cost_pct
                     trades.append(pnl)
                     in_trade = False
                     continue
 
                 if i - entry_index >= max_hold_bars or i == len(data) - 1:
-                    pnl = ((close - entry_price) / entry_price) * 100.0
+                    pnl = ((close - entry_price) / entry_price) * 100.0 - round_trip_cost_pct
                     trades.append(pnl)
                     in_trade = False
                     continue
             else:
                 if high >= stop_price:
-                    pnl = ((entry_price - stop_price) / entry_price) * 100.0
+                    pnl = ((entry_price - stop_price) / entry_price) * 100.0 - round_trip_cost_pct
                     trades.append(pnl)
                     in_trade = False
                     continue
 
                 if low <= target_price:
-                    pnl = ((entry_price - target_price) / entry_price) * 100.0
+                    pnl = ((entry_price - target_price) / entry_price) * 100.0 - round_trip_cost_pct
                     trades.append(pnl)
                     in_trade = False
                     continue
 
                 if i - entry_index >= max_hold_bars or i == len(data) - 1:
-                    pnl = ((entry_price - close) / entry_price) * 100.0
+                    pnl = ((entry_price - close) / entry_price) * 100.0 - round_trip_cost_pct
                     trades.append(pnl)
                     in_trade = False
                     continue

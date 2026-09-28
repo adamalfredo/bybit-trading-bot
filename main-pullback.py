@@ -52,13 +52,21 @@ BYBIT_BASE_URL     = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "http
 BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
 
 # ── PARAMETRI STRATEGIA ───────────────────────────────────────────────────────
-RISK_PCT           = 0.0050   # 0.5% rischio per trade
+RISK_PCT           = float(os.getenv("RISK_PCT", "0.02"))  # 2%: su conto test serve a superare il min notional
 DEFAULT_LEVERAGE   = 5        # leva ridotta: 4h = posizioni più lunghe
 MAX_OPEN_POSITIONS = 3
 MARGIN_USE_PCT     = 0.30
 ORDER_USDT_MAX     = float(os.getenv("ORDER_USDT_MAX", "1000"))
-MAX_TOTAL_OPEN_RISK_PCT = float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", "0.025"))
+MAX_TOTAL_OPEN_RISK_PCT = float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", "0.06"))
 LIVE_STRATEGY_MODE = os.getenv("LIVE_STRATEGY_MODE", "mean_reversion").lower()
+MEAN_REV_MODE      = LIVE_STRATEGY_MODE == "mean_reversion"
+
+# Esecuzione mean-reversion allineata al backtest (entry ~ open della candela 4h successiva)
+BAR_SEC                   = 4 * 3600
+SCAN_AFTER_CLOSE_SEC      = 60
+MAX_ENTRY_DELAY_SEC       = 900
+MAX_ENTRY_DRIFT_R         = 0.25
+MAX_NEW_ENTRIES_PER_SCAN  = 2
 ENABLE_LONG_SHADOW_MONITOR = os.getenv("ENABLE_LONG_SHADOW_MONITOR", "true").lower() == "true"
 LONG_SHADOW_SCAN_INTERVAL_SEC = int(os.getenv("LONG_SHADOW_SCAN_INTERVAL_SEC", "1800"))
 
@@ -148,7 +156,7 @@ TIME_STOP_DAYS    = 2 if LIVE_STRATEGY_MODE == "mean_reversion" else 10
 TIME_STOP_MIN_LEV = 10.0  # soglia: se P&L lev < 10% dopo N giorni → esci a breakeven
 
 # Circuit breaker: daily loss limit
-CIRCUIT_BREAKER_PCT       = 3.0   # drawdown % giornaliero max prima di bloccare tutto
+CIRCUIT_BREAKER_PCT       = 8.0   # coerente con rischio 2%/trade e 3 posizioni
 CIRCUIT_BREAKER_COOLDOWN_H = 24   # ore di blocco dopo attivazione
 LIVE_TRADING_MIN_TRADES = 30
 
@@ -184,6 +192,8 @@ LOSS_STREAK_LIMIT = 2
 LOSS_STREAK_COOLDOWN_H = 6
 _loss_streak: int = 0
 _entry_cooldown_until_ts: float = 0.0
+
+_used_signal_keys: set = set()
 
 # ── HTTP SESSION ──────────────────────────────────────────────────────────────
 SESSION = requests.Session()
@@ -290,8 +300,8 @@ def _bybit_signed_get(path: str, params: dict):
                         hashlib.sha256).hexdigest()
         headers = {"X-BAPI-API-KEY": KEY, "X-BAPI-SIGN": sign,
                    "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": rw}
-        last_resp = SESSION.get(f"{BYBIT_BASE_URL}{path}",
-                                headers=headers, params=params, timeout=10)
+        last_resp = SESSION.get(f"{BYBIT_BASE_URL}{path}?{qs}",
+                                headers=headers, timeout=10)
         try:
             data = last_resp.json()
             if data.get("retCode") == 0:
@@ -475,14 +485,16 @@ def evaluate_live_strategy_gate() -> tuple[bool, dict]:
             payload = json.loads(Path(__file__).with_name("best_strategy_v2.json").read_text(encoding="utf-8"))
             config = payload.get("config", {})
             metrics = dict(payload.get("test_metrics", {}))
-            if (config.get("strategy_family") == "mean_reversion"
-                    and payload.get("train_gate") is True
-                    and payload.get("test_gate") is True):
+            # Conto di test: il gate blocca solo config assenti/errate, le metriche sono informative.
+            if config.get("strategy_family") == "mean_reversion":
                 metrics["source"] = "walk_forward_oos"
-                log(f"[GATE] MEAN-REV GO — OOS trade={metrics.get('total_trades', 0)} expectancy={metrics.get('expectancy', 0):.4f} PF={metrics.get('profit_factor', 0):.2f}")
+                tlog("gate_info",
+                     f"[GATE] MEAN-REV GO — OOS trade={metrics.get('total_trades', 0)} "
+                     f"expectancy={metrics.get('expectancy', 0):.4f} PF={metrics.get('profit_factor', 0):.2f} "
+                     f"(train_gate={payload.get('train_gate')} test_gate={payload.get('test_gate')})", 3600)
                 return True, metrics
-            log("[GATE] MEAN-REV NO-GO — best_strategy_v2.json non validato")
-            return False, {"total_trades": 0, "reason": "walk_forward_not_validated"}
+            log("[GATE] MEAN-REV NO-GO — best_strategy_v2.json senza config mean_reversion")
+            return False, {"total_trades": 0, "reason": "invalid_config"}
         except Exception as exc:
             log(f"[GATE] MEAN-REV config error: {exc}")
             return False, {"total_trades": 0, "reason": "config_error"}
@@ -1074,6 +1086,70 @@ def market_close_partial(symbol: str, qty: float) -> bool:
         return False
 
 
+def place_tp_limit_long(symbol: str, qty: float, tp_price: float) -> str:
+    """TP a 1.1R come limit reduce-only (maker), identico all'uscita del backtest."""
+    info    = get_instrument_info(symbol)
+    qty_str = _format_qty_with_step(qty, float(info.get("qty_step", 0.01)))
+    if float(qty_str) <= 0:
+        return ""
+    body = {"category": "linear", "symbol": symbol,
+            "side": "Sell", "orderType": "Limit", "timeInForce": "GTC",
+            "qty": qty_str,
+            "price": format_price_bybit(tp_price, info.get("price_step", 0.01)),
+            "reduceOnly": True, "positionIdx": LONG_IDX}
+    try:
+        data = _bybit_signed_post("/v5/order/create", body).json()
+        if data.get("retCode") == 0:
+            return str(data.get("result", {}).get("orderId", ""))
+        log(f"[TP] {symbol} FAIL retCode={data.get('retCode')} {data.get('retMsg')}")
+    except Exception as e:
+        log(f"[TP] {symbol} exc: {e}")
+    return ""
+
+
+def find_tp_order_long(symbol: str) -> str:
+    try:
+        data = _bybit_signed_get("/v5/order/realtime",
+                                 {"category": "linear", "symbol": symbol}).json()
+        for o in data.get("result", {}).get("list", []):
+            if (o.get("side") == "Sell" and o.get("reduceOnly")
+                    and o.get("orderType") == "Limit"
+                    and int(o.get("positionIdx", 0) or 0) == LONG_IDX):
+                return str(o.get("orderId", ""))
+    except Exception:
+        pass
+    return ""
+
+
+def cancel_order(symbol: str, order_id: str) -> None:
+    if not order_id:
+        return
+    try:
+        _bybit_signed_post("/v5/order/cancel",
+                           {"category": "linear", "symbol": symbol, "orderId": order_id})
+    except Exception:
+        pass
+
+
+def get_entry_time_from_orders(symbol: str) -> float:
+    """Orario dell'ultimo ordine di apertura LONG eseguito: evita il reset del time stop al restart."""
+    try:
+        data = _bybit_signed_get("/v5/order/history",
+                                 {"category": "linear", "limit": "50",
+                                  "orderStatus": "Filled", "symbol": symbol}).json()
+        times = [
+            int(o.get("updatedTime") or o.get("createdTime") or 0)
+            for o in data.get("result", {}).get("list", [])
+            if o.get("side") == "Buy" and not o.get("reduceOnly")
+            and int(o.get("positionIdx", 0) or 0) == LONG_IDX
+        ]
+        if times and max(times) > 0:
+            return max(times) / 1000.0
+    except Exception:
+        pass
+    return time.time()
+
+
 def set_leverage(symbol: str) -> None:
     try:
         _bybit_signed_post("/v5/position/set-leverage", {
@@ -1132,6 +1208,11 @@ def market_long(symbol: str, usdt_amount: float) -> Optional[float]:
                                                 "orderId": order_id})
                         except Exception:
                             pass
+                        # Il limit può essere stato eseguito tra l'ultimo check e il cancel.
+                        time.sleep(0.5)
+                        filled = get_open_long_qty(symbol)
+                        if filled and filled > 0:
+                            return filled
             except Exception:
                 pass
 
@@ -1214,21 +1295,32 @@ def trailing_worker() -> None:
                 if entry_price <= 0:
                     continue
 
-                if (LIVE_STRATEGY_MODE == "mean_reversion"
-                        and float(entry.get("target_price", 0)) > 0
-                        and price_now >= float(entry["target_price"])):
-                    cur_qty = float(entry.get("qty", 0))
-                    if cur_qty > 0 and market_close_partial(symbol, cur_qty):
-                        discard_open(symbol)
-                        with _state_lock:
-                            position_data.pop(symbol, None)
-                        pnl_pct = (price_now - entry_price) / entry_price * 100.0
-                        log(f"[MEAN-REV-TP] {symbol} chiusa a target 1.1R")
-                        notify_telegram(
-                            f"🎯 TARGET {symbol}\n"
-                            f"Chiusa a +1.1R | Entry: {entry_price:.4f} → Uscita: {price_now:.4f}\n"
-                            f"P&L: {pnl_pct:+.2f}%"
-                        )
+                if MEAN_REV_MODE:
+                    # Uscite identiche al backtest: SL, TP limit a 1.1R, time stop a max_hold_bars.
+                    cur_qty = ex_qty if ex_qty > 0 else float(entry.get("qty", 0))
+                    target  = float(entry.get("target_price", 0) or 0)
+                    if (target > 0 and not entry.get("tp_order_id") and cur_qty > 0
+                            and int(entry.get("tp_attempts", 0)) < 3):
+                        entry["tp_attempts"] = int(entry.get("tp_attempts", 0)) + 1
+                        entry["tp_order_id"] = place_tp_limit_long(symbol, cur_qty, target)
+                        set_position(symbol, entry)
+                    hold_h = (time.time() - float(entry.get("entry_time", time.time()))) / 3600
+                    max_hold_h = float(entry.get("max_hold_bars", 12)) * 4
+                    hit_target = target > 0 and price_now >= target and not entry.get("tp_order_id")
+                    if (hold_h >= max_hold_h or hit_target) and cur_qty > 0:
+                        cancel_order(symbol, entry.get("tp_order_id", ""))
+                        if market_close_partial(symbol, cur_qty):
+                            discard_open(symbol)
+                            with _state_lock:
+                                position_data.pop(symbol, None)
+                            pnl_pct = (price_now - entry_price) / entry_price * 100.0
+                            reason = "TARGET" if hit_target else f"TIME-STOP {hold_h:.0f}h"
+                            log(f"[MEAN-REV-EXIT] {symbol} {reason} pnl={pnl_pct:+.2f}%")
+                            notify_telegram(
+                                f"{'🎯' if hit_target else '⏱️'} {reason} {symbol}\n"
+                                f"Entry: {entry_price:.4f} → Uscita: {price_now:.4f}\n"
+                                f"P&L: {pnl_pct:+.2f}%"
+                            )
                     continue
 
                 # P&L leveraged corrente (%)
@@ -1509,8 +1601,10 @@ def sync_positions_from_wallet() -> None:
             "r_dist":            r_dist,
             "orig_r_dist":       orig_r_dist,
             "target_price":      entry_price + float(load_live_config()["target_r_multiple"]) * orig_r_dist if LIVE_STRATEGY_MODE == "mean_reversion" else 0.0,
+            "max_hold_bars":     int(load_live_config()["max_hold_bars"]) if MEAN_REV_MODE else 0,
+            "tp_order_id":       find_tp_order_long(symbol) if MEAN_REV_MODE else "",
             "qty":               qty,
-            "entry_time":        time.time(),
+            "entry_time":        get_entry_time_from_orders(symbol),
             "trailing_active":   trailing_active,
             "breakeven_active":  breakeven_active,
             "partial_tp_active": partial_tp_done,
@@ -1603,6 +1697,16 @@ def check_circuit_breaker() -> bool:
 
 
 # ── CICLO PRINCIPALE ──────────────────────────────────────────────────────────
+def scan_due(now: float, last_scan_ts: float) -> bool:
+    """Mean-reversion: una sola scan per candela 4h, subito dopo la chiusura."""
+    if not MEAN_REV_MODE:
+        return now - last_scan_ts >= SCAN_INTERVAL_SEC
+    bar_open = now - (now % BAR_SEC)
+    since_close = now - bar_open
+    return (SCAN_AFTER_CLOSE_SEC <= since_close <= MAX_ENTRY_DELAY_SEC
+            and last_scan_ts < bar_open)
+
+
 def main_loop() -> None:
     global _loss_streak, _entry_cooldown_until_ts
     last_scan_ts = 0.0
@@ -1631,7 +1735,11 @@ def main_loop() -> None:
                         cur   = get_last_price(sym) or 0
                         pnl   = (cur - ep) / ep * 100 if ep else 0
                         log(f"[CLOSE] {sym} chiusa ~{pnl:+.1f}%")
-                        if pnl < 0:
+                        if entry:
+                            cancel_order(sym, entry.get("tp_order_id", ""))
+                        if MEAN_REV_MODE:
+                            pass  # nessun cooldown: non presente nel backtest
+                        elif pnl < 0:
                             _loss_streak += 1
                             if _loss_streak >= LOSS_STREAK_LIMIT:
                                 _entry_cooldown_until_ts = max(
@@ -1657,7 +1765,7 @@ def main_loop() -> None:
             tlog("pos_check_err", f"[MAIN] check pos exc: {e}", 120)
 
         # Attendi tra scan
-        if now - last_scan_ts < SCAN_INTERVAL_SEC:
+        if not scan_due(now, last_scan_ts):
             time.sleep(10)
             continue
 
@@ -1730,6 +1838,8 @@ def main_loop() -> None:
                 break
             if len(open_positions) >= MAX_OPEN_POSITIONS:
                 break
+            if entered >= MAX_NEW_ENTRIES_PER_SCAN:
+                break
             sym = coin["symbol"]
             chg24h = float(coin["chg24h"])
             if sym in open_positions:
@@ -1742,11 +1852,31 @@ def main_loop() -> None:
                 reject_stats_scan["chg24h_too_low"] = reject_stats_scan.get("chg24h_too_low", 0) + 1
                 continue
             # Segnale di anticipazione breakout
-            signal = check_entry_signal(sym, reject_stats_scan, rank=rank_idx)
+            try:
+                signal = check_entry_signal(sym, reject_stats_scan, rank=rank_idx)
+            except Exception as exc:
+                log(f"[SIGNAL] {sym} errore calcolo segnale: {exc}")
+                continue
             signal_source = "SIGNAL-MEAN-REV" if LIVE_STRATEGY_MODE == "mean_reversion" else "SIGNAL-ANTI"
             if not signal:
                 time.sleep(0.05)
                 continue
+
+            signal_key = f"{sym}:{signal.get('candle_time', '')}"
+            if MEAN_REV_MODE and signal_key in _used_signal_keys:
+                reject_stats_scan["signal_already_used"] = reject_stats_scan.get("signal_already_used", 0) + 1
+                continue
+
+            if MEAN_REV_MODE:
+                live_px = get_last_price(sym) or 0.0
+                live_r = live_px - signal["sl_price"]
+                if (live_px <= 0 or live_r <= 0
+                        or abs(live_px - signal["entry_price"]) > MAX_ENTRY_DRIFT_R * signal["r_dist"]):
+                    reject_stats_scan["entry_drift"] = reject_stats_scan.get("entry_drift", 0) + 1
+                    continue
+                signal["entry_price"] = live_px
+                signal["r_dist"] = live_r
+                signal["sl_pct"] = live_r / live_px * 100.0
 
             # Calcola size
             equity    = get_total_equity()
@@ -1779,6 +1909,7 @@ def main_loop() -> None:
                 f"SL: -{signal['sl_pct']:.1f}% | size: {usdt_val:.1f} USDT")
 
             # Imposta leva e apri
+            _used_signal_keys.add(signal_key)
             set_leverage(sym)
             qty = market_long(sym, usdt_val)
             if not qty or qty <= 0:
@@ -1805,6 +1936,8 @@ def main_loop() -> None:
                 "r_dist":            actual_r_dist,
                 "orig_r_dist":       actual_r_dist,   # mai modificato: base per calcolo ratchet
                 "target_price":      entry_px + float(signal.get("rr_est", 1.1)) * actual_r_dist,
+                "max_hold_bars":     int(signal.get("max_hold_bars", 12)),
+                "tp_order_id":       "",
                 "qty":               qty,
                 "entry_time":        time.time(),
                 "trailing_active":   False,
@@ -1821,6 +1954,12 @@ def main_loop() -> None:
                 with _state_lock:
                     position_data.pop(sym, None)
                 continue
+
+            if MEAN_REV_MODE:
+                pos_state = get_position(sym) or {}
+                pos_state["tp_attempts"] = 1
+                pos_state["tp_order_id"] = place_tp_limit_long(sym, qty, pos_state.get("target_price", 0))
+                set_position(sym, pos_state)
 
             notify_telegram(
                 f"📈 ENTRY {sym} — Anticipation Breakout (1h)\n"

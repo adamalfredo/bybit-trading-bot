@@ -122,6 +122,10 @@ def iter_walkforward_slices(length: int) -> list[tuple[int, int, int]]:
 def evaluate_config(symbol_data: dict[str, pd.DataFrame], config: dict[str, float | int]) -> dict:
     train_trades: list[float] = []
     test_trades: list[float] = []
+    train_long_trades: list[float] = []
+    train_short_trades: list[float] = []
+    test_long_trades: list[float] = []
+    test_short_trades: list[float] = []
     symbol_rows: list[dict] = []
     family_runners = {
         "pullback": (backtest_simple_long, backtest_simple_short),
@@ -136,6 +140,8 @@ def evaluate_config(symbol_data: dict[str, pd.DataFrame], config: dict[str, floa
             continue
 
         symbol_train_trades: list[float] = []
+        symbol_train_long_trades: list[float] = []
+        symbol_train_short_trades: list[float] = []
         symbol_test_long_trades: list[float] = []
         symbol_test_short_trades: list[float] = []
 
@@ -181,12 +187,18 @@ def evaluate_config(symbol_data: dict[str, pd.DataFrame], config: dict[str, floa
             )
             symbol_train_trades.extend(train_long_result["trades"])
             symbol_train_trades.extend(train_short_result["trades"])
+            symbol_train_long_trades.extend(train_long_result["trades"])
+            symbol_train_short_trades.extend(train_short_result["trades"])
             symbol_test_long_trades.extend(test_long_result["trades"])
             symbol_test_short_trades.extend(test_short_result["trades"])
 
         train_trades.extend(symbol_train_trades)
         test_trades.extend(symbol_test_long_trades)
         test_trades.extend(symbol_test_short_trades)
+        train_long_trades.extend(symbol_train_long_trades)
+        train_short_trades.extend(symbol_train_short_trades)
+        test_long_trades.extend(symbol_test_long_trades)
+        test_short_trades.extend(symbol_test_short_trades)
         long_test_metrics = compute_trade_metrics(symbol_test_long_trades)
         short_test_metrics = compute_trade_metrics(symbol_test_short_trades)
         combined_test_metrics = compute_trade_metrics(symbol_test_long_trades + symbol_test_short_trades)
@@ -205,12 +217,20 @@ def evaluate_config(symbol_data: dict[str, pd.DataFrame], config: dict[str, floa
 
     train_gate, train_metrics = should_allow_live_trading(train_trades, min_trades=VALIDATION_MIN_TRADES)
     test_gate, test_metrics = should_allow_live_trading(test_trades, min_trades=VALIDATION_MIN_TRADES)
+    train_long_gate, train_long_metrics = should_allow_live_trading(train_long_trades, min_trades=VALIDATION_MIN_TRADES)
+    train_short_gate, train_short_metrics = should_allow_live_trading(train_short_trades, min_trades=VALIDATION_MIN_TRADES)
+    test_long_gate, test_long_metrics = should_allow_live_trading(test_long_trades, min_trades=VALIDATION_MIN_TRADES)
+    test_short_gate, test_short_metrics = should_allow_live_trading(test_short_trades, min_trades=VALIDATION_MIN_TRADES)
     return {
         "config": config,
         "train_gate": train_gate,
         "test_gate": test_gate,
         "train_metrics": train_metrics,
         "test_metrics": test_metrics,
+        "direction_metrics": {
+            "long": {"train_gate": train_long_gate, "test_gate": test_long_gate, "train": train_long_metrics, "test": test_long_metrics},
+            "short": {"train_gate": train_short_gate, "test_gate": test_short_gate, "train": train_short_metrics, "test": test_short_metrics},
+        },
         "per_symbol": symbol_rows,
     }
 

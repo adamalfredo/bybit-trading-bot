@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -10,7 +11,7 @@ from live_mean_reversion import get_mean_reversion_signal, load_live_config
 from validate_strategy_v2 import fetch_klines
 
 CONFIG_PATH = Path(__file__).with_name("best_strategy_v2.json")
-STATE_PATH = Path(__file__).with_name("long_shadow_state.json")
+STATE_PATH = Path(os.getenv("SHADOW_STATE_DIR", str(Path(__file__).parent))) / "long_shadow_state.json"
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "LINKUSDT", "AVAXUSDT",
     "ATOMUSDT", "DOTUSDT", "NEARUSDT", "UNIUSDT", "AAVEUSDT", "INJUSDT", "ZECUSDT", "SUIUSDT"
@@ -19,12 +20,18 @@ SYMBOLS = [
 
 def load_state() -> dict:
     if STATE_PATH.exists():
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
-    return {"signals": [], "updated_utc": None, "scan_count": 0}
+        state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        if state.get("schema_version") != 2:
+            state["legacy_signals"] = state.pop("signals", [])
+            state["signals"] = []
+            state["schema_version"] = 2
+        return state
+    return {"schema_version": 2, "signals": [], "updated_utc": None, "scan_count": 0}
 
 
 def save_state(state: dict) -> None:
     state["updated_utc"] = datetime.now(timezone.utc).isoformat()
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
@@ -39,39 +46,51 @@ def scan_once(state: dict) -> None:
         scanned_symbols.append(symbol)
         print(f"LONG shadow scan #{state['scan_count']} symbol={symbol}", flush=True)
 
+        candles = fetch_klines(symbol, "240", 120)
+        if candles is None or len(candles) < 2:
+            continue
+        closed_bar = candles.iloc[-2]
+        closed_time = str(closed_bar["ts"])
         for item in state["signals"]:
             if item["status"] != "shadow_open" or item["symbol"] != symbol:
                 continue
-            latest = float(fetch_klines(symbol, "240", 20)["Close"].iloc[-1]) if fetch_klines(symbol, "240", 20) is not None else float(item["entry"])
-            if latest <= item["stop"]:
+            if closed_time <= item.get("last_bar_time", closed_time):
+                item["last_bar_time"] = closed_time
+                continue
+            item["last_bar_time"] = closed_time
+            item["bars_open"] += 1
+            latest = float(closed_bar["Close"])
+            if float(closed_bar["Low"]) <= item["stop"]:
                 item["status"] = "stopped"
                 item["exit"] = item["stop"]
-                item["pnl_pct"] = (item["stop"] - item["entry"]) / item["entry"] * 100.0
-            elif latest >= item["target"]:
+            elif float(closed_bar["High"]) >= item["target"]:
                 item["status"] = "target"
                 item["exit"] = item["target"]
-                item["pnl_pct"] = (item["target"] - item["entry"]) / item["entry"] * 100.0
-            elif item["bars_open"] >= int(config.get("max_hold_bars", 12)):
+            elif item["bars_open"] >= int(config["max_hold_bars"]):
                 item["status"] = "time_stop"
                 item["exit"] = latest
-                item["pnl_pct"] = (latest - item["entry"]) / item["entry"] * 100.0
-            item["bars_open"] += 1
+            if item["status"] != "shadow_open":
+                item["pnl_pct"] = (item["exit"] - item["entry"]) / item["entry"] * 100.0 - 0.11
 
         signal = get_mean_reversion_signal(symbol, "long", fetch_klines, config)
         if not signal:
             continue
 
-        signal_id = f"{symbol}:{datetime.now(timezone.utc).strftime('%Y%m%d%H%M')}"
+        signal_id = f"{symbol}:{signal['candle_time']}"
         if any(item["id"] == signal_id for item in state["signals"]):
             continue
 
-        entry = float(signal["entry_price"])
+        entry = float(candles["Close"].iloc[-1])
         stop = float(signal["sl_price"])
-        target = float(signal["tp_est"])
+        if entry <= stop:
+            continue
+        target = entry + float(config["target_r_multiple"]) * (entry - stop)
         state["signals"].append({
             "id": signal_id,
             "symbol": symbol,
             "signal_utc": datetime.now(timezone.utc).isoformat(),
+            "candle_time": signal["candle_time"],
+            "last_bar_time": closed_time,
             "entry": entry,
             "stop": stop,
             "target": target,

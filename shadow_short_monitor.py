@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -13,18 +14,24 @@ from strategy_v2 import atr, ema
 from validate_strategy_v2 import attach_daily_regime, fetch_klines
 
 CONFIG_PATH = Path(__file__).with_name("short_shadow_config.json")
-STATE_PATH = Path(__file__).with_name("short_shadow_state.json")
+STATE_PATH = Path(os.getenv("SHADOW_STATE_DIR", str(Path(__file__).parent))) / "short_shadow_state.json"
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "LINKUSDT", "AVAXUSDT", "ATOMUSDT", "DOTUSDT", "NEARUSDT", "UNIUSDT", "AAVEUSDT", "INJUSDT", "ZECUSDT", "SUIUSDT"]
 
 
 def load_state() -> dict:
     if STATE_PATH.exists():
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
-    return {"signals": [], "updated_utc": None, "scan_count": 0}
+        state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        if state.get("schema_version") != 2:
+            state["legacy_signals"] = state.pop("signals", [])
+            state["signals"] = []
+            state["schema_version"] = 2
+        return state
+    return {"schema_version": 2, "signals": [], "updated_utc": None, "scan_count": 0}
 
 
 def save_state(state: dict) -> None:
     state["updated_utc"] = datetime.now(timezone.utc).isoformat()
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
@@ -39,44 +46,50 @@ def scan_once(state: dict) -> None:
         print(f"SHORT shadow scan #{state['scan_count']} symbol={symbol}", flush=True)
         data = attach_daily_regime(fetch_klines(symbol, "240", 120), fetch_klines(symbol, "D", 100))
         prepared = features(data)
+        index = len(prepared) - 2
+        closed_time = str(prepared["ts"].iloc[index])
         for item in state["signals"]:
             if item["status"] != "shadow_open" or item["symbol"] != symbol:
                 continue
-            latest = float(prepared["Close"].iloc[-2])
-            latest_high = float(prepared["High"].iloc[-2])
-            latest_low = float(prepared["Low"].iloc[-2])
+            if closed_time <= item.get("last_bar_time", closed_time):
+                item["last_bar_time"] = closed_time
+                continue
+            item["last_bar_time"] = closed_time
+            item["bars_open"] += 1
+            latest = float(prepared["Close"].iloc[index])
+            latest_high = float(prepared["High"].iloc[index])
+            latest_low = float(prepared["Low"].iloc[index])
             if latest_high >= item["stop"]:
                 item["status"] = "stopped"
                 item["exit"] = item["stop"]
-                item["pnl_pct"] = (item["entry"] - item["stop"]) / item["entry"] * 100.0
             elif latest_low <= item["target"]:
                 item["status"] = "target"
                 item["exit"] = item["target"]
-                item["pnl_pct"] = (item["entry"] - item["target"]) / item["entry"] * 100.0
             elif item["bars_open"] >= config["max_hold_bars"]:
                 item["status"] = "time_stop"
                 item["exit"] = latest
-                item["pnl_pct"] = (item["entry"] - latest) / item["entry"] * 100.0
-            item["bars_open"] += 1
-        index = len(prepared) - 2
+            if item["status"] != "shadow_open":
+                item["pnl_pct"] = (item["entry"] - item["exit"]) / item["entry"] * 100.0 - 0.11
         if index < 80 or not bool(prepared["daily_short_ok"].iloc[index]):
             continue
         if not is_signal(prepared, index, "short", config):
             continue
-        signal_id = f"{symbol}:{prepared.index[index]}"
+        signal_id = f"{symbol}:{closed_time}"
         if any(item["id"] == signal_id for item in state["signals"]):
             continue
         atr_value = float(prepared["atr14"].iloc[index])
-        stop = float(prepared["High"].iloc[max(0, index - 8):index + 1].max()) + float(config["stop_atr_buffer"]) * atr_value
-        entry = float(prepared["Open"].iloc[index + 1]) if index + 1 < len(prepared) else float(prepared["Close"].iloc[index])
+        entry = float(prepared["Close"].iloc[index + 1])
         stop = float(prepared["High"].iloc[max(0, index - 8):index + 1].max()) + float(config["stop_atr_buffer"]) * atr_value
         risk = stop - entry
+        if risk <= 0:
+            continue
         target = entry - float(config["target_r_multiple"]) * risk
         state["signals"].append({
             "id": signal_id,
             "symbol": symbol,
             "signal_utc": datetime.now(timezone.utc).isoformat(),
-            "candle_time": str(prepared["ts"].iloc[index]),
+            "candle_time": closed_time,
+            "last_bar_time": closed_time,
             "entry": entry,
             "stop": stop,
             "target": target,

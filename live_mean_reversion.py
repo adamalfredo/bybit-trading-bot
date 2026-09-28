@@ -79,7 +79,10 @@ def get_mean_reversion_signal(
     previous_close = float(signals["Close"].iloc[idx - 1])
     candle_range = float(signals["High"].iloc[idx] - signals["Low"].iloc[idx])
     volume_avg = float(signals["Volume"].iloc[max(0, idx - 20):idx].mean())
+    # I bot live chiamano la colonna "timestamp", validate_strategy_v2 la chiama "ts".
+    time_col = "ts" if "ts" in candles.columns else "timestamp"
     return {
+        "candle_time": str(candles[time_col].iloc[idx]),
         "entry_price": entry_price,
         "sl_price": stop_price,
         "r_dist": r_dist,
