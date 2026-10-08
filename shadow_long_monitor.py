@@ -25,8 +25,15 @@ def load_state() -> dict:
             state["legacy_signals"] = state.pop("signals", [])
             state["signals"] = []
             state["schema_version"] = 2
+        state.setdefault("strategy_id", "mean_reversion_v2")
         return state
-    return {"schema_version": 2, "signals": [], "updated_utc": None, "scan_count": 0}
+    return {
+        "schema_version": 2,
+        "strategy_id": "mean_reversion_v2",
+        "signals": [],
+        "updated_utc": None,
+        "scan_count": 0,
+    }
 
 
 def save_state(state: dict) -> None:
@@ -41,6 +48,12 @@ def scan_once(state: dict) -> None:
     state["last_scan_started_utc"] = datetime.now(timezone.utc).isoformat()
     state["last_error"] = None
     scanned_symbols = []
+    rejection_counts = {}
+    condition_counts = {}
+    symbol_diagnostics = {}
+
+    def count(target: dict, key: str) -> None:
+        target[key] = target.get(key, 0) + 1
 
     for symbol in SYMBOLS:
         scanned_symbols.append(symbol)
@@ -72,8 +85,16 @@ def scan_once(state: dict) -> None:
             if item["status"] != "shadow_open":
                 item["pnl_pct"] = (item["exit"] - item["entry"]) / item["entry"] * 100.0 - 0.11
 
-        signal = get_mean_reversion_signal(symbol, "long", fetch_klines, config)
+        diagnostics = {}
+        signal = get_mean_reversion_signal(
+            symbol, "long", fetch_klines, config, diagnostics=diagnostics
+        )
         if not signal:
+            reason = str(diagnostics.get("reason", "signal_unavailable"))
+            count(rejection_counts, reason)
+            for condition in diagnostics.get("failed_conditions", []):
+                count(condition_counts, str(condition))
+            symbol_diagnostics[symbol] = diagnostics
             continue
 
         signal_id = f"{symbol}:{signal['candle_time']}"
@@ -83,6 +104,12 @@ def scan_once(state: dict) -> None:
         entry = float(candles["Close"].iloc[-1])
         stop = float(signal["sl_price"])
         if entry <= stop:
+            count(rejection_counts, "stop_not_below_entry")
+            symbol_diagnostics[symbol] = {"reason": "stop_not_below_entry"}
+            continue
+        if abs(entry - float(signal["entry_price"])) > 0.25 * float(signal["r_dist"]):
+            count(rejection_counts, "entry_drift_exceeded_0_25R")
+            symbol_diagnostics[symbol] = {"reason": "entry_drift_exceeded_0_25R"}
             continue
         target = entry + float(config["target_r_multiple"]) * (entry - stop)
         state["signals"].append({
@@ -101,9 +128,17 @@ def scan_once(state: dict) -> None:
 
     state["last_scan_finished_utc"] = datetime.now(timezone.utc).isoformat()
     state["last_scan_symbols"] = scanned_symbols
+    state["last_rejection_counts"] = rejection_counts
+    state["last_failed_condition_counts"] = condition_counts
+    state["last_symbol_diagnostics"] = symbol_diagnostics
     open_count = sum(1 for item in state["signals"] if item.get("status") == "shadow_open")
     closed_count = sum(1 for item in state["signals"] if item.get("status") != "shadow_open")
     print(f"LONG shadow scan #{state['scan_count']} completato: open={open_count} closed={closed_count} total={len(state['signals'])}", flush=True)
+    print(
+        f"LONG shadow rejects={json.dumps(rejection_counts, sort_keys=True)} "
+        f"failed_conditions={json.dumps(condition_counts, sort_keys=True)}",
+        flush=True,
+    )
 
 
 def print_status(state: dict) -> None:
@@ -124,6 +159,9 @@ def print_status(state: dict) -> None:
         "signals_closed": len(closed),
         "closed_profit_factor": profit_factor,
         "closed_expectancy": expectancy,
+        "strategy_id": state.get("strategy_id", "mean_reversion_v2"),
+        "last_rejection_counts": state.get("last_rejection_counts", {}),
+        "last_failed_condition_counts": state.get("last_failed_condition_counts", {}),
     }, indent=2))
 
 
