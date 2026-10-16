@@ -697,7 +697,7 @@ def get_non_crypto_symbols() -> set:
 
 
 # ── SCANSIONE UNIVERSO ────────────────────────────────────────────────────────
-def scan_universe() -> list:
+def scan_universe(*, include_open_positions: bool = False, include_blocked: bool = False) -> list:
     """
     Ritorna le top COINS_TOP_N coin per momentum ribassista 24h,
     mantenendo il filtro di liquidità (>10M USDT).
@@ -726,9 +726,9 @@ def scan_universe() -> list:
             continue
         if sym in non_crypto:
             continue
-        if sym in blocked_symbols:
+        if sym in blocked_symbols and not include_blocked:
             continue
-        if sym in open_positions:
+        if sym in open_positions and not include_open_positions:
             continue
         try:
             vol24h = float(t.get("turnover24h", 0) or 0)
@@ -2022,7 +2022,11 @@ def short_shadow_worker() -> None:
     log(f"[SHADOW-SHORT] monitor avviato su Railway | interval={SHORT_SHADOW_SCAN_INTERVAL_SEC}s | read-only")
     while True:
         try:
-            scan_once(state)
+            universe = scan_universe(include_open_positions=True, include_blocked=True)
+            symbols = [coin["symbol"] for coin in universe]
+            if not symbols:
+                raise RuntimeError("universo live SHORT vuoto; shadow scan saltata")
+            scan_once(state, symbols=symbols)
             save_state(state)
         except Exception as exc:
             state["last_error"] = str(exc)

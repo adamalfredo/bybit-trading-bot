@@ -44,7 +44,7 @@ def save_state(state: dict) -> None:
     STATE_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
-def scan_once(state: dict) -> None:
+def scan_once(state: dict, symbols: list[str] | None = None) -> None:
     config = load_live_config()
     state["scan_count"] = int(state.get("scan_count", 0)) + 1
     state["last_scan_started_utc"] = datetime.now(timezone.utc).isoformat()
@@ -57,7 +57,8 @@ def scan_once(state: dict) -> None:
     def count(target: dict, key: str) -> None:
         target[key] = target.get(key, 0) + 1
 
-    for symbol in SYMBOLS:
+    active_symbols = symbols if symbols is not None else SYMBOLS
+    for symbol in active_symbols:
         scanned_symbols.append(symbol)
         print(f"SHORT shadow scan #{state['scan_count']} symbol={symbol}", flush=True)
         candles = fetch_klines(symbol, "240", 120)
@@ -112,6 +113,10 @@ def scan_once(state: dict) -> None:
             count(rejection_counts, "signal_already_recorded")
             symbol_diagnostics[symbol] = {"reason": "signal_already_recorded"}
             continue
+        if any(item.get("symbol") == symbol and item.get("status") == "shadow_open" for item in state["signals"]):
+            count(rejection_counts, "symbol_shadow_position_already_open")
+            symbol_diagnostics[symbol] = {"reason": "symbol_shadow_position_already_open"}
+            continue
 
         stop = float(signal["sl_price"])
         risk = stop - entry
@@ -135,15 +140,28 @@ def scan_once(state: dict) -> None:
         print(f"SHADOW SIGNAL SHORT {symbol} entry={state['signals'][-1]['entry']}")
     state["last_scan_finished_utc"] = datetime.now(timezone.utc).isoformat()
     state["last_scan_symbols"] = scanned_symbols
+    state["live_universe_size"] = len(active_symbols)
     state["last_rejection_counts"] = rejection_counts
     state["last_failed_condition_counts"] = condition_counts
     state["last_symbol_diagnostics"] = symbol_diagnostics
     open_count = sum(1 for item in state["signals"] if item.get("status") == "shadow_open")
     closed_count = sum(1 for item in state["signals"] if item.get("status") != "shadow_open")
+    closed = [item for item in state["signals"] if item.get("status") != "shadow_open"]
+    pnl_values = [float(item.get("pnl_pct", 0.0)) for item in closed]
+    positive = sum(pnl for pnl in pnl_values if pnl > 0)
+    negative = -sum(pnl for pnl in pnl_values if pnl < 0)
+    metrics = {
+        "closed_count": len(closed),
+        "net_pnl_pct": sum(pnl_values),
+        "expectancy_pct": sum(pnl_values) / len(pnl_values) if pnl_values else 0.0,
+        "profit_factor": positive / negative if negative else (999.0 if positive else 0.0),
+    }
+    state["closed_shadow_metrics"] = metrics
     print(f"SHORT shadow scan #{state['scan_count']} completato: open={open_count} closed={closed_count} total={len(state['signals'])}", flush=True)
     print(
         f"SHORT shadow rejects={json.dumps(rejection_counts, sort_keys=True)} "
-        f"failed_conditions={json.dumps(condition_counts, sort_keys=True)}",
+        f"failed_conditions={json.dumps(condition_counts, sort_keys=True)} "
+        f"closed_metrics={json.dumps(metrics, sort_keys=True)}",
         flush=True,
     )
 
@@ -169,6 +187,8 @@ def print_status(state: dict) -> None:
         "strategy_id": state.get("strategy_id", STRATEGY_ID),
         "last_rejection_counts": state.get("last_rejection_counts", {}),
         "last_failed_condition_counts": state.get("last_failed_condition_counts", {}),
+        "live_universe_size": state.get("live_universe_size", 0),
+        "closed_shadow_metrics": state.get("closed_shadow_metrics", {}),
     }, indent=2))
 
 

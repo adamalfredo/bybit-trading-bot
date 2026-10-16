@@ -60,6 +60,7 @@ ORDER_USDT_MAX     = float(os.getenv("ORDER_USDT_MAX", "1000"))
 MAX_TOTAL_OPEN_RISK_PCT = float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", "0.06"))
 LIVE_STRATEGY_MODE = os.getenv("LIVE_STRATEGY_MODE", "mean_reversion").lower()
 MEAN_REV_MODE      = LIVE_STRATEGY_MODE == "mean_reversion"
+LONG_ENTRIES_ENABLED = os.getenv("LONG_ENTRIES_ENABLED", "false").lower() == "true"
 
 # Esecuzione mean-reversion allineata al backtest (entry ~ open della candela 4h successiva)
 BAR_SEC                   = 4 * 3600
@@ -659,7 +660,7 @@ def get_non_crypto_symbols() -> set:
 
 
 # ── SCANSIONE UNIVERSO ────────────────────────────────────────────────────────
-def scan_universe() -> list:
+def scan_universe(*, include_open_positions: bool = False, include_blocked: bool = False) -> list:
     """
     Ritorna le top COINS_TOP_N coin per momentum rialzista 24h,
     mantenendo il filtro di liquidità (>10M USDT).
@@ -689,9 +690,9 @@ def scan_universe() -> list:
             continue
         if sym in non_crypto:
             continue
-        if sym in blocked_symbols:
+        if sym in blocked_symbols and not include_blocked:
             continue
-        if sym in open_positions:
+        if sym in open_positions and not include_open_positions:
             continue
         try:
             vol24h = float(t.get("turnover24h", 0) or 0)
@@ -1777,6 +1778,12 @@ def main_loop() -> None:
             tlog("circuit_breaker", "🚨 Circuit breaker attivo — scan bloccata", 1800)
             continue
 
+        if not LONG_ENTRIES_ENABLED:
+            tlog("long_entries_paused",
+                 "⏸️ LONG: nuovi ingressi in pausa; gestione posizioni e shadow attivi",
+                 1800)
+            continue
+
         gate_ok, gate_metrics = evaluate_live_strategy_gate()
         if not gate_ok:
             tlog("live_gate_block",
@@ -1992,7 +1999,11 @@ def long_shadow_worker() -> None:
     log(f"[SHADOW-LONG] monitor avviato su Railway | interval={LONG_SHADOW_SCAN_INTERVAL_SEC}s | read-only")
     while True:
         try:
-            scan_once(state)
+            universe = scan_universe(include_open_positions=True, include_blocked=True)
+            symbols = [coin["symbol"] for coin in universe]
+            if not symbols:
+                raise RuntimeError("universo live LONG vuoto; shadow scan saltata")
+            scan_once(state, symbols=symbols)
             save_state(state)
         except Exception as exc:
             state["last_error"] = str(exc)
