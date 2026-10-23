@@ -229,6 +229,32 @@ def notify_telegram(msg: str) -> None:
         log(f"[TELEGRAM] err: {e}")
 
 
+def startup_status_message(equity: float) -> str:
+    if MEAN_REV_MODE:
+        config = load_live_config()
+        return (
+            "MEAN-REVERSION LONG BOT AVVIATO\n"
+            "Segnale: washout e recupero 4h + regime daily della coin\n"
+            "Regime BTC globale: disattivato\n"
+            f"Exit: SL su Bybit + TP limit reduce-only a {config['target_r_multiple']:.1f}R "
+            f"+ time-stop {config['max_hold_bars']} barre (48h); no ratchet/partial TP\n"
+            f"Nuovi ingressi: {'ATTIVI' if LONG_ENTRIES_ENABLED else 'IN PAUSA'}\n"
+            f"Scan ogni 4h | Leva {DEFAULT_LEVERAGE}x | Risk {RISK_PCT*100:.1f}%\n"
+            f"Equity: {equity:.2f} USDT"
+        )
+
+    first_trigger, first_floor = RATCHET_TABLE[0]
+    return (
+        "ANTICIPATION LONG BOT AVVIATO\n"
+        "Segnale: breakout 1h + trend daily\n"
+        f"Exit: ratchet da {first_trigger}% a +{first_floor}% leva + partial "
+        f"{PARTIAL_TP_PCT*100:.0f}% a {PARTIAL_TP_R:.1f}R\n"
+        f"Nuovi ingressi: {'ATTIVI' if LONG_ENTRIES_ENABLED else 'IN PAUSA'}\n"
+        f"Scan ogni {SCAN_INTERVAL_SEC//60}min | Leva {DEFAULT_LEVERAGE}x | Risk {RISK_PCT*100:.1f}%\n"
+        f"Equity: {equity:.2f} USDT"
+    )
+
+
 def run_startup_self_checks() -> None:
     errs = []
     if not (0 < RISK_PCT <= 0.05):
@@ -2046,33 +2072,14 @@ def long_shadow_worker() -> None:
 # ── AVVIO ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     run_startup_self_checks()
-    log("=" * 62)
-    log("  TREND FOLLOWING — 1h ANTICIPATION BREAKOUT BOT")
-    log("=" * 62)
-    log(f"  Timeframe : Daily trend + {'4h mean-reversion' if LIVE_STRATEGY_MODE == 'mean_reversion' else '1h segnale'} | Scan ogni {SCAN_INTERVAL_SEC//60}min")
-    log(f"  Filtri    : breakout base {BASE_LOOKBACK_BARS}h (adaptive p{ADAPTIVE_BASE_WIDTH_PCTL:.2f}) | "
-        f"RSI {RSI_MIN_4H}-{RSI_MAX_4H} | RVOL adaptive p{ADAPTIVE_RVOL_PCTL:.2f}")
-    log(f"  Risk      : {RISK_PCT*100:.1f}%/trade | MAX={MAX_OPEN_POSITIONS} pos | "
-        f"Leva {DEFAULT_LEVERAGE}× | Ratchet floor fissi")
-    first_trigger, first_floor = RATCHET_TABLE[0]
-    log(f"  Exits     : Ratchet(≥{first_trigger}%→+{first_floor}% ... ≥150%→+120%) + "
-        f"Partial TP {PARTIAL_TP_PCT*100:.0f}%@{PARTIAL_TP_R:.1f}R")
-    log(f"  Regime    : BTC daily EMA50 (slope+) + BTC weekly EMA200")
-    log("=" * 62)
-
     equity0 = get_total_equity()
-    log(f"[AVVIO] Equity: {equity0:.2f} USDT")
+    startup_message = startup_status_message(equity0)
+    log("=" * 62)
+    for line in startup_message.splitlines():
+        log(f"  {line}")
+    log("=" * 62)
 
-    notify_telegram(
-        f"📈 {'MEAN-REVERSION BOT AVVIATO' if LIVE_STRATEGY_MODE == 'mean_reversion' else 'ANTICIPATION BOT AVVIATO — Trend Following 1h'}\n"
-        f"Segnale: {'pullback EMA20 4h in ipervenduto' if LIVE_STRATEGY_MODE == 'mean_reversion' else 'breakout da base compressa'} + daily uptrend\n"
-        f"Regime: BTC daily EMA50 (slope+) + BTC weekly EMA200\n"
-        f"Exit: Ratchet floor fissi ≥{first_trigger}%→+{first_floor}% ... ≥150%→+120% | "
-        f"Partial 50%@{PARTIAL_TP_R:.1f}R\n"
-        f"Scan ogni {SCAN_INTERVAL_SEC//60}min | Leva {DEFAULT_LEVERAGE}× | "
-        f"Risk {RISK_PCT*100:.1f}%\n"
-        f"Equity: {equity0:.2f} USDT"
-    )
+    notify_telegram(startup_message)
 
     sync_positions_from_wallet()
     _update_btc_filter()
