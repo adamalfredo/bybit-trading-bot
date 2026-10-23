@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 import shadow_long_monitor
+import shadow_long_breakout_monitor
 import shadow_short_monitor
 
 
@@ -100,3 +101,83 @@ def test_shadow_does_not_open_overlapping_signal(monkeypatch, monitor, direction
     assert len(state["signals"]) == 1
     assert state["last_rejection_counts"] == {"symbol_shadow_position_already_open": 1}
     assert state["closed_shadow_metrics"]["closed_count"] == 0
+
+
+def test_long_breakout_shadow_archives_mean_reversion_state(monkeypatch, tmp_path):
+    state_path = tmp_path / "long_breakout_shadow_state.json"
+    legacy_signal = {"id": "BTCUSDT:mean-reversion", "status": "shadow_open"}
+    state_path.write_text(json.dumps({"schema_version": 2, "signals": [legacy_signal]}), encoding="utf-8")
+    monkeypatch.setattr(shadow_long_breakout_monitor, "STATE_PATH", state_path)
+
+    state = shadow_long_breakout_monitor.load_state()
+
+    assert state["strategy_id"] == "long_breakout_atr_trail_v1"
+    assert state["signals"] == []
+    assert state["legacy_signals"] == [legacy_signal]
+
+
+def test_long_breakout_shadow_trails_after_one_r_and_closes_next_bar(monkeypatch):
+    base_time = pd.Timestamp("2026-01-01 00:00")
+    candle_sets = []
+    for offset in range(3):
+        frame = pd.DataFrame({
+            "ts": [base_time + pd.Timedelta(hours=4 * i) for i in range(120)],
+            "Open": [100.0] * 120,
+            "High": [101.0] * 120,
+            "Low": [99.0] * 120,
+            "Close": [100.0] * 120,
+            "Volume": [1000.0] * 120,
+        })
+        frame["ts"] += pd.Timedelta(hours=4 * offset)
+        candle_sets.append(frame)
+    candle_sets[1].loc[118, ["High", "Close"]] = [104.0, 103.0]
+    candle_sets[2].loc[118, ["Open", "High", "Low", "Close"]] = [103.0, 104.0, 101.5, 102.5]
+    daily = pd.DataFrame({
+        "ts": pd.date_range("2025-10-01", periods=80, freq="D"),
+        "Open": [100.0] * 80,
+        "High": [102.0 + i for i in range(80)],
+        "Low": [99.0 + i for i in range(80)],
+        "Close": [100.0 + i for i in range(80)],
+        "Volume": [1000.0] * 80,
+    })
+    scan_index = 0
+
+    def fetch(_symbol, interval, _limit):
+        nonlocal scan_index
+        if interval == "D":
+            return daily
+        result = candle_sets[min(scan_index, 2)]
+        scan_index += 1
+        return result
+
+    signal_calls = 0
+
+    def signal_builder(data, direction, strategy_name, rsi_min, rsi_max):
+        nonlocal signal_calls
+        result = data.copy()
+        result["atr14"] = 1.0
+        result["rsi14"] = 60.0
+        result["breakout_high20"] = 99.0
+        result["signal"] = False
+        if signal_calls == 0:
+            result.loc[len(result) - 2, "signal"] = True
+        signal_calls += 1
+        return result
+
+    monkeypatch.setattr(shadow_long_breakout_monitor, "fetch_klines", fetch)
+    monkeypatch.setattr(shadow_long_breakout_monitor, "build_signal_frame", signal_builder)
+    state = {"signals": [], "scan_count": 0}
+
+    shadow_long_breakout_monitor.scan_once(state, ["BTCUSDT"])
+    assert len(state["signals"]) == 1
+    assert state["signals"][0]["status"] == "shadow_open"
+
+    shadow_long_breakout_monitor.scan_once(state, ["BTCUSDT"])
+    assert state["signals"][0]["stop"] == pytest.approx(102.0)
+    assert state["signals"][0]["status"] == "shadow_open"
+
+    shadow_long_breakout_monitor.scan_once(state, ["BTCUSDT"])
+    signal = state["signals"][0]
+    assert signal["status"] == "stopped"
+    assert signal["exit"] == pytest.approx(102.0)
+    assert signal["pnl_pct"] == pytest.approx(1.89)

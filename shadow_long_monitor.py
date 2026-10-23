@@ -12,6 +12,7 @@ from validate_strategy_v2 import fetch_klines
 
 CONFIG_PATH = Path(__file__).with_name("best_strategy_v2.json")
 STATE_PATH = Path(os.getenv("SHADOW_STATE_DIR", str(Path(__file__).parent))) / "long_shadow_state.json"
+STRATEGY_ID = "mean_reversion_v2_diagnostics"
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "LINKUSDT", "AVAXUSDT",
     "ATOMUSDT", "DOTUSDT", "NEARUSDT", "UNIUSDT", "AAVEUSDT", "INJUSDT", "ZECUSDT", "SUIUSDT"
@@ -21,16 +22,21 @@ SYMBOLS = [
 def load_state() -> dict:
     if STATE_PATH.exists():
         state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-        if state.get("schema_version") != 2:
-            state["legacy_signals"] = state.pop("signals", [])
+        if state.get("strategy_id") != STRATEGY_ID:
+            old_signals = state.get("signals", [])
+            archived = state.get("legacy_signals", [])
+            state["legacy_signals"] = (archived + old_signals)[-2000:]
             state["signals"] = []
-            state["schema_version"] = 2
-        state.setdefault("strategy_id", "mean_reversion_v2")
+        state["schema_version"] = 3
+        state["strategy_id"] = STRATEGY_ID
+        state.setdefault("signals", [])
+        state.setdefault("scan_count", 0)
         return state
     return {
-        "schema_version": 2,
-        "strategy_id": "mean_reversion_v2",
+        "schema_version": 3,
+        "strategy_id": STRATEGY_ID,
         "signals": [],
+        "legacy_signals": [],
         "updated_utc": None,
         "scan_count": 0,
     }

@@ -1995,20 +1995,51 @@ def long_shadow_worker() -> None:
         log(f"[SHADOW-LONG] import fallito: {exc}")
         return
 
+    try:
+        from shadow_long_breakout_monitor import (
+            load_state as load_breakout_state,
+            save_state as save_breakout_state,
+            scan_once as scan_breakout_once,
+        )
+    except Exception as exc:
+        log(f"[SHADOW-LONG-BREAKOUT] import fallito: {exc}")
+        load_breakout_state = save_breakout_state = scan_breakout_once = None
+
     state = load_state()
-    log(f"[SHADOW-LONG] monitor avviato su Railway | interval={LONG_SHADOW_SCAN_INTERVAL_SEC}s | read-only")
+    breakout_state = load_breakout_state() if load_breakout_state else None
+    log(f"[SHADOW-LONG] mean-reversion + breakout ATR read-only | interval={LONG_SHADOW_SCAN_INTERVAL_SEC}s")
     while True:
+        symbols = []
         try:
             universe = scan_universe(include_open_positions=True, include_blocked=True)
             symbols = [coin["symbol"] for coin in universe]
             if not symbols:
                 raise RuntimeError("universo live LONG vuoto; shadow scan saltata")
-            scan_once(state, symbols=symbols)
-            save_state(state)
         except Exception as exc:
             state["last_error"] = str(exc)
+            log(f"[SHADOW-LONG] errore universo: {exc}")
+
+        if symbols:
+            try:
+                scan_once(state, symbols=symbols)
+            except Exception as exc:
+                state["last_error"] = str(exc)
+                log(f"[SHADOW-LONG] errore scan: {exc}")
+            finally:
+                save_state(state)
+        else:
             save_state(state)
-            log(f"[SHADOW-LONG] errore scan: {exc}")
+
+        if scan_breakout_once and breakout_state is not None and symbols:
+            try:
+                scan_breakout_once(breakout_state, symbols=symbols)
+            except Exception as exc:
+                breakout_state["last_error"] = str(exc)
+                log(f"[SHADOW-LONG-BREAKOUT] errore scan: {exc}")
+            finally:
+                save_breakout_state(breakout_state)
+        elif breakout_state is not None and save_breakout_state:
+            save_breakout_state(breakout_state)
         time.sleep(LONG_SHADOW_SCAN_INTERVAL_SEC)
 
 
