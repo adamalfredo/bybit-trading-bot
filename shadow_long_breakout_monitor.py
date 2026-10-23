@@ -21,6 +21,7 @@ TRAIL_TRIGGER_R = 1.0
 TRAIL_ATR_MULTIPLE = 2.0
 MAX_HOLD_BARS = 24
 ROUND_TRIP_COST_PCT = 0.11
+MAX_ENTRY_DRIFT_R = 0.25
 
 
 def load_state() -> dict:
@@ -157,8 +158,12 @@ def scan_once(state: dict, symbols: list[str]) -> None:
         stop = float(data["Low"].iloc[max(0, index - STOP_LOOKBACK + 1):index + 1].min()) - STOP_ATR_BUFFER * atr_value
         initial_risk = entry - stop
         signal_close = float(data["Close"].iloc[index])
-        if initial_risk <= 0:
+        signal_risk = signal_close - stop
+        if initial_risk <= 0 or signal_risk <= 0:
             reject(symbol, "stop_not_below_entry")
+            continue
+        if abs(entry - signal_close) > MAX_ENTRY_DRIFT_R * signal_risk:
+            reject(symbol, "entry_drift_exceeded_0_25R")
             continue
         if abs(entry - signal_close) > 0.25 * initial_risk:
             reject(symbol, "entry_drift_exceeded_0_25R")

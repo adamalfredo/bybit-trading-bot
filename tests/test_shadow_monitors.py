@@ -181,3 +181,43 @@ def test_long_breakout_shadow_trails_after_one_r_and_closes_next_bar(monkeypatch
     assert signal["status"] == "stopped"
     assert signal["exit"] == pytest.approx(102.0)
     assert signal["pnl_pct"] == pytest.approx(1.89)
+
+
+def test_long_breakout_shadow_rejects_entry_drift_over_quarter_r(monkeypatch):
+    candles = pd.DataFrame({
+        "ts": [pd.Timestamp("2026-01-01") + pd.Timedelta(hours=4 * i) for i in range(120)],
+        "Open": [100.0] * 120,
+        "High": [101.0] * 120,
+        "Low": [99.0] * 120,
+        "Close": [100.0] * 119 + [110.0],
+        "Volume": [1000.0] * 120,
+    })
+    daily = pd.DataFrame({
+        "ts": pd.date_range("2025-10-01", periods=80, freq="D"),
+        "Open": [100.0] * 80,
+        "High": [102.0 + i for i in range(80)],
+        "Low": [99.0 + i for i in range(80)],
+        "Close": [100.0 + i for i in range(80)],
+        "Volume": [1000.0] * 80,
+    })
+
+    def fetch(_symbol, interval, _limit):
+        return daily if interval == "D" else candles
+
+    def signals(data, **kwargs):
+        result = data.copy()
+        result["atr14"] = 1.0
+        result["rsi14"] = 60.0
+        result["breakout_high20"] = 99.0
+        result["signal"] = False
+        result.loc[len(result) - 2, "signal"] = True
+        return result
+
+    monkeypatch.setattr(shadow_long_breakout_monitor, "fetch_klines", fetch)
+    monkeypatch.setattr(shadow_long_breakout_monitor, "build_signal_frame", signals)
+    state = {"signals": [], "scan_count": 0}
+
+    shadow_long_breakout_monitor.scan_once(state, ["BTCUSDT"])
+
+    assert state["signals"] == []
+    assert state["last_rejection_counts"] == {"entry_drift_exceeded_0_25R": 1}
