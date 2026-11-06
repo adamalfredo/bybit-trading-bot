@@ -5,6 +5,7 @@ import pytest
 
 import shadow_long_monitor
 import shadow_long_breakout_monitor
+import shadow_long_trend_continuation
 import shadow_short_monitor
 
 
@@ -221,3 +222,86 @@ def test_long_breakout_shadow_rejects_entry_drift_over_quarter_r(monkeypatch):
 
     assert state["signals"] == []
     assert state["last_rejection_counts"] == {"entry_drift_exceeded_0_25R": 1}
+
+
+def test_long_trend_continuation_signal_uses_previous_close():
+    features = pd.DataFrame({
+        "Open": [99.0] * 110,
+        "High": [101.0] * 110,
+        "Low": [98.0] * 110,
+        "Close": [99.0] * 110,
+        "Volume": [2000.0] * 110,
+        "ema20": [99.0] * 110,
+        "ema50": [98.0] * 110,
+        "ema100": [97.0] * 110,
+        "ema20_slope5": [0.5] * 110,
+        "ema50_slope10": [0.5] * 110,
+        "atr14": [1.0] * 110,
+        "rsi14": [60.0] * 110,
+        "vol_mean20": [1000.0] * 110,
+        "trend_strength": [1.0] * 110,
+    })
+    features.loc[108, "Close"] = 99.0
+    features.loc[109, ["Close", "Open"]] = [100.0, 99.0]
+
+    assert shadow_long_trend_continuation._signal(features, 109)
+
+    features.loc[108, "Close"] = 100.0
+    assert not shadow_long_trend_continuation._signal(features, 109)
+
+
+def test_long_trend_continuation_shadow_records_and_closes_target(monkeypatch):
+    base_time = pd.Timestamp("2026-01-01 00:00")
+    candles = []
+    for offset in range(2):
+        frame = pd.DataFrame({
+            "ts": [base_time + pd.Timedelta(hours=4 * (i + offset)) for i in range(120)],
+            "Open": [100.0] * 120,
+            "High": [101.0] * 120,
+            "Low": [99.0] * 120,
+            "Close": [100.0] * 120,
+            "Volume": [1000.0] * 120,
+        })
+        candles.append(frame)
+    candles[1].loc[118, ["High", "Close"]] = [103.0, 102.9]
+    fetch_index = 0
+
+    def fetch(_symbol, interval, _limit):
+        nonlocal fetch_index
+        if interval == "D":
+            return pd.DataFrame()
+        result = candles[min(fetch_index, 1)]
+        fetch_index += 1
+        return result
+
+    signal_calls = 0
+
+    def signal(_features, _index):
+        nonlocal signal_calls
+        signal_calls += 1
+        return signal_calls == 1
+
+    monkeypatch.setattr(shadow_long_trend_continuation, "fetch_klines", fetch)
+    monkeypatch.setattr(
+        shadow_long_trend_continuation,
+        "attach_daily_regime",
+        lambda data, _daily: data.assign(daily_long_ok=True),
+    )
+    monkeypatch.setattr(
+        shadow_long_trend_continuation,
+        "_build_features",
+        lambda data: data.assign(atr14=1.0),
+    )
+    monkeypatch.setattr(shadow_long_trend_continuation, "_signal", signal)
+    state = {"signals": [], "scan_count": 0}
+
+    shadow_long_trend_continuation.scan_once(state, ["BTCUSDT"])
+    assert state["signals"][0]["status"] == "shadow_open"
+    assert state["signals"][0]["entry"] == 100.0
+
+    shadow_long_trend_continuation.scan_once(state, ["BTCUSDT"])
+
+    closed = state["signals"][0]
+    assert closed["status"] == "target"
+    assert closed["exit"] == pytest.approx(102.66)
+    assert closed["pnl_pct"] == pytest.approx(2.55)

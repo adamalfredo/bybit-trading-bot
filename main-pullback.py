@@ -2031,9 +2031,20 @@ def long_shadow_worker() -> None:
         log(f"[SHADOW-LONG-BREAKOUT] import fallito: {exc}")
         load_breakout_state = save_breakout_state = scan_breakout_once = None
 
+    try:
+        from shadow_long_trend_continuation import (
+            load_state as load_trend_state,
+            save_state as save_trend_state,
+            scan_once as scan_trend_once,
+        )
+    except Exception as exc:
+        log(f"[SHADOW-LONG-TREND] import fallito: {exc}")
+        load_trend_state = save_trend_state = scan_trend_once = None
+
     state = load_state()
     breakout_state = load_breakout_state() if load_breakout_state else None
-    log(f"[SHADOW-LONG] mean-reversion + breakout ATR read-only | interval={LONG_SHADOW_SCAN_INTERVAL_SEC}s")
+    trend_state = load_trend_state() if load_trend_state else None
+    log(f"[SHADOW-LONG] mean-reversion + breakout ATR + trend continuation read-only | interval={LONG_SHADOW_SCAN_INTERVAL_SEC}s")
     while True:
         symbols = []
         try:
@@ -2066,6 +2077,17 @@ def long_shadow_worker() -> None:
                 save_breakout_state(breakout_state)
         elif breakout_state is not None and save_breakout_state:
             save_breakout_state(breakout_state)
+
+        if scan_trend_once and trend_state is not None and symbols:
+            try:
+                scan_trend_once(trend_state, symbols=symbols)
+            except Exception as exc:
+                trend_state["last_error"] = str(exc)
+                log(f"[SHADOW-LONG-TREND] errore scan: {exc}")
+            finally:
+                save_trend_state(trend_state)
+        elif trend_state is not None and save_trend_state:
+            save_trend_state(trend_state)
         time.sleep(LONG_SHADOW_SCAN_INTERVAL_SEC)
 
 
