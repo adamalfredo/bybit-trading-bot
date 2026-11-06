@@ -482,8 +482,13 @@ def get_usdt_balance() -> float:
                                  {"accountType": BYBIT_ACCOUNT_TYPE})
         data = resp.json()
         if data.get("retCode") != 0:
+            log(f"[BALANCE] wallet-balance API error retCode={data.get('retCode')} retMsg={data.get('retMsg')}")
             return 0.0
-        acct = data.get("result", {}).get("list", [{}])[0]
+        accounts = data.get("result", {}).get("list", [])
+        if not accounts:
+            log("[BALANCE] wallet-balance response has no account rows")
+            return 0.0
+        acct = accounts[0]
         available = acct.get("totalAvailableBalance")
         if available not in (None, ""):
             return max(float(available), 0.0)
@@ -491,8 +496,10 @@ def get_usdt_balance() -> float:
             if c.get("coin") == "USDT":
                 available = c.get("availableBalance")
                 return max(float(available), 0.0) if available not in (None, "") else 0.0
+        log(f"[BALANCE] trading balance fields missing accountType={BYBIT_ACCOUNT_TYPE}")
         return 0.0
-    except Exception:
+    except Exception as exc:
+        log(f"[BALANCE] wallet-balance exception: {type(exc).__name__}")
         return 0.0
 
 
@@ -502,8 +509,13 @@ def get_total_equity() -> float:
                                  {"accountType": BYBIT_ACCOUNT_TYPE})
         data = resp.json()
         if data.get("retCode") != 0:
+            log(f"[BALANCE] wallet-balance API error retCode={data.get('retCode')} retMsg={data.get('retMsg')}")
             return 0.0
-        acct = data.get("result", {}).get("list", [{}])[0]
+        accounts = data.get("result", {}).get("list", [])
+        if not accounts:
+            log("[BALANCE] wallet-balance response has no account rows")
+            return 0.0
+        acct = accounts[0]
         total_equity = float(acct.get("totalEquity") or 0.0)
         if total_equity > 0:
             return total_equity
@@ -512,8 +524,14 @@ def get_total_equity() -> float:
                 coin_equity = float(coin.get("equity") or 0.0)
                 if coin_equity > 0:
                     return coin_equity
-        return max(float(acct.get("totalAvailableBalance") or 0.0), 0.0)
-    except Exception:
+        total_available = max(float(acct.get("totalAvailableBalance") or 0.0), 0.0)
+        log(
+            f"[BALANCE] equity unavailable accountType={BYBIT_ACCOUNT_TYPE} "
+            f"totalEquity={acct.get('totalEquity')} totalAvailableBalance={acct.get('totalAvailableBalance')}"
+        )
+        return total_available
+    except Exception as exc:
+        log(f"[BALANCE] wallet-balance exception: {type(exc).__name__}")
         return get_usdt_balance()
 
 
