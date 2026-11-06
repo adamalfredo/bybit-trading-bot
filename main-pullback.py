@@ -481,14 +481,17 @@ def get_usdt_balance() -> float:
         resp = _bybit_signed_get("/v5/account/wallet-balance",
                                  {"accountType": BYBIT_ACCOUNT_TYPE})
         data = resp.json()
+        if data.get("retCode") != 0:
+            return 0.0
         acct = data.get("result", {}).get("list", [{}])[0]
+        available = acct.get("totalAvailableBalance")
+        if available not in (None, ""):
+            return max(float(available), 0.0)
         for c in acct.get("coin", []):
             if c.get("coin") == "USDT":
-                v = (c.get("availableToWithdraw")
-                     or c.get("availableBalance")
-                     or c.get("walletBalance") or "0")
-                return float(v)
-        return float(acct.get("totalAvailableBalance") or 0.0)
+                available = c.get("availableBalance")
+                return max(float(available), 0.0) if available not in (None, "") else 0.0
+        return 0.0
     except Exception:
         return 0.0
 
@@ -498,9 +501,18 @@ def get_total_equity() -> float:
         resp = _bybit_signed_get("/v5/account/wallet-balance",
                                  {"accountType": BYBIT_ACCOUNT_TYPE})
         data = resp.json()
+        if data.get("retCode") != 0:
+            return 0.0
         acct = data.get("result", {}).get("list", [{}])[0]
-        return float(acct.get("totalEquity")
-                     or acct.get("totalAvailableBalance") or 0.0)
+        total_equity = float(acct.get("totalEquity") or 0.0)
+        if total_equity > 0:
+            return total_equity
+        for coin in acct.get("coin", []):
+            if coin.get("coin") == "USDT":
+                coin_equity = float(coin.get("equity") or 0.0)
+                if coin_equity > 0:
+                    return coin_equity
+        return max(float(acct.get("totalAvailableBalance") or 0.0), 0.0)
     except Exception:
         return get_usdt_balance()
 
@@ -1199,6 +1211,9 @@ def market_long(symbol: str, usdt_amount: float) -> Optional[float]:
     step_dec     = Decimal(str(qty_step))
 
     avail        = get_usdt_balance()
+    if avail <= 0:
+        log(f"[ORDER] {symbol}: margine trading disponibile pari a zero")
+        return None
     max_notional = avail * DEFAULT_LEVERAGE * MARGIN_USE_PCT
     amount       = min(usdt_amount, max_notional, ORDER_USDT_MAX)
 
